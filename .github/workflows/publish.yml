@@ -32,14 +32,26 @@ jobs:
       run: |
         poetry config pypi-token.pypi ${{ secrets.PYPI_TOKEN }}
     
+    - name: Regenerate lock file if needed
+      run: |
+        set -e
+        if poetry check; then
+          echo "Dependencies are consistent"
+        else
+          echo "Regenerating lock file..."
+          poetry lock
+        fi
+    
     - name: Install dependencies
-      run: poetry install --no-dev
+      run: poetry install --only main
     
     - name: Run tests
       run: poetry run pytest
     
     - name: Build and publish
+      env:
+        POETRY_HTTP_BASIC_PYPI_USERNAME: __token__
+        POETRY_HTTP_BASIC_PYPI_PASSWORD: ${{ secrets.PYPI_TOKEN }}
       run: |
-        set -e
         poetry build
         poetry publish
