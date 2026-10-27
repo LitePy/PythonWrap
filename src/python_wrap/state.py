@@ -45,28 +45,49 @@ class _Snapshot:
                     f"revert_on_failure: {type(obj).__name__!r} has no __dict__ "
                     "(it uses __slots__?); pass attrs=[...] to name the attributes"
                 ) from None
-            names: Iterable[str] = list(current)
+            names: Iterable[str] = [n for n in current if self._wanted(n)]
         else:
             names = attrs
         for name in names:
             try:
-                value = getattr(obj, name)
+                # Classes: take the raw entry so classmethods/properties stay descriptors.
+                value = (
+                    vars(obj)[name]
+                    if isinstance(obj, type) and name in vars(obj)
+                    else getattr(obj, name)
+                )
             except AttributeError:
                 self.values[name] = _NO_VALUE
             else:
                 self.values[name] = _copy_value(value, deep)
 
+    def _wanted(self, name: str) -> bool:
+        # Classes: leave dunders (``__dict__``, ``__weakref__``, ``__module__``...) alone.
+        return not (isinstance(self.obj, type) and name.startswith("__") and name.endswith("__"))
+
     def restore(self) -> None:
+        """Put the attributes back; never raises (failures are logged)."""
         obj = self.obj
+        log = _core.get_logger(None)
         if self.attrs is None:
-            for name in [n for n in vars(obj) if n not in self.values]:
-                delattr(obj, name)
-        for name, value in self.values.items():
-            if value is _NO_VALUE:
-                with contextlib.suppress(AttributeError):
+            try:
+                extra = [n for n in vars(obj) if n not in self.values and self._wanted(n)]
+            except Exception:
+                extra = []
+            for name in extra:
+                try:
                     delattr(obj, name)
-            else:
-                setattr(obj, name, value)
+                except Exception:
+                    log.warning("revert_on_failure: could not delete %r", name, exc_info=True)
+        for name, value in self.values.items():
+            try:
+                if value is _NO_VALUE:
+                    with contextlib.suppress(AttributeError):
+                        delattr(obj, name)
+                else:
+                    setattr(obj, name, value)
+            except Exception:
+                log.warning("revert_on_failure: could not restore %r", name, exc_info=True)
 
 
 def _target_resolver(

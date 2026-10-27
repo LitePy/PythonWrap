@@ -361,3 +361,75 @@ def test_compose_combines_deprecate_and_mock_data() -> None:
 def test_compose_rejects_non_callable_arguments() -> None:
     with pytest.raises(TypeError, match="argument 1"):
         compose(lambda f: f, 42)  # type: ignore[arg-type]
+
+
+# --- deprecate on classes without their own __init__ -------------------------
+
+
+def test_deprecate_float_subclass_keeps_construction() -> None:
+    @deprecate("old")
+    class Meters(float):
+        pass
+
+    with pytest.warns(DeprecationWarning, match="old") as rec:
+        m = Meters(3.0)
+    assert m == 3.0 and isinstance(m, float)
+    assert len(rec) == 1
+
+
+def test_deprecate_namedtuple() -> None:
+    from typing import NamedTuple
+
+    @deprecate
+    class P(NamedTuple):
+        x: int
+
+    with pytest.warns(DeprecationWarning) as rec:
+        p = P(1)
+    assert p.x == 1
+    assert len(rec) == 1
+
+
+def test_deprecate_dataclass_and_regular_class() -> None:
+    import dataclasses
+
+    @deprecate
+    @dataclasses.dataclass
+    class D:
+        x: int
+
+    class Plain:
+        def __init__(self, v: int) -> None:
+            self.v = v
+
+    Plain = deprecate(Plain)
+
+    with pytest.warns(DeprecationWarning) as rec:
+        assert D(2).x == 2
+        assert Plain(3).v == 3
+    assert len(rec) == 2
+
+
+def test_deprecate_class_without_any_init_or_new() -> None:
+    @deprecate
+    class Bare:
+        pass
+
+    with pytest.warns(DeprecationWarning):
+        Bare()
+    with pytest.raises(TypeError), pytest.warns(DeprecationWarning):
+        Bare(1)  # type: ignore[call-arg]
+
+
+def test_deprecate_subclass_of_deprecated_class_warns_once() -> None:
+    @deprecate("old")
+    class Meters(float):
+        pass
+
+    class Feet(Meters):
+        pass
+
+    with pytest.warns(DeprecationWarning) as rec:
+        f = Feet(2.0)
+    assert f == 2.0
+    assert len(rec) == 1

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import inspect
 import logging
 from datetime import timedelta, timezone
@@ -336,3 +337,51 @@ def test_trace_async(caplog: pytest.LogCaptureFixture) -> None:
     assert asyncio.run(target()) == 4
     assert len(caplog.records) == 3
     assert caplog.records[0].levelno == logging.INFO
+
+
+def test_audit_survives_broken_exception_repr() -> None:
+    from python_wrap.logs import audit
+
+    class Weird(Exception):
+        def __repr__(self) -> str:
+            raise RuntimeError("repr broke")
+
+    records: list[Any] = []
+
+    @audit(sink=records.append)
+    def f() -> None:
+        raise Weird("real error")
+
+    with pytest.raises(Weird, match="real error"):
+        f()
+    assert records[0].status == "error"
+    assert "unrepresentable Weird" in records[0].error
+
+
+def test_failing_finish_hook_never_replaces_result_or_exception(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+
+    from python_wrap.logs import _instrument
+
+    def bad_finish(state: None, ok: bool, value: Any) -> None:
+        raise RuntimeError("hook broke")
+
+    @functools.partial(_instrument, start=lambda a, k: None, finish=bad_finish)
+    def ok() -> int:
+        return 5
+
+    @functools.partial(_instrument, start=lambda a, k: None, finish=bad_finish)
+    def bad() -> int:
+        raise KeyError("orig")
+
+    @functools.partial(_instrument, start=lambda a, k: None, finish=bad_finish)
+    async def aok() -> int:
+        return 6
+
+    with caplog.at_level(logging.ERROR):
+        assert ok() == 5
+        with pytest.raises(KeyError):
+            bad()
+        assert asyncio.run(aok()) == 6
+    assert sum("hook failed" in r.getMessage() for r in caplog.records) == 3
