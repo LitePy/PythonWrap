@@ -57,6 +57,12 @@ from .concurrency import (
     throttle,
     timeout,
 )
+from .config import (
+    configure,
+    configured,
+    get_config,
+    reset_config,
+)
 from .deadline import (
     Deadline,
     deadline,
@@ -195,6 +201,8 @@ __all__ = [
     "check_type",
     "circuit_breaker",
     "compose",
+    "configure",
+    "configured",
     "count_calls",
     "current_log_context",
     "current_transaction",
@@ -204,6 +212,7 @@ __all__ = [
     "enforce_types",
     "fallback",
     "gather_limit",
+    "get_config",
     "hedge",
     "invalidate",
     "limit_concurrency",
@@ -221,6 +230,7 @@ __all__ = [
     "profile",
     "race",
     "rate_limit",
+    "reset_config",
     "retry",
     "retry_after_header",
     "retry_on_exception",
