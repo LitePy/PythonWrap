@@ -206,7 +206,7 @@ def policy(
         fallback: `fallback` or `suppress`.
         cache: `memoize`, `once`, `singleflight`.
         limiter: `rate_limit`, `throttle`.
-        bulkhead: `bulkhead` or `concurrency_limit`.
+        bulkhead: a `Bulkhead` or `limit_concurrency(n)`.
         breaker: A `CircuitBreaker` or `circuit_breaker(...)`.
         retry: `retry(...)`.
         timeout: `timeout(...)`.

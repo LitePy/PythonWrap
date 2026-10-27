@@ -33,7 +33,7 @@ Outermost first:
 | `fallback` | `fallback`, `suppress` | Catches what the layers below could not fix. |
 | `cache` | `memoize`, `once`, `singleflight` | A hit skips everything below. |
 | `limiter` | `rate_limit`, `throttle` | One token per logical call, not per attempt. |
-| `bulkhead` | `bulkhead`, `concurrency_limit` | Caps concurrent logical calls. |
+| `bulkhead` | `Bulkhead`, `limit_concurrency` | Caps concurrent logical calls. |
 | `breaker` | `CircuitBreaker`, `circuit_breaker` | Counts calls whose retries were exhausted. |
 | `retry` | `retry` | Repeats everything below. |
 | `timeout` | `timeout` | A deadline per attempt. |

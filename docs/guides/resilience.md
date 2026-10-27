@@ -107,7 +107,7 @@ Servers that answer 429 or 503 often say how long to wait. Pass `delay_from` a f
 
 ```python
 from python_wrap import retry
-from python_wrap.retry import retry_after_header
+from python_wrap import retry_after_header
 
 class Response:
     def __init__(self, headers: dict[str, str]) -> None:
