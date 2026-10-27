@@ -418,7 +418,6 @@ def test_rate_limit_async_across_event_loops() -> None:
     assert sum(in_loops(8, main)) == ran.total == 25
 
 
-@pytest.mark.xfail(strict=True, reason="race: rate_limit reads the clock before taking its lock")
 def test_rate_limit_stale_clock_reading_admits_extra_call(monkeypatch: pytest.MonkeyPatch) -> None:
     """A call delayed on the limiter's lock is recorded with the time it *arrived*.
 
@@ -462,8 +461,10 @@ def test_rate_limit_stale_clock_reading_admits_extra_call(monkeypatch: pytest.Mo
 
     w = threading.Thread(target=waiter)
     w.start()
-    assert waiter_read_clock.wait(5)
-    time.sleep(0.05)  # the waiter has read t=0.0 and is blocked on the lock
+    # Before the fix the waiter read t=0.0 here, before queueing for the lock; now it
+    # reads the clock only once it holds the lock, so give it time to get blocked.
+    waiter_read_clock.wait(0.2)
+    time.sleep(0.05)  # the waiter is blocked on the lock
     now[0] = 1.0
     release_lock.set()
     holder.join(5)
@@ -537,7 +538,6 @@ def test_debounce_async_one_run_per_loop_burst() -> None:
     assert all(runs[i] == 1 for i in range(8))
 
 
-@pytest.mark.xfail(strict=True, reason="race: debounce(async).cancel() from a thread is unsafe")
 def test_debounce_async_cancel_from_another_thread() -> None:
     """``cancel()`` called outside the loop touches that loop's futures cross-thread.
 
@@ -643,7 +643,6 @@ def test_singleflight_async_across_event_loops() -> None:
 
 
 @needs_eager
-@pytest.mark.xfail(strict=True, reason="race: singleflight(async) KeyError under eager tasks")
 def test_singleflight_async_with_eager_task_factory() -> None:
     runs = AtomicCounter()
 
@@ -811,7 +810,6 @@ def test_bulkhead_sync_queue_bound() -> None:
     assert bulkhead.active == 0 and bulkhead.waiting == 0
 
 
-@pytest.mark.xfail(strict=True, reason="race: Bulkhead.release frees the slot before active -= 1")
 def test_bulkhead_active_never_exceeds_max() -> None:
     """``release()`` returns the semaphore permit before decrementing ``active``.
 

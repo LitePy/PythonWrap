@@ -243,8 +243,15 @@ class Bulkhead:
 
     def release(self) -> None:
         """Give back a slot taken with `acquire`."""
-        self._thread_semaphore.release()  # ValueError if nothing was acquired
-        self._exit(self._thread_pool)
+        # Decrement `active` before freeing the permit, so a caller that takes the slot
+        # right away never sees more than `max_concurrent` active.
+        pool = self._thread_pool
+        self._exit(pool)
+        try:
+            self._thread_semaphore.release()  # ValueError if nothing was acquired
+        except ValueError:
+            self._enter(pool)
+            raise
 
     def __enter__(self) -> Bulkhead:
         self.acquire()
