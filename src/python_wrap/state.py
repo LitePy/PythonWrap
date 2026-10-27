@@ -7,6 +7,7 @@ import contextvars
 import copy
 import functools
 import inspect
+import threading
 from collections.abc import Callable, Iterable
 from types import TracebackType
 from typing import Any, Final, ParamSpec, TypeVar, cast, overload
@@ -278,6 +279,7 @@ class Transaction:
         self._commit: list[tuple[Callable[..., Any], tuple[Any, ...], dict[str, Any]]] = []
         self._rollback: list[tuple[Callable[..., Any], tuple[Any, ...], dict[str, Any]]] = []
         self._state = "pending"
+        self._state_lock = threading.Lock()
 
     @property
     def state(self) -> str:
@@ -287,6 +289,12 @@ class Transaction:
     def _check_open(self) -> None:
         if self._state != "pending":
             raise RuntimeError(f"transaction already {self._state}")
+
+    def _complete(self, state: str) -> None:
+        """Atomically move from pending to ``state``; only one caller can succeed."""
+        with self._state_lock:
+            self._check_open()
+            self._state = state
 
     def on_rollback(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
         """Register ``fn(*args, **kwargs)`` to run if the transaction rolls back."""
@@ -311,15 +319,13 @@ class Transaction:
 
     def commit(self) -> None:
         """Mark committed and run the commit callbacks in order."""
-        self._check_open()
-        self._state = "committed"
+        self._complete("committed")
         for fn, args, kwargs in self._commit:
             self._call_sync(fn, args, kwargs)
 
     def rollback(self) -> None:
         """Mark rolled back and run the rollback callbacks in reverse order."""
-        self._check_open()
-        self._state = "rolled_back"
+        self._complete("rolled_back")
         for fn, args, kwargs in reversed(self._rollback):
             try:
                 self._call_sync(fn, args, kwargs)
@@ -328,8 +334,7 @@ class Transaction:
 
     async def acommit(self) -> None:
         """Like `commit`, awaiting async callbacks."""
-        self._check_open()
-        self._state = "committed"
+        self._complete("committed")
         for fn, args, kwargs in self._commit:
             result = fn(*args, **kwargs)
             if inspect.isawaitable(result):
@@ -337,8 +342,7 @@ class Transaction:
 
     async def arollback(self) -> None:
         """Like `rollback`, awaiting async callbacks."""
-        self._check_open()
-        self._state = "rolled_back"
+        self._complete("rolled_back")
         for fn, args, kwargs in reversed(self._rollback):
             try:
                 result = fn(*args, **kwargs)
@@ -405,8 +409,8 @@ def transactional(func: Callable[..., Any] | None = None, /, *, logger: LoggerLi
     keyword argument ``tx=``. Declare it as ``tx: Transaction = INJECTED`` (keyword-only is
     cleanest) so callers type-check without passing it; passing ``tx`` yourself raises
     ``TypeError``. Otherwise use `require_transaction` / `current_transaction` (a
-    ``ContextVar``, correct across threads and asyncio tasks). Returning normally commits, raising rolls back and
-    re-raises. Nested ``@transactional`` calls each get their own transaction. Works for
+    ``ContextVar``, correct across threads and asyncio tasks). Returning normally
+    commits, raising rolls back and re-raises. Nested ``@transactional`` calls each get their own transaction. Works for
     sync and ``async def`` functions (async callbacks are awaited).
 
     v0.1's ``transactional`` was a no-op.

@@ -223,7 +223,7 @@ async def test_fake_clock_async_sleep_yields_to_other_tasks() -> None:
         await _core.async_sleep(3)
         assert ran == ["other"]
         await task
-    assert clock.now == 1003.0
+    assert clock.now == clock.start + 3
 
 
 def test_fake_clock_fixture_is_public_clock(fake_clock: FakeClock) -> None:

@@ -978,7 +978,6 @@ def test_transactional_isolated_per_thread() -> None:
             assert committed[i] == 50
 
 
-@pytest.mark.xfail(strict=True, reason="race: Transaction.commit check-then-set is not atomic")
 def test_transaction_completes_only_once() -> None:
     """Two threads committing one transaction must run the callbacks once.
 
@@ -1162,9 +1161,6 @@ def test_override_scopes_nested_in_one_thread_while_others_read() -> None:
     assert seen <= {True, False}
 
 
-@pytest.mark.xfail(
-    strict=True, reason="race: overlapping override scopes from threads leak (documented)"
-)
 def test_override_scopes_overlapping_across_threads_restore() -> None:
     """Scopes entered A, B and exited A, B (from two threads) leave the field set.
 

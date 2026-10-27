@@ -14,10 +14,10 @@ Usage:
 from __future__ import annotations
 
 import sys
-import types
 import textwrap
 import time
 import traceback
+import types
 import warnings
 from pathlib import Path
 

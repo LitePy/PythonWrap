@@ -9,11 +9,13 @@ Enable the fixtures with ``pytest_plugins = ["python_wrap.testing"]`` in a top-l
 Nesting semantics of the override helpers
 -----------------------------------------
 Overrides are one process-wide state (tests use threads, so context variables would
-hide them from worker threads). Each scope remembers the previous value of the fields
-it changed and puts exactly those back on exit. Scopes nest correctly when they exit in
-reverse order of entry, which ``with`` blocks and decorators always do. Scopes entered
-from different threads that overlap and touch the same field are not isolated from each
-other: the last one to exit wins. Use them from the test, not from concurrent workers.
+hide them from worker threads). Each field keeps the value it had before the first
+active scope touched it, plus a stack of the values of the scopes currently active on
+it. When a scope exits, the field takes the value of the most recent scope still active,
+or its original value once none is left. So nested scopes restore correctly, and scopes
+from different threads that overlap (enter A, enter B, exit A, exit B) cannot leak a
+value: the field is back to its original value after the last one exits. While scopes
+overlap, the most recently entered one that is still active wins.
 """
 
 from __future__ import annotations
@@ -68,18 +70,45 @@ _UNSET = _Unset()
 # --------------------------------------------------------------------------- overrides
 
 
+_scope_lock = threading.Lock()
+# Per overridden field: the value before the first active scope, and the stack of
+# (scope token, value) for every scope currently active on it.
+_baseline: dict[str, Any] = {}
+_active: dict[str, list[tuple[object, Any]]] = {}
+
+
 class _Scope:
     """Context manager and decorator that applies override fields and restores them."""
 
     def __init__(self, values: dict[str, Any]) -> None:
         self._values = values
-        self._saved: list[dict[str, Any]] = []
+        self._tokens: list[object] = []
 
     def __enter__(self) -> None:
-        self._saved.append(_core.set_overrides(**self._values))
+        token = object()
+        with _scope_lock:
+            # set_overrides validates first, so a bad value leaves no bookkeeping behind.
+            previous = _core.set_overrides(**self._values)
+            for name, value in self._values.items():
+                stack = _active.setdefault(name, [])
+                if not stack:
+                    _baseline[name] = previous[name]
+                stack.append((token, value))
+        self._tokens.append(token)
 
     def __exit__(self, *exc: object) -> None:
-        _core.set_overrides(**self._saved.pop())
+        token = self._tokens.pop()
+        with _scope_lock:
+            restore: dict[str, Any] = {}
+            for name in self._values:
+                stack = _active[name]
+                stack[:] = [entry for entry in stack if entry[0] is not token]
+                if stack:
+                    restore[name] = stack[-1][1]  # a scope is still active: its value wins
+                else:
+                    restore[name] = _baseline.pop(name)
+                    del _active[name]
+            _core.set_overrides(**restore)
 
     def __call__(self, func: F) -> F:
         values = self._values
