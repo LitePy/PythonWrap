@@ -96,6 +96,7 @@ nav:
       - Caching: guides/caching.md
       - Concurrency and rate limits: guides/concurrency.md
       - Async toolkit and bulkheads: guides/async-toolkit.md
+      - Batching and hedging: guides/batching.md
       - Observability: guides/observability.md
       - Validation: guides/validation.md
       - State safety: guides/state.md
@@ -115,6 +116,8 @@ nav:
       - Concurrency: api/concurrency.md
       - Async helpers: api/aio.md
       - Bulkhead: api/bulkhead.md
+      - Batching: api/batching.md
+      - Hedging: api/hedging.md
       - Timing and profiling: api/timing.md
       - Logging and audit: api/logs.md
       - Validation: api/validation.md

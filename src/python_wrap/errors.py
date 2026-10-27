@@ -63,8 +63,18 @@ class ArgumentTypeError(PythonWrapError, TypeError):
         self.value = value
 
 
+class BatchError(PythonWrapError):
+    """A batch function broke its output contract for this caller's item.
+
+    Raised by ``batch_calls`` when the batch function returns the wrong number of
+    results, a mapping without this item's key, or something that is neither a sequence
+    nor a mapping.
+    """
+
+
 __all__ = [
     "ArgumentTypeError",
+    "BatchError",
     "BulkheadFull",
     "CircuitOpenError",
     "PythonWrapError",
