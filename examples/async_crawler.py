@@ -19,7 +19,7 @@ from python_wrap.bulkhead import Bulkhead
 
 # --- simulated network -------------------------------------------------------------
 
-LATENCY = {"fast.example": 0.002, "slow.example": 0.01, "mirror-a.example": 0.02}
+LATENCY = {"fast.example": 0.002, "slow.example": 0.01, "mirror-a.example": 0.3}
 in_flight: Counter[str] = Counter()
 peak: Counter[str] = Counter()
 

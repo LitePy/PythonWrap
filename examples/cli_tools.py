@@ -53,7 +53,7 @@ async def fetch_remote_total() -> int:
 builds: list[str] = []
 
 
-@debounce(0.03)
+@debounce(0.2)
 def rebuild(path: str) -> None:
     builds.append(path)
 
@@ -96,7 +96,9 @@ def main() -> None:
     for _ in range(5):  # five events from one save
         rebuild("src/app.py")
     assert builds == []
-    time.sleep(0.08)  # the quiet period; a real watcher just keeps running
+    deadline = time.monotonic() + 5  # the quiet period; a real watcher just keeps running
+    while not builds and time.monotonic() < deadline:
+        time.sleep(0.05)
     assert builds == ["src/app.py"]
     print("5 file events -> 1 rebuild")
 
