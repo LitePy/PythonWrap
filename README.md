@@ -2,8 +2,8 @@
 
 # python-wrap
 
-**The decorator toolkit you add to every Python project.**<br>
-Retry, cache, rate limit, time out, validate, log and more. One import, sync and async, zero dependencies.
+**The resilience and concurrency toolkit you add to every Python project.**<br>
+Retry (with `Retry-After`), circuit breaker, timeout, cache, rate limit, bulkhead, batching, async helpers, metrics and test helpers. One import, sync and async, zero dependencies.
 
 [![CI](https://github.com/LitePy/PythonWrap/actions/workflows/ci.yml/badge.svg)](https://github.com/LitePy/PythonWrap/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/python-wrap?logo=pypi&logoColor=white)](https://pypi.org/project/python-wrap/)
@@ -13,19 +13,24 @@ Retry, cache, rate limit, time out, validate, log and more. One import, sync and
 [![Typed: mypy strict](https://img.shields.io/badge/typed-mypy%20strict-2a6db2)](https://mypy.readthedocs.io/en/stable/command_line.html#cmdoption-mypy-strict)
 
 [**Documentation**](https://python-wrap.readthedocs.io) ·
+[Cookbook](https://python-wrap.readthedocs.io/en/latest/cookbook/) ·
+[Performance](https://python-wrap.readthedocs.io/en/latest/performance/) ·
 [Migration guide](https://python-wrap.readthedocs.io/en/latest/migration/) ·
 [Changelog](https://github.com/LitePy/PythonWrap/blob/main/CHANGELOG.md)
 
 </div>
 
+
 ## Why python-wrap
 
+- **One import for the things every project hand-writes.** Retry, circuit breaker, timeout, cache, rate limit, bulkhead, batching, bounded `gather`, metrics and test helpers, designed to stack and to be tested together.
+- **Resilience that behaves.** `retry` honours `Retry-After`, a time budget and cancellation; a shared `deadline()` caps a whole request; `policy(...)` stacks the protections in the right order for you.
 - **Zero dependencies.** Pure Python, nothing to audit or pin.
-- **Typed.** Every decorator preserves the wrapped signature (`ParamSpec`), so editors and mypy still see the real parameters and return type. The package ships `py.typed` and is checked with `mypy --strict`.
-- **Sync and async, one API.** The same decorator works on `def`, `async def` and methods. Async wrappers stay coroutine functions and never block the event loop.
-- **Never configures your logging.** Importing python-wrap does not touch the root logger. Anything that logs takes `logger=` and `level=`; the package logger only has a `NullHandler`.
-- **Thread-safe.** Caches, limiters, breakers and transactions are guarded for concurrent use.
-- **Tested on Python 3.10 to 3.14, on Linux, macOS and Windows.**
+- **Typed.** Decorators preserve the wrapped signature (`ParamSpec`), and stacking keeps the exact type (`@retry` over `@memoize` still has `.cache_info()`). Ships `py.typed`, checked with `mypy --strict`.
+- **Sync and async, one API.** Works on `def`, `async def` and methods. Async wrappers stay coroutine functions and never block the event loop.
+- **Fast.** Cache hits and validation skip signature binding on the hot path ([numbers](https://python-wrap.readthedocs.io/en/latest/performance/)).
+- **Observable and testable.** One event stream for retries, cache, circuit, limiters and timeouts; `python_wrap.testing` makes tests instant and deterministic.
+- **Never configures your logging**, is thread-safe, and is tested on Python 3.10 to 3.14 on Linux, macOS and Windows.
 
 ## Install
 
@@ -41,76 +46,110 @@ Python 3.10 or newer.
 
 ```python
 import asyncio
-from python_wrap import memoize, rate_limit, retry, timeout
+import time
+
+from python_wrap import (
+    CircuitBreaker, gather_limit, memoize, policy, rate_limit, retry, retry_after_header, timeout,
+)
+from python_wrap.testing import fast_mode
+
+# One reusable stack for a flaky HTTP dependency. Roles decide the order, not you.
+http = policy(
+    cache=memoize(ttl=60, maxsize=256),                       # hits skip everything below
+    breaker=CircuitBreaker(failure_threshold=5, recovery_timeout=30, name="api"),
+    retry=retry(max_attempts=4, delay=0.5, backoff=2, jitter=0.1,
+                on=ConnectionError, delay_from=retry_after_header, max_time=20),
+    timeout=timeout(5),                                       # per attempt
+    name="http",
+)
 
 
-@retry(max_attempts=4, delay=0.01, backoff=2.0, jitter=0.01, on=ConnectionError)
-@memoize(ttl=60, maxsize=256)
-@rate_limit(10, 1.0, block=True)
-@timeout(5.0)
+@http
 def fetch_user(user_id: int) -> dict[str, int]:
-    # Your real HTTP call goes here.
-    return {"id": user_id}
+    return {"id": user_id}                 # your real HTTP call goes here
 
 
-print(fetch_user(1))        # runs the function
-print(fetch_user(1))        # served from the cache
-print(fetch_user.cache_info())
+print(fetch_user(1), fetch_user(1))        # the second one is a cache hit
+print(fetch_user.cache_info())             # the cache API survives the stack
 
 
-@retry(max_attempts=3, delay=0.01, on=ConnectionError)
-@timeout(2.0)
+@rate_limit(100, 1.0, block=True)          # at most 100 calls per second, waits when full
 async def fetch_async(user_id: int) -> dict[str, int]:
     await asyncio.sleep(0.01)
     return {"id": user_id}
 
 
-print(asyncio.run(fetch_async(2)))
-```
+async def main() -> None:
+    # 50 requests, never more than 20 in flight; results come back in order.
+    users = await gather_limit(*(fetch_async(i) for i in range(50)), limit=20)
+    print(len(users), "users")
 
-Each retry attempt gets its own deadline, and the cache sits outside the rate limiter so hits cost nothing. The same decorators work unchanged on `async def`.
+
+asyncio.run(main())
+
+
+# In tests, every wait is instant but retries still run the configured number of times.
+calls = []
+
+
+@retry(max_attempts=4, delay=30, backoff=2, on=ConnectionError)
+def flaky() -> str:
+    calls.append(1)
+    if len(calls) < 4:
+        raise ConnectionError
+    return "ok"
+
+
+start = time.monotonic()
+with fast_mode():
+    assert flaky() == "ok"                 # would take 30 + 60 + 120 seconds
+print(f"{time.monotonic() - start:.2f}s")
+```
 
 ## What is in the box
 
-Every decorator below is importable from `python_wrap`.
+Everything below is importable from `python_wrap` unless a module is shown. [Choose a decorator](https://python-wrap.readthedocs.io/en/latest/choosing/) is the quick way in.
 
-| Area | Decorator | What it does |
+| Area | Name | What it does |
 |---|---|---|
-| **Resilience** | `retry` | Retry on failure with backoff, jitter, `max_delay`, `retry_if` and an `on_retry` hook |
-| | `fallback` | Return a default value (or a handler's result) when the call raises |
-| | `suppress` | Swallow chosen exceptions; the call returns `None` |
-| | `circuit_breaker` / `CircuitBreaker` | Stop calling a failing dependency until it recovers; share one breaker across functions |
-| | `timeout` | Raise `TimeoutExpired` when a call runs too long |
-| **Caching** | `memoize` | LRU and TTL cache with `maxsize`, `typed`, custom `key`, `cache_info()` and `cache_clear()` |
-| | `cache` | v0.1 name for `memoize(ttl=...)` |
-| | `once` | Run a function a single time and reuse the result (thread-safe, resettable) |
-| **Concurrency** | `rate_limit` | Sliding-window limit of N calls per period, per key if you want |
-| | `throttle` | Run at most once per interval |
-| | `debounce` | Run only after calls stop for a quiet period; `.cancel()` and `.flush()` |
-| | `singleflight` | Concurrent calls with the same arguments share one execution |
-| | `run_in_thread` | Run in a thread and get a `concurrent.futures.Future` |
-| **Observability** | `log_args` / `log_return` | Log arguments (with secret redaction) and return values |
-| | `trace` | Log the call stack as functions run |
-| | `audit` | Emit an `AuditRecord` per call to a logger and/or your own sink |
-| | `timing` | Log duration; `threshold=` and `callback=` for slow-call alerts |
-| | `profile` | Run `cProfile` around a call |
-| | `measure_memory` | Memory use per call via `tracemalloc` |
-| | `benchmark` / `benchmark_async` | Plain functions that time a callable over several runs |
-| **Validation** | `enforce_types` | Check arguments and return value against the function's own annotations |
-| | `validate_args` | Per-parameter predicates with optional custom messages |
-| | `check_type` | Explicit per-parameter type checks |
-| **State** | `transactional` | Commit and rollback callbacks around a call |
-| | `Transaction`, `current_transaction` | The transaction object, usable as a (async) context manager |
+| **Resilience** | `retry` | Backoff, jitter, `max_delay`, `max_time`, `retry_if`, `on_retry`; `delay_from=retry_after_header` honours `Retry-After`; never retries cancellation |
+| | `retrying`, `Retrying` | Retry an inline block (`for attempt in retrying(...)`, sync and `async for`) |
+| | `retry_stats`, `RetryStats` | Attempts, successes and failures per retried function |
+| | `fallback`, `suppress` | Return a default (or handler result), or swallow chosen exceptions |
+| | `circuit_breaker`, `CircuitBreaker` | Fail fast while a dependency is down; `success_threshold`, `exclude`, `on_state_change`, `.stats`; one breaker can guard many functions |
+| | `timeout`, `Timeout` | Decorator or `with timeout(5):` / `async with`; raises `TimeoutExpired` |
+| | `deadline`, `Deadline` | A shared time budget; `retry` and `timeout` clamp to it |
+| | `hedge` | Fire a backup call when the first is slow and take the first success (idempotent calls only) |
+| **Async toolkit** | `gather_limit`, `map_async`, `amap_iter` | Bounded concurrency, lazy input, ordered results; everything is cancelled and awaited on error |
+| | `race`, `RaceFailed` | First success wins, the rest are cancelled |
+| | `run_sync` | Call async code from sync code (refuses inside a running loop) |
+| **Caching** | `memoize` | LRU + TTL, `typed`, `key=`, per-item `ttl=`, `cache_exceptions=`, `cache_info/clear/delete/contains/get`; async in-flight dedupe |
+| | `cached_property`, `invalidate` | `functools.cached_property` plus `ttl`, locking and `async def` getters |
+| | `once`, `cache` | Run once and reuse (thread-safe, `.reset()`); `cache` is the v0.1 name for `memoize(ttl=...)` |
+| **Concurrency & limits** | `rate_limit`, `RateLimiter` | Sliding window, `block=True`, `key=`, several limits, one budget shared across functions |
+| | `Bulkhead`, `limit_concurrency` | Cap concurrent calls, bound the queue, raise `BulkheadFull` |
+| | `throttle`, `debounce` | At most once per interval; run after calls stop (`.cancel()`, `.flush()`) |
+| | `singleflight`, `run_in_thread` | Share one execution between identical concurrent calls; run in a thread, get a `Future` |
+| **Batching** | `batch_calls` | DataLoader pattern: many single-item calls become one bulk call; sync and async, deduped |
+| **Observability & metrics** | `count_calls` | `.stats`: calls, errors, in-flight, mean, p50, p95, p99 |
+| | `subscribe`, `listening` | One event hook for retry, cache, circuit, limiter, bulkhead and timeout events (`python_wrap.events` also has `filter_events`, `EVENT_NAMES`) |
+| | `log_args`, `log_return`, `trace`, `audit` | Structured, redacted logging; `AuditRecord` to a sink |
+| | `log_context`, `current_log_context` | Contextvar fields in every log line and audit record |
+| | `timing`, `profile`, `measure_memory`, `benchmark` | Duration with `threshold=`/`callback=`, `cProfile`, `tracemalloc`, `benchmark_async` |
+| **Validation** | `enforce_types`, `validate_args`, `check_type` | Check from annotations, with predicates, or with explicit types |
+| **State** | `transactional`, `Transaction`, `current_transaction` | Commit and rollback callbacks, usable as a (async) context manager |
 | | `revert_on_failure` | Restore an object's attributes if the call raises |
-| **Dev tools** | `deprecate` | Emit a `DeprecationWarning` at the caller; works on functions and classes |
-| | `mock_data` | Return fixed data instead of calling the function, for tests and local runs |
-| | `compose` | Combine several decorators into one |
+| **Configuration** | `configure`, `configured`, `get_config`, `reset_config` | Project-wide defaults for logger, retry options and redaction |
+| | `policy`, `Policy` | Named, immutable decorator bundles applied in the recommended order |
+| **Testing** (`python_wrap.testing`) | `fast_mode`, `disable_retries`, `disable_rate_limits`, `disable_caching`, `overrides` | Skip waits, cap retries, switch limiters and caches off |
+| | `FakeClock`, `fake_clock`, `spy`, `spy_on`, `eventually` | Control time, record calls, wait for background work; pytest fixtures `pw_fake_clock`, `pw_fast_mode` |
+| **Dev tools** | `deprecate`, `mock_data`, `compose`, `wrap_methods` | Deprecation warnings at the caller, fixed test data, decorator bundles, decorate a whole class |
 
-Exceptions live in `python_wrap.errors` and are also exported at the top level: `PythonWrapError`, `TimeoutExpired` (a `TimeoutError`), `RateLimitExceeded`, `CircuitOpenError`, `ValidationError` (a `ValueError`) and `ArgumentTypeError` (a `TypeError`).
+Exceptions live in `python_wrap.errors` and at the top level: `PythonWrapError`, `TimeoutExpired` (a `TimeoutError`), `RateLimitExceeded`, `CircuitOpenError`, `BulkheadFull`, `BatchError`, `ValidationError` (a `ValueError`) and `ArgumentTypeError` (a `TypeError`).
 
 ## Highlights
 
-### retry
+### Retry, `Retry-After` and fail-soft
 
 ```python
 from python_wrap import RetryState, retry
@@ -129,6 +168,7 @@ calls = 0
     backoff=2.0,      # then 2x longer each time
     max_delay=0.1,    # but never more than this
     jitter=0.01,      # plus up to this many random seconds
+    max_time=5,       # and never spend longer than this in total
     on=(ConnectionError, TimeoutError),
     retry_if=lambda exc: "temporary" in str(exc),
     on_retry=note,
@@ -144,32 +184,14 @@ def flaky() -> str:
 print(flaky())  # ok, after two retries
 ```
 
-The last exception is re-raised unchanged once attempts run out. `max_attempts=None` retries forever. Async functions are retried with `asyncio.sleep`.
+Fail soft with `fallback(value)` or `suppress(OSError)`. The last exception is re-raised unchanged once attempts run out. `max_attempts=None` retries forever. Cancellation (`asyncio.CancelledError`, `KeyboardInterrupt`) is never retried. Add `delay_from=retry_after_header` to wait exactly as long as a 429/503 `Retry-After` header says, and retry a block of code with `for attempt in retrying(...)`.
 
-Fail soft instead of raising with `fallback` and `suppress`:
-
-```python
-from python_wrap import fallback, suppress
-
-
-@fallback({}, on=KeyError)
-def load_settings() -> dict[str, str]:
-    raise KeyError("settings.json")
-
-
-@suppress(OSError)
-def best_effort_cleanup() -> None:
-    raise OSError("already gone")
-
-
-print(load_settings())          # {}
-print(best_effort_cleanup())    # None
-```
-
-### Circuit breaker
+### Circuit breaker, timeout and deadline
 
 ```python
-from python_wrap import CircuitBreaker, CircuitOpenError, CircuitState
+import time
+
+from python_wrap import CircuitBreaker, CircuitOpenError, CircuitState, TimeoutExpired, deadline, timeout
 
 payments = CircuitBreaker(failure_threshold=2, recovery_timeout=30, name="payments")
 
@@ -189,13 +211,25 @@ try:
     charge(10)
 except CircuitOpenError:
     print("failing fast, circuit is", payments.state.value)   # no call was made
-
 assert payments.state is CircuitState.OPEN
+
+
+@timeout(1)
+def step(seconds: float) -> None:
+    time.sleep(seconds)
+
+
+try:
+    with deadline(0.05):          # one budget for everything inside; timeouts clamp to it
+        step(0.01)
+        step(1)
+except TimeoutExpired:
+    print("out of time")
 ```
 
-After `recovery_timeout` the breaker goes half-open and lets a trial call through; success closes it, failure re-opens it. Decorate several functions with the same `CircuitBreaker` to share state, or use `@circuit_breaker(...)` for a private one (reachable as `func.breaker`).
+After `recovery_timeout` the breaker goes half-open and lets a trial call through. Share one `CircuitBreaker` across functions for one dependency, or use `@circuit_breaker(...)` for a private one (`func.breaker`). `timeout` interrupts sync code with `SIGALRM` on the Unix main thread, cancels `async def` with `asyncio.wait_for`, and elsewhere falls back to a thread that cannot stop the work (see [Limitations](https://python-wrap.readthedocs.io/en/latest/limitations/)).
 
-### memoize
+### Caching
 
 ```python
 from python_wrap import memoize
@@ -212,16 +246,65 @@ square(3, scale=1)          # still the same entry
 print(square.cache_info())  # 2 hits, 1 miss
 square.cache_delete(3)      # drop one entry
 square.cache_clear()        # drop everything
+
 ```
 
-Keys are built from the bound signature, lists, dicts and sets are converted automatically, and exceptions are never cached. Concurrent awaits of the same missing key in an `async def` share one in-flight task. On methods the cache keeps instances alive, so give it `maxsize` or `ttl`.
+`cached_property(ttl=)` does the same for attributes. Keys are built from the bound signature, lists, dicts and sets are converted automatically, and exceptions are not cached unless you ask (`cache_exceptions=True, exception_ttl=`). Concurrent awaits of the same missing key in an `async def` share one in-flight task. On methods the cache keeps instances alive, so give it `maxsize` or `ttl`.
 
-### rate_limit, throttle and debounce
+### Async toolkit, bulkheads and batching
 
 ```python
-import time
+import asyncio
 
-from python_wrap import RateLimitExceeded, debounce, rate_limit, throttle
+from python_wrap import Bulkhead, BulkheadFull, batch_calls, map_async, race
+
+queries: list[list[int]] = []
+
+
+@batch_calls(max_size=100, max_wait=0.005)        # the DataLoader pattern
+async def get_user(ids: list[int]) -> dict[int, str]:
+    queries.append(ids)                           # one round trip for the whole batch
+    return {i: f"user{i}" for i in ids}
+
+
+db = Bulkhead(2, max_waiting=1, name="db")        # 2 running, 1 queued, the rest rejected
+
+
+@db
+async def query(n: int) -> int:
+    await asyncio.sleep(0.01)
+    return n
+
+
+async def main() -> None:
+    users = await asyncio.gather(get_user(1), get_user(2), get_user(1))
+    assert users == ["user1", "user2", "user1"] and queries == [[1, 2]]
+
+    doubled = await map_async(lambda n: query(n * 2), range(3), limit=2)
+    assert doubled == [0, 2, 4]
+
+    results = await asyncio.gather(*(query(n) for n in range(4)), return_exceptions=True)
+    assert isinstance(results[3], BulkheadFull)
+
+    async def slow() -> str:
+        await asyncio.sleep(1)
+        return "slow"
+
+    async def fast() -> str:
+        return "fast"
+
+    assert await race(slow(), fast()) == "fast"   # the loser is cancelled
+
+
+asyncio.run(main())
+```
+
+Every helper cancels and awaits the tasks it started, so nothing leaks on error or cancellation. Also see `hedge` for backup requests on slow reads and `run_sync` for calling async code from scripts.
+
+### Rate limits, throttle and debounce
+
+```python
+from python_wrap import RateLimitExceeded, RateLimiter, rate_limit
 
 
 @rate_limit(2, 0.2, key=lambda user, *_: user)   # 2 calls / 0.2 s, per user
@@ -237,57 +320,50 @@ except RateLimitExceeded as exc:
     print(f"slow down, retry in {exc.retry_after:.2f}s")
 send("bob", "hello")        # different key, different budget
 
-
-@throttle(0.1)              # at most once per 0.1 s, others get the last result
-def refresh() -> float:
-    return time.monotonic()
+github = RateLimiter(5, 1.0, name="github")      # one budget shared by several functions
 
 
-@debounce(0.05)             # only the last call of a burst runs
-def save(text: str) -> None:
-    print("saved", text)
+@github
+def get_repo(name: str) -> str:
+    return name
 
-
-for t in ("h", "he", "hel"):
-    save(t)
-time.sleep(0.15)            # prints: saved hel
 ```
 
-`rate_limit(block=True)` waits instead of raising (and uses `await` for `async def`). The sliding window never lets a `2 * calls` burst through at a window edge.
+`rate_limit(block=True)` waits instead of raising (with `await` for `async def`), and `limits=[(5, 1), (600, 900)]` enforces several windows at once. `throttle` and `debounce` cover "at most once per interval" and "after the burst settles". The sliding window never lets a `2 * calls` burst through at a window edge.
 
-### timeout
+### Metrics and events
 
 ```python
-import asyncio
-import time
-
-from python_wrap import TimeoutExpired, timeout
+from python_wrap import count_calls, listening, retry
 
 
-@timeout(0.05)
-def slow() -> None:
-    time.sleep(1)
+@count_calls
+@retry(max_attempts=3, delay=0)
+def work(attempts: list[int]) -> str:
+    attempts.append(1)
+    if len(attempts) < 3:
+        raise ConnectionError
+    return "ok"
 
 
-@timeout(0.05)
-async def slow_async() -> None:
-    await asyncio.sleep(1)
+names: list[str] = []
+with listening(lambda event: names.append(event.name)):
+    work([])
 
-
-for call in (slow, lambda: asyncio.run(slow_async())):
-    try:
-        call()
-    except TimeoutError as exc:         # TimeoutExpired subclasses TimeoutError
-        assert isinstance(exc, TimeoutExpired)
-        print("timed out")
+print(names)                          # retry.attempt_failed, ..., retry.succeeded
+print(work.stats.calls, work.stats.p95)
 ```
 
-`async def` functions are cancelled with `asyncio.wait_for`. Sync functions are interrupted with `SIGALRM` on Unix when called from the main thread. Everywhere else (Windows, worker threads, `use_signals=False`) the call runs in a daemon thread and the caller stops waiting, but **the work itself cannot be stopped**; it finishes in the background and its result is discarded.
+Subscribe once and forward events to Prometheus, OpenTelemetry or statsd (recipes in the [guide](https://python-wrap.readthedocs.io/en/latest/guides/metrics/)). Listeners cannot break the decorated function.
 
-### enforce_types
+### Validation and logging with redaction
 
 ```python
-from python_wrap import ArgumentTypeError, enforce_types
+import logging
+
+from python_wrap import ArgumentTypeError, enforce_types, log_args
+
+logging.basicConfig(level=logging.DEBUG, format="%(message)s")   # your app configures logging
 
 
 @enforce_types
@@ -300,18 +376,6 @@ try:
     total([1.5, "2.5"])      # type: ignore[list-item]
 except ArgumentTypeError as exc:
     print(exc)               # parameter 'prices' expected list[float], got list containing str at index 1
-```
-
-Checks come from the annotations you already wrote: generics, unions, `Literal`, `Annotated`, `NewType` and more. Annotations it does not understand are accepted, never rejected. For custom rules use `validate_args(x=lambda x: x > 0)` or `validate_args(name=(lambda s: s.strip() != "", "name must not be blank"))`.
-
-### log_args with redaction
-
-```python
-import logging
-
-from python_wrap import log_args
-
-logging.basicConfig(level=logging.DEBUG, format="%(message)s")   # your app configures logging
 
 
 @log_args(logger="myapp.auth")
@@ -323,73 +387,26 @@ login("ann", "hunter2", api_key="sk-123")
 # Calling login(username='ann', password='***', api_key='***')
 ```
 
-Any parameter whose name contains `password`, `token`, `secret`, `api_key`, `authorization`, `cookie` and similar (see `DEFAULT_REDACT`) is masked. Pass `redact=("ssn",)` to choose your own fragments, `redact=()` to turn it off, and `max_length=` to truncate huge values. `audit` uses the same redaction and hands you structured `AuditRecord` objects.
+Parameters whose names contain `password`, `token`, `secret`, `api_key` and similar (`DEFAULT_REDACT`) are masked in `log_args` and `audit`; extend with `redact_extra=` or project-wide through `configure(redact_extra=...)`. For custom rules use `validate_args(x=lambda x: x > 0)`.
 
-### Transactions
+### Transactions and defaults
 
-```python
-from python_wrap import Transaction, transactional
+`@transactional` gives a function a `tx: Transaction` (declare it last or keyword-only) to register `on_commit` and `on_rollback` callbacks; `current_transaction()` reaches it from anywhere. `configure(logger=..., redact_extra=...)` sets project-wide defaults read at decoration time, and explicit arguments always win.
 
-ledger = {"a": 100, "b": 0}
+## Stacking decorators and policies
 
-
-@transactional
-def transfer(src: str, dst: str, amount: int, *, tx: Transaction) -> None:
-    before = dict(ledger)
-    tx.on_rollback(ledger.update, before)
-    tx.on_commit(print, "transfer committed")
-    ledger[src] -= amount
-    ledger[dst] += amount
-    if ledger[src] < 0:
-        raise ValueError("insufficient funds")
-
-
-transfer("a", "b", 30)          # commits
-try:
-    transfer("a", "b", 500)     # raises, rollback callbacks run
-except ValueError:
-    pass
-print(ledger)                   # {'a': 70, 'b': 30}
-```
-
-A function with a `tx` parameter receives the transaction (pass it last or keyword-only); any other code can call `current_transaction()`. Callbacks may be `async` when the function is, and rollback callbacks run in reverse order. `Transaction` is also a plain `with` / `async with` context manager. For simple in-memory rollback, `@revert_on_failure` snapshots an object's attributes and restores them if the call raises.
-
-## Stacking decorators
-
-Decorators are applied bottom-up and run top-down, so order matters. Rules of thumb:
+Decorators are applied bottom-up and run top-down, so order matters:
 
 | Put this... | ...outside of this | Because |
 |---|---|---|
-| `retry` | `timeout`, `circuit_breaker`, `rate_limit` | Each attempt gets its own deadline, and a rejected attempt can be retried |
 | `memoize` | `retry`, `rate_limit`, `timeout` | Cache hits skip everything; only misses pay |
-| `circuit_breaker` | `timeout` | A timeout counts as a failure and can open the circuit |
+| `retry` | `timeout`, `circuit_breaker`, `rate_limit` | Each attempt gets its own deadline |
+| `circuit_breaker` | `retry` or `timeout` | The breaker counts calls whose retries were used up |
 | `fallback` | `retry`, `circuit_breaker` | Fall back only after retries are exhausted or the circuit is open |
-| `log_args`, `timing`, `audit` | everything | They then observe what callers actually experience |
+| `log_args`, `timing`, `audit` | everything | They observe what callers actually experience |
 | `enforce_types`, `validate_args` | the rest | Reject bad input before doing any work |
 
-A good default for a network call, outermost first:
-
-```python
-from python_wrap import circuit_breaker, compose, fallback, memoize, retry, timeout
-
-resilient = compose(
-    fallback(None, on=Exception),
-    memoize(ttl=30),
-    retry(max_attempts=3, delay=0.01, backoff=2),
-    circuit_breaker(failure_threshold=5, recovery_timeout=30),
-    timeout(5),
-)
-
-
-@resilient
-def get_price(sku: str) -> float | None:
-    return 9.99
-
-
-print(get_price("abc"))
-```
-
-`compose(a, b, c)(f)` is exactly `a(b(c(f)))`, so you can name a stack once and reuse it. Note that `rate_limit`, `throttle` and `debounce` keep one state per decorated function, which for methods is shared by all instances (use `rate_limit(key=...)` to split it).
+You do not have to memorise this. `policy(observe=, validate=, fallback=, cache=, limiter=, bulkhead=, breaker=, retry=, timeout=, guard=)` takes each decorator by role and applies them in the recommended order, whatever order you wrote them in. Policies are immutable (`.with_(timeout=timeout(30))`), work on methods and `async def`, and `wrap_methods(policy)` protects a whole class. `compose(a, b, c)(f)` is `a(b(c(f)))` when you just want a named stack. Details: [Stacking](https://python-wrap.readthedocs.io/en/latest/stacking/) and [Policies](https://python-wrap.readthedocs.io/en/latest/guides/policies/).
 
 ## How it compares
 
@@ -397,20 +414,28 @@ python-wrap is a broad toolkit; the others are deeper in one area. Use them when
 
 | Library | Use it instead when... | python-wrap's angle |
 |---|---|---|
-| [tenacity](https://github.com/jd/tenacity) | You need very rich retry policies: composable stop/wait strategies, retry statistics, per-call overrides | `retry` covers the common cases (backoff, jitter, predicates, hooks, async) in one decorator with a flat signature |
-| [backoff](https://github.com/litl/backoff) | You already use it and are happy. Note that the repository was archived in 2025, so it no longer receives fixes | A maintained, typed retry with the same core ideas, plus everything else in this table |
-| [cachetools](https://github.com/tkem/cachetools) | You need other eviction policies (LFU, FIFO, RR), explicit cache objects, or custom key and lock control | `memoize` gives LRU + TTL with `cache_info()`, async in-flight dedupe and signature-bound keys |
-| [functools](https://docs.python.org/3/library/functools.html) | A plain `lru_cache` or `cache` on a sync function with hashable arguments is enough. It is in the standard library, so prefer it for that | Adds TTL, async support, unhashable argument handling and `cache_delete` |
-| [pybreaker](https://github.com/danielfm/pybreaker) | You need listeners or circuit state shared across processes (Redis storage) | A typed `CircuitBreaker` with async support and no extra dependency |
-| [ratelimit](https://github.com/tomasbasham/ratelimit) | You only need a simple fixed-window limiter | Sliding window (no boundary bursts), per-key buckets, `block=True`, async |
+| [tenacity](https://github.com/jd/tenacity) | You need very rich retry policies: composable stop/wait strategies, per-call overrides | `retry` covers the common cases (backoff, jitter, `Retry-After`, time budget, hooks, async) with a flat signature, and shares a deadline, breaker and events with the rest |
+| [stamina](https://github.com/hynek/stamina) | You want opinionated, production-ready retries with Prometheus and structlog integration built in | Similar defaults-first retry, plus the breaker, timeout, caches and limits it composes with; metrics via a generic event hook |
+| [backoff](https://github.com/litl/backoff) | You already use it and are happy. The repository was archived in 2025, so it no longer receives fixes | A maintained, typed retry with the same core ideas |
+| [cachetools](https://github.com/tkem/cachetools) | You need other eviction policies (LFU, FIFO, RR), explicit cache objects or custom locks | `memoize` gives LRU + TTL, `cache_info()`, async in-flight dedupe, signature-bound keys and `cached_property(ttl=)` |
+| [async-lru](https://github.com/aio-libs/async-lru) | You only cache coroutines and want a tiny dependency | Same async dedupe, also for sync code, with TTL, per-item TTL and exception caching |
+| [aiolimiter](https://github.com/mjpieters/aiolimiter) | You only need an asyncio leaky-bucket limiter | Sliding window for sync and async, per-key buckets, shared `RateLimiter`, `block=True`, plus `Bulkhead` for concurrency |
+| [pybreaker](https://github.com/danielfm/pybreaker) | You need listeners or circuit state shared across processes (Redis storage) | A typed `CircuitBreaker` with async, `exclude=`, `success_threshold` and `.stats`, no dependency |
+| [functools](https://docs.python.org/3/library/functools.html) | A plain `lru_cache` or `cache` on a sync function with hashable arguments is enough. Prefer it for that | Adds TTL, async, unhashable arguments and `cache_delete` |
 
-If you want all of these behaviours behind one consistent, typed, dependency-free API, python-wrap is the shorter path. If you only ever need one of them at full depth, reach for the specialist.
+None of them cover bounded `gather`, bulkheads, batching, hedging, policies or test helpers; python-wrap trades per-area depth for one consistent, typed, dependency-free API.
+
+## Learn more
+
+- [Cookbook](https://python-wrap.readthedocs.io/en/latest/cookbook/): resilient HTTP client, async crawler, FastAPI, Django, CLI tools, DataLoader batching, testing, observability.
+- [Performance](https://python-wrap.readthedocs.io/en/latest/performance/): per-call overhead and how to benchmark it yourself.
+- [Testing](https://python-wrap.readthedocs.io/en/latest/testing/): `fast_mode`, `FakeClock`, `spy` and pytest fixtures.
+- [Migration guide](https://python-wrap.readthedocs.io/en/latest/migration/) and [CHANGELOG](https://github.com/LitePy/PythonWrap/blob/main/CHANGELOG.md).
+- Runnable [examples](https://github.com/LitePy/PythonWrap/tree/main/examples).
 
 ## Upgrading from 0.1
 
-0.2.0 fixes several decorators that did not do what their names promised (`transactional`, `revert_on_failure`, async `timing`) and makes a few breaking changes: `run_in_thread` returns a `Future`, `benchmark` is a function, `retry_on_exception` is deprecated, `rate_limit` raises `RateLimitExceeded`, and the logging decorators default to `DEBUG`. Python 3.8 and 3.9 are no longer supported. `from python_wrap.decorators import ...` still works.
-
-See the [changelog](https://github.com/LitePy/PythonWrap/blob/main/CHANGELOG.md) for the one-line migration of each change and the [migration guide](https://python-wrap.readthedocs.io/en/latest/migration/) for details.
+0.2.0 fixes decorators that did not do what their names promised (`transactional`, `revert_on_failure`, async `timing`) and makes a few breaking changes: `run_in_thread` returns a `Future`, `benchmark` is a function, `retry_on_exception` is deprecated and bounded, `rate_limit` raises `RateLimitExceeded`, and the logging decorators default to `DEBUG`. Python 3.8 and 3.9 are no longer supported. `from python_wrap.decorators import ...` still works. See the [migration guide](https://python-wrap.readthedocs.io/en/latest/migration/).
 
 ## Contributing
 

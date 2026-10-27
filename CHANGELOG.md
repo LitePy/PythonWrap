@@ -12,8 +12,9 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
 
 ## [0.2.0] - 2026-10-27
 
-A ground-up rework. Every decorator now works on plain functions, `async def` functions and
-methods, keeps the wrapped signature for type checkers, and never configures logging. Several
+A ground-up rework and a much larger toolkit. Every decorator works on plain functions,
+`async def` functions and methods, keeps the wrapped signature for type checkers, and never
+configures logging. Several
 v0.1 decorators that did not do what their names promised (`transactional`, `revert_on_failure`,
 async `timing`) now work. See the
 [migration guide](https://python-wrap.readthedocs.io/en/latest/migration/) for the full upgrade
@@ -28,7 +29,17 @@ path.
 - **A real resilience toolkit.** `retry` with backoff, jitter and hooks; `CircuitBreaker`;
   `fallback`; `suppress`; `timeout` that actually interrupts.
 - **A real concurrency toolkit.** `memoize` with TTL and LRU, `rate_limit` with a sliding window,
-  `throttle`, `debounce` and `singleflight`.
+  a shared `RateLimiter`, `Bulkhead`, `throttle`, `debounce` and `singleflight`.
+- **Retry that honours the server.** `retry(delay_from=retry_after_header)` follows `Retry-After`,
+  `max_time=` and `deadline()` cap the total time, and cancellation is never retried.
+- **An async toolkit.** `gather_limit`, `map_async`, `amap_iter`, `race` and `run_sync`, plus
+  `batch_calls` (the DataLoader pattern) and `hedge`.
+- **Policies and configuration.** `policy(...)` applies protections in the recommended order, and
+  `configure()` sets project-wide defaults.
+- **Observable and testable.** `count_calls`, one `python_wrap.events` hook for every component,
+  `log_context`, and `python_wrap.testing` (`fast_mode`, `FakeClock`, `spy`, pytest fixtures).
+- **Fast.** The `memoize` hit path is about 9x faster and the validation and logging decorators
+  skip signature binding on plain calls.
 - **Safe by default.** Importing the package no longer touches the root logger, and `log_args`,
   `audit` and `trace` redact secrets.
 - **Works on Windows**, and is tested on Python 3.10 to 3.14 on Linux, macOS and Windows.
@@ -56,6 +67,69 @@ path.
   your application if you relied on python-wrap's root-logger setup.
 
 ### Added
+
+Resilience:
+
+- `retry`: `delay_from=` (with the `retry_after_header` helper for `Retry-After`), `max_time=`,
+  `log_level=` and `log_exc_info=`; `retry_stats(func)` and `RetryStats`; `retrying(...)` /
+  `Retrying` for retrying an inline block (`for` / `async for` with `with attempt`); retries
+  honour `deadline()`. Cancellation, `KeyboardInterrupt`, `SystemExit` and `GeneratorExit` are
+  never retried.
+- `CircuitBreaker`: `success_threshold`, `exclude=`, `on_state_change` and `.stats`
+  (`CircuitStats`).
+- `timeout` is also a context manager (`with timeout(5):` / `async with timeout(5):`) and returns
+  a `Timeout` object. `python_wrap.deadline` (`deadline()`, `remaining()`, `check()`) gives code a
+  shared time budget, and `timeout` clamps to it.
+- `hedge(delay, max_extra=, on=)`: hedged requests for idempotent calls; the first success wins
+  and async losers are cancelled.
+
+Async toolkit and concurrency:
+
+- `python_wrap.aio`: `gather_limit`, `map_async` and `amap_iter` (bounded concurrency, lazy
+  input, ordered results; everything is cancelled and awaited on error, cancellation or early
+  exit), `race` (first success wins; `RaceFailed`) and `run_sync` (refuses to run inside a running
+  loop).
+- `Bulkhead(max_concurrent, max_waiting=, timeout=, name=)` for sync and async (decorator, `with`,
+  `async with`, `.active`, `.waiting`), `limit_concurrency(n)` and `BulkheadFull`.
+- `RateLimiter`: one budget shared across functions (`with`, `async with`, `acquire`,
+  `try_acquire`), and several windows at once with `rate_limit(limits=[(5, 1), (600, 900)])`.
+- `batch_calls(max_size=, max_wait=, key=)`: the DataLoader pattern for sync and async code, with
+  de-duplication, `.flush()` / `.aflush()` / `.pending`, and `BatchError` on contract violations.
+
+Caching:
+
+- `cached_property(ttl=)` (thread-safe, `async def` getters, `invalidate()`).
+- `memoize`: `cache_exceptions=` / `exception_ttl=`, a per-item `ttl=` callable, and
+  `cache_contains()`, `cache_get()` and `cache_parameters()`.
+
+Observability, configuration and testing:
+
+- `count_calls`: calls, errors, in-flight, mean, p50, p95 and p99 per function.
+- `python_wrap.events`: `subscribe()`, `listening()`, `filter_events()` and `EVENT_NAMES`, one hook
+  for retry, cache, circuit, limiter, bulkhead and timeout events (Prometheus, OpenTelemetry and
+  statsd recipes in the docs).
+- `log_context()` / `current_log_context()`: contextvar fields in `log_args`, `log_return`,
+  `audit`, `trace` and `timing` messages, on `LogRecord.context` and on `AuditRecord.context`.
+  `log_args` and `audit` accept `redact_extra=`.
+- `policy(...)` / `Policy`: reusable, immutable decorator bundles placed by role (`observe`,
+  `validate`, `fallback`, `cache`, `limiter`, `bulkhead`, `breaker`, `retry`, `timeout`, `guard`,
+  `outer`, `inner`) in the recommended order, with `.with_()`; `wrap_methods(*decorators,
+  include=, exclude=, include_private=)` decorates a class.
+- `python_wrap.config`: `configure()`, `configured()`, `get_config()` and `reset_config()` for
+  project-wide defaults (logger, retry options, redaction), read at decoration time; explicit
+  arguments win.
+- `python_wrap.testing`: `fast_mode()`, `disable_retries()`, `disable_rate_limits()`,
+  `disable_caching()`, `overrides()` (context managers and decorators), `FakeClock` /
+  `fake_clock()`, `spy()` / `spy_on()`, `eventually()` / `eventually_sync()`, and the pytest
+  fixtures `pw_fake_clock` and `pw_fast_mode` (`pytest_plugins = ["python_wrap.testing"]`).
+- Typing: stacked decorators keep the exact function type (`@retry` over `@memoize` keeps
+  `.cache_info()`), and `Memoized`, `Once`, `CircuitProtected`, `Limited` and `Counted` bind
+  correctly under methods and `@classmethod`. Typing regression tests run `mypy` in CI.
+- A cookbook of eight recipes, seven runnable `examples/`, a performance page with
+  `benchmarks/run.py`, and a thread-safety stress suite (`PW_STRESS=1`, also run on free-threaded
+  3.13t and 3.14t).
+
+Core:
 
 - `retry`: `backoff`, `max_delay`, `jitter`, `on=` exception filter, `retry_if=` predicate,
   `on_retry=` hook receiving a `RetryState`, unlimited attempts (`max_attempts=None`), and bare
@@ -99,6 +173,14 @@ path.
   converted to hashable keys.
 - `deprecate` points its warning at the caller and sets `__deprecated__` (PEP 702).
 - `from python_wrap.decorators import ...` still works through a compatibility module.
+- `timeout(...)` now returns a `Timeout` object, which is both a decorator and a context manager.
+  Decorator use is unchanged.
+- `retry` never retries cancellation-type exceptions (`asyncio.CancelledError`,
+  `KeyboardInterrupt`, `SystemExit`, `GeneratorExit`), even if `on=` lists them.
+- The `redact=` default on `log_args` and `audit` is `None`, which means "the configured value, or
+  `DEFAULT_REDACT`". Pass `redact=()` to turn redaction off.
+- `audit` with no `sink` and a disabled log level builds no record at all.
+- `Limited.bulkhead` is a read-only property.
 
 ### Fixed
 
@@ -113,6 +195,16 @@ path.
 - `audit` reported the wrapper's own frame as the caller.
 - `once` was not thread-safe, and now retries after an exception.
 - `validate_args` rebuilt the function signature on every call.
+
+### Performance
+
+- The `memoize` hit path is about 9x faster.
+- `validate_args`, `check_type`, `enforce_types`, `log_args` and `audit` skip signature binding on
+  plain positional calls (5x to 40x faster).
+- `audit` skips building a record when nobody would receive it, and `timing` skips formatting
+  when its log level is disabled.
+- Numbers and a benchmark script are on the
+  [performance page](https://python-wrap.readthedocs.io/en/latest/performance/).
 
 ### Deprecated
 
