@@ -22,6 +22,7 @@ import asyncio
 import functools
 import inspect
 import threading
+import time
 import types
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
@@ -481,6 +482,25 @@ def _timeout_error(last: AssertionError, waited: float, attempts: int) -> Assert
     )
 
 
+# The unpatched sleeps, so polling can tell "fast_mode without a fake clock" apart.
+_REAL_SLEEP = _core.sleep
+_REAL_ASYNC_SLEEP = _core.async_sleep
+
+
+def _poll_sleep(interval: float) -> None:
+    if _core.overrides.no_sleep and _core.sleep is _REAL_SLEEP:
+        time.sleep(interval)  # fast_mode must not turn polling into a busy loop
+    else:
+        _core.sleep(interval)
+
+
+async def _poll_async_sleep(interval: float) -> None:
+    if _core.overrides.no_sleep and _core.async_sleep is _REAL_ASYNC_SLEEP:
+        await asyncio.sleep(interval)
+    else:
+        await _core.async_sleep(interval)
+
+
 async def eventually(
     assertion: Callable[[], object | Awaitable[object]],
     *,
@@ -492,7 +512,8 @@ async def eventually(
     `assertion` may be sync or `async def`. Time is read through `_core.monotonic` and
     waited through `_core.async_sleep`, so it is real time by default (it is meant for
     integration tests) and follows `fake_clock()` if one is installed. Under
-    `fast_mode()` the waits are instant, so it polls without pausing until `timeout`.
+    `fast_mode()` (and no fake clock) it still pauses `interval` of real time between
+    attempts, because the condition it waits for usually needs real time to pass.
 
     Args:
         assertion: Callable that raises `AssertionError` while the condition is false.
@@ -533,7 +554,7 @@ async def eventually(
             waited = _core.monotonic() - start
             if waited >= timeout:
                 raise _timeout_error(exc, waited, attempts) from exc
-        await _core.async_sleep(interval)
+        await _poll_async_sleep(interval)
 
 
 def eventually_sync(
@@ -577,7 +598,7 @@ def eventually_sync(
             waited = _core.monotonic() - start
             if waited >= timeout:
                 raise _timeout_error(exc, waited, attempts) from exc
-        _core.sleep(interval)
+        _poll_sleep(interval)
 
 
 # ------------------------------------------------------------------------ pytest plugin

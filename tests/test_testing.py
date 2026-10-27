@@ -513,3 +513,23 @@ def test_plugin_fixtures(tmp_path: Path) -> None:
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "3 passed" in proc.stdout
+
+
+def test_eventually_sync_under_fast_mode_pauses_real_time():
+    import time as _time
+
+    from python_wrap.testing import eventually_sync, fast_mode
+
+    calls = []
+
+    def never() -> None:
+        calls.append(1)
+        raise AssertionError("not yet")
+
+    with fast_mode():
+        started = _time.monotonic()
+        with pytest.raises(AssertionError):
+            eventually_sync(never, timeout=0.05, interval=0.01)
+        assert _time.monotonic() - started >= 0.05
+    # A busy loop would make thousands of attempts in 50ms.
+    assert len(calls) < 20
