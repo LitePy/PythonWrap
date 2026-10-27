@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import gc
 import inspect
 import signal
+import sys
 import threading
 import time
 
@@ -167,6 +169,94 @@ async def test_timeout_async():
     with pytest.raises(TimeoutExpired) as info:
         await slow()
     assert info.value.seconds == 0.02
+
+
+async def test_timeout_async_inner_timeout_error_propagates_unchanged():
+    error = TimeoutError("db socket timed out")
+
+    @timeout(5)
+    async def f():
+        raise error
+
+    with pytest.raises(TimeoutError) as info:
+        await f()
+    assert info.value is error  # not converted to TimeoutExpired
+    assert not isinstance(info.value, TimeoutExpired)
+    assert info.traceback[-1].name == "f"  # original traceback kept
+
+
+async def test_timeout_async_expiry_is_chained_not_hidden():
+    @timeout(0.01)
+    async def slow():
+        await asyncio.sleep(1)
+
+    with pytest.raises(TimeoutExpired) as info:
+        await slow()
+    if sys.version_info >= (3, 11):
+        assert isinstance(info.value.__cause__, TimeoutError)
+
+
+async def test_timeout_async_inner_exception_propagates():
+    @timeout(5)
+    async def f():
+        await asyncio.sleep(0)
+        raise KeyError("k")
+
+    with pytest.raises(KeyError):
+        await f()
+
+
+async def test_timeout_async_caller_cancellation_is_not_a_timeout():
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    @timeout(5)
+    async def f():
+        started.set()
+        try:
+            await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    task = asyncio.create_task(f())
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert cancelled.is_set()  # the inner call was cancelled too
+
+
+async def test_timeout_async_callable_object():
+    class Slow:
+        async def __call__(self):
+            await asyncio.sleep(1)
+            return "finished"
+
+    wrapped = timeout(0.01)(Slow())
+    assert inspect.iscoroutinefunction(wrapped)
+    with pytest.raises(TimeoutExpired):
+        await wrapped()
+
+
+@needs_signals
+def test_timeout_signal_swallowed_by_broad_except_in_user_code():
+    # Documented limitation: TimeoutExpired is an Exception raised inside the function,
+    # so a broad ``except Exception`` there catches it and the call returns normally.
+    caught = []
+
+    @timeout(0.01, use_signals=True)
+    def work():
+        try:
+            time.sleep(1)
+        except Exception as exc:
+            caught.append(exc)
+        return "returned normally"
+
+    assert work() == "returned normally"
+    assert len(caught) == 1 and isinstance(caught[0], TimeoutExpired)
+    assert issubclass(TimeoutExpired, TimeoutError)
+    assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
 
 
 def test_timeout_on_methods():
@@ -446,6 +536,23 @@ def test_throttle_exception_uses_window(fake_clock):
         f()
     assert f() is None
     assert calls == [1]
+
+
+def test_throttle_in_window_after_raise_returns_last_successful_result(fake_clock):
+    outcomes = iter(["a", ValueError("x")])
+
+    @throttle(1)
+    def f():
+        outcome = next(outcomes)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    assert f() == "a"
+    fake_clock.advance(2)
+    with pytest.raises(ValueError):
+        f()
+    assert f() == "a"  # the older successful result, not None
 
 
 async def test_throttle_async(fake_clock):
@@ -826,3 +933,56 @@ async def test_singleflight_async_exception_and_caller_cancel():
     with pytest.raises(asyncio.CancelledError):
         await t1
     assert calls == [1]
+
+
+async def test_singleflight_async_orphaned_failure_is_not_logged():
+    reported = []
+    loop = asyncio.get_running_loop()
+    loop.set_exception_handler(lambda _loop, context: reported.append(context))
+    release = asyncio.Event()
+
+    @singleflight
+    async def load():
+        await release.wait()
+        raise ValueError("backend down")
+
+    caller = asyncio.create_task(load())
+    await asyncio.sleep(0)
+    caller.cancel()  # every caller gone; the shared task keeps running
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+    release.set()
+    for _ in range(3):
+        await asyncio.sleep(0)
+    gc.collect()
+    await asyncio.sleep(0)
+    loop.set_exception_handler(None)
+    assert reported == []
+
+
+def test_singleflight_sync_reentrant_same_key_runs_directly():
+    depth = []
+
+    @singleflight
+    def f(x):
+        depth.append(x)
+        if len(depth) < 3:
+            return f(x)  # same key, on the leader's own thread
+        return len(depth)
+
+    future = run_in_thread(f)("k")  # guard: a regression must not hang the suite
+    assert future.result(timeout=2) == 3
+    assert f("again") == 4  # bookkeeping was cleaned up
+
+
+async def test_singleflight_async_reentrant_same_key_runs_directly():
+    depth = []
+
+    @singleflight
+    async def f(x):
+        depth.append(x)
+        if len(depth) < 3:
+            return await f(x)  # same key, from inside the shared task
+        return len(depth)
+
+    assert await asyncio.wait_for(f("k"), 2) == 3

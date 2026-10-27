@@ -39,3 +39,24 @@ def test_is_async_sees_through_partial():
 
 def test_version_exposed():
     assert python_wrap.__version__.startswith("0.2")
+
+
+class _AsyncCallable:
+    async def __call__(self, x):
+        return x
+
+
+class _SyncCallable:
+    def __call__(self, x):
+        return x
+
+
+def test_is_async_detects_callable_objects():
+    assert _core.is_async(_AsyncCallable())
+    assert _core.is_async(functools.partial(_AsyncCallable(), 1))
+    assert _core.is_async(_AsyncCallable().__call__)
+    assert not _core.is_async(_SyncCallable())
+    # A class is callable but calling it constructs an instance: never async.
+    assert not _core.is_async(_AsyncCallable)
+    assert not _core.is_async(_SyncCallable)
+    assert not _core.is_async(len)

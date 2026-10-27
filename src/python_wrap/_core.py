@@ -48,10 +48,22 @@ def get_logger(logger: LoggerLike = None) -> logging.Logger:
 
 
 def is_async(func: Callable[..., Any]) -> bool:
-    """True for ``async def`` functions, including ones wrapped in ``functools.partial``."""
+    """True if calling ``func`` returns a coroutine.
+
+    Covers ``async def`` functions and methods, ``functools.partial`` objects around
+    them, and callable instances whose class defines ``async def __call__``. A class is
+    never async: calling it constructs an instance, even if the class has an async
+    ``__call__``.
+    """
     while isinstance(func, functools.partial):
         func = func.func
-    return inspect.iscoroutinefunction(func)
+    if inspect.iscoroutinefunction(func):
+        return True
+    if inspect.isclass(func) or inspect.isroutine(func):
+        return False
+    # Look the method up on the type, as the call itself does.
+    call = inspect.getattr_static(type(func), "__call__", None)
+    return call is not None and inspect.iscoroutinefunction(call)
 
 
 def qualname(func: Callable[..., Any]) -> str:

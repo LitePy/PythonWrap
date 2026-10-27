@@ -21,6 +21,7 @@ import contextlib
 import contextvars
 import functools
 import signal
+import sys
 import threading
 import weakref
 from collections import deque
@@ -115,6 +116,43 @@ def _call_in_worker(func: Callable[P, R], seconds: float, *args: P.args, **kwarg
         raise TimeoutExpired(_timeout_message(func, seconds), seconds=seconds) from None
 
 
+if sys.version_info >= (3, 11):
+
+    async def _await_with_deadline(
+        awaitable: Awaitable[T], func: Callable[..., Any], seconds: float
+    ) -> T:
+        """Await under :func:`asyncio.timeout`; convert only *our* expiry to TimeoutExpired."""
+        cm = asyncio.timeout(seconds)
+        try:
+            async with cm:
+                return await awaitable
+        except TimeoutError as exc:
+            if not cm.expired():
+                raise  # raised by the wrapped function itself: propagate unchanged
+            raise TimeoutExpired(_timeout_message(func, seconds), seconds=seconds) from exc
+
+else:  # pragma: no cover - exercised by the Python 3.10 CI job
+
+    async def _await_with_deadline(
+        awaitable: Awaitable[T], func: Callable[..., Any], seconds: float
+    ) -> T:
+        """Run the awaitable as a task; convert only *our* expiry to TimeoutExpired."""
+        task = asyncio.ensure_future(awaitable)
+        try:
+            done, _ = await asyncio.wait({task}, timeout=seconds)
+        except asyncio.CancelledError:
+            task.cancel()
+            raise
+        if done:
+            return task.result()  # exceptions from the function propagate unchanged
+        task.cancel()
+        await asyncio.wait({task})
+        if not task.cancelled() and task.exception() is not None:
+            exc = task.exception()
+            raise TimeoutExpired(_timeout_message(func, seconds), seconds=seconds) from exc
+        raise TimeoutExpired(_timeout_message(func, seconds), seconds=seconds)
+
+
 def timeout(
     seconds: float, *, use_signals: bool | None = None
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
@@ -122,7 +160,10 @@ def timeout(
 
     ``TimeoutExpired`` subclasses the built-in ``TimeoutError``.
 
-    * ``async def`` functions are cancelled with :func:`asyncio.wait_for`.
+    * ``async def`` functions are cancelled at the deadline (with :func:`asyncio.timeout`
+      on Python 3.11+, or by running the call as a task on 3.10). Only the decorator's own
+      deadline is turned into ``TimeoutExpired``: a ``TimeoutError`` raised by the wrapped
+      function itself propagates unchanged.
     * Sync functions, with signals (the default on Unix when called from the main thread):
       a ``SIGALRM`` timer from :func:`signal.setitimer` interrupts the call. The previous
       ``SIGALRM`` handler and any already-armed timer are restored afterwards, so nested
@@ -131,6 +172,23 @@ def timeout(
       ``use_signals=False``): the call runs in a daemon worker thread and the caller stops
       waiting at the deadline. **This fallback cannot stop the work** — the function keeps
       running in the background until it returns on its own, and its result is discarded.
+
+    Warning:
+        With the signal strategy, ``TimeoutExpired`` is raised *inside* the wrapped
+        function, at whatever line it is executing when the alarm fires. A broad
+        ``except Exception:`` (or ``except TimeoutError:``) in that code catches it like
+        any other error; if the code then carries on, the time limit is silently lost and
+        the call returns normally. ``TimeoutExpired`` deliberately stays an ``Exception``
+        (it subclasses ``TimeoutError``), so re-raise it explicitly in such handlers::
+
+            except TimeoutExpired:
+                raise
+            except Exception:
+                ...
+
+        The same applies to context managers that suppress exceptions and to
+        ``finally`` blocks that ``return``. ``async def`` functions have the analogous
+        caveat for code that swallows ``asyncio.CancelledError``.
 
     Args:
         seconds: Time limit in seconds; must be positive.
@@ -165,10 +223,7 @@ def timeout(
 
             @functools.wraps(func)
             async def async_wrapper(*args: P.args, **kwargs: P.kwargs) -> Any:
-                try:
-                    return await asyncio.wait_for(async_func(*args, **kwargs), seconds)
-                except asyncio.TimeoutError:
-                    raise TimeoutExpired(_timeout_message(func, seconds), seconds=seconds) from None
+                return await _await_with_deadline(async_func(*args, **kwargs), func, seconds)
 
             return cast(Callable[P, R], async_wrapper)
 
@@ -421,10 +476,12 @@ def throttle(interval: float) -> _ThrottleDecorator:
 
     The first call runs and opens a window of ``interval`` seconds (measured from when
     the call started). Calls inside the window do not run; they return the result of the
-    last call that did run (``None`` if none has finished yet, or if it raised). A call
-    that raises still uses up its window. Thread-safe; the function itself runs outside
-    the lock, so a slow call does not block skipped callers. ``async def`` functions get
-    the same semantics with an ``async`` wrapper.
+    most recent run that *returned* (``None`` if none has returned yet). A call that
+    raises propagates its exception to its own caller and still uses up its window, but
+    does not replace the remembered result: calls skipped inside that window get the
+    previous successful result (or ``None``), not the error. Thread-safe; the function
+    itself runs outside the lock, so a slow call does not block skipped callers.
+    ``async def`` functions get the same semantics with an ``async`` wrapper.
 
     Args:
         interval: Minimum seconds between runs; must be positive.
@@ -713,11 +770,44 @@ def _default_key(*args: Any, **kwargs: Any) -> Hashable:
 
 
 class _Flights(Generic[T]):
-    """Thread-side bookkeeping for singleflight: key -> in-flight future."""
+    """Thread-side bookkeeping for singleflight: key -> (in-flight future, leader thread)."""
 
     def __init__(self) -> None:
         self.lock = threading.Lock()
-        self.inflight: dict[Hashable, concurrent.futures.Future[T]] = {}
+        self.inflight: dict[Hashable, tuple[concurrent.futures.Future[T], int]] = {}
+
+
+def _consume_outcome(task: asyncio.Task[Any]) -> None:
+    if not task.cancelled():
+        task.exception()
+
+
+async def _await_shared(loop: asyncio.AbstractEventLoop, task: asyncio.Task[T]) -> T:
+    """Wait for a shared task without letting the caller's cancellation cancel it.
+
+    Like :func:`asyncio.shield`, but a cancelled waiter simply detaches: the task's
+    eventual exception is not reported as an unhandled "exception in shielded future".
+    """
+    waiter: asyncio.Future[T] = loop.create_future()
+
+    def relay(done: asyncio.Task[T]) -> None:
+        if waiter.done():
+            return
+        if done.cancelled():
+            waiter.cancel()
+        elif (exc := done.exception()) is not None:
+            waiter.set_exception(exc)
+        else:
+            waiter.set_result(done.result())
+
+    task.add_done_callback(relay)
+    try:
+        return await waiter
+    except asyncio.CancelledError:
+        task.remove_done_callback(relay)
+        if waiter.done() and not waiter.cancelled():
+            waiter.exception()  # outcome arrived just as we were cancelled
+        raise
 
 
 @overload
@@ -742,6 +832,10 @@ def singleflight(
     Sync functions de-duplicate across threads. ``async def`` functions de-duplicate
     across tasks on the same event loop: the work runs in a shared task, so cancelling
     one waiting caller does not cancel it for the others.
+
+    A re-entrant call — the function calling itself with the same key, on the leader's
+    own thread (sync) or from inside the shared task (async) — cannot wait for its own
+    result, so it runs the function directly, as if it were not decorated.
 
     Args:
         func: The function to wrap (bare ``@singleflight`` form).
@@ -775,6 +869,10 @@ def singleflight(
                 loop = asyncio.get_running_loop()
                 inflight = tasks.setdefault(loop, {})
                 task = inflight.get(k)
+                if task is not None and task is asyncio.current_task():
+                    # Re-entrant call from inside the shared task: waiting for ourselves
+                    # would deadlock, so run the function directly.
+                    return await async_f(*args, **kwargs)
                 if task is None:
 
                     async def run() -> Any:
@@ -785,7 +883,10 @@ def singleflight(
                                 del inflight[k]
 
                     task = inflight[k] = loop.create_task(run())
-                return await asyncio.shield(task)
+                    # Retrieve the outcome even if every caller was cancelled meanwhile,
+                    # so asyncio never logs "exception was never retrieved".
+                    task.add_done_callback(_consume_outcome)
+                return await _await_shared(loop, task)
 
             return cast(Callable[P, R], async_wrapper)
 
@@ -794,12 +895,21 @@ def singleflight(
         @functools.wraps(f)
         def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
             k = key_func(*args, **kwargs)
+            me = threading.get_ident()
             with flights.lock:
-                future = flights.inflight.get(k)
-                leader = future is None
-                if future is None:
-                    future = flights.inflight[k] = concurrent.futures.Future()
+                entry = flights.inflight.get(k)
+                if entry is None:
+                    future: concurrent.futures.Future[R] = concurrent.futures.Future()
+                    flights.inflight[k] = (future, me)
+                    leader = True
+                else:
+                    future, owner = entry
+                    leader = False
             if not leader:
+                if owner == me:
+                    # Re-entrant call on the leader's own thread: waiting for our own
+                    # result would deadlock, so run the function directly.
+                    return f(*args, **kwargs)
                 return future.result()
             try:
                 result = f(*args, **kwargs)
