@@ -153,6 +153,31 @@ except ConnectionError:
 assert len(calls) >= 2
 ```
 
+`retry` also honours an enclosing [`deadline`](../api/deadline.md): it never sleeps past `deadline.remaining()`. If the next wait would outlast the deadline, or none is left, the last exception is re-raised at once (the same rule as `max_time`).
+
+```python
+from python_wrap import retry
+from python_wrap.deadline import deadline
+
+calls = []
+
+@retry(max_attempts=None, delay=0.02)
+def flaky() -> None:
+    calls.append(1)
+    raise ConnectionError("down")
+
+with deadline(0.05):
+    try:
+        flaky()
+    except ConnectionError:
+        pass
+assert 1 <= len(calls) <= 4
+```
+
+### Project-wide defaults
+
+Set `max_attempts`, `delay`, `backoff`, `max_delay`, `jitter`, `max_time` and `log_level` once for the whole project with `python_wrap.config.configure(retry={...})`. See [Project-wide configuration](configuration.md).
+
 ### Cancellation and shutdown
 
 `asyncio.CancelledError`, `KeyboardInterrupt`, `SystemExit` and `GeneratorExit` are **never retried**, even with `on=BaseException` or when you list them in `on`: retrying them would make tasks and processes impossible to stop. Cancelling an async call while it waits between attempts cancels it immediately.

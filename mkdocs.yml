@@ -103,6 +103,7 @@ nav:
       - State safety: guides/state.md
       - Policies: guides/policies.md
       - Developer tools: guides/devtools.md
+      - Project-wide configuration: guides/configuration.md
   - Cookbook:
       - cookbook/index.md
       - Resilient HTTP client: cookbook/resilient-http-client.md
@@ -126,6 +127,7 @@ nav:
       - Retry and fallback: api/retry.md
       - Circuit breaker: api/circuit.md
       - Deadline: api/deadline.md
+      - Configuration: api/config.md
       - Caching: api/caching.md
       - Concurrency: api/concurrency.md
       - Async helpers: api/aio.md

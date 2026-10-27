@@ -18,8 +18,9 @@ from dataclasses import dataclass
 from types import TracebackType
 from typing import Any, Protocol, TypeVar, cast, overload
 
-from python_wrap import _core
+from python_wrap import _core, config
 from python_wrap._core import F, LoggerLike, P, R
+from python_wrap.deadline import remaining as _deadline_remaining
 
 T = TypeVar("T")
 T_co = TypeVar("T_co", covariant=True)
@@ -41,6 +42,7 @@ __all__ = [
 ]
 
 _MISSING: Any = object()
+_UNSET: Any = config.UNSET  # resolved by `_resolve_defaults`
 
 
 @dataclass(frozen=True)
@@ -235,6 +237,22 @@ def _parse_hint(value: Any) -> float | None:
     return max(float(value), 0.0)
 
 
+def _resolve_defaults(**given: Any) -> dict[str, Any]:
+    """Fill arguments left unset from `python_wrap.config` (read at decoration time)."""
+    return {k: config.retry_default(k, v, _RETRY_FALLBACK[k]) for k, v in given.items()}
+
+
+_RETRY_FALLBACK: dict[str, Any] = {
+    "max_attempts": 3,
+    "delay": 1.0,
+    "backoff": 1.0,
+    "max_delay": None,
+    "jitter": 0.0,
+    "max_time": None,
+    "log_level": logging.WARNING,
+}
+
+
 class _Engine:
     """The retry state machine shared by `retry` and `retrying`."""
 
@@ -320,6 +338,9 @@ class _Engine:
             wait = self._wait_for(attempt, exc)
             if self.max_time is not None and _core.monotonic() - started + wait > self.max_time:
                 wait = None
+            left = _deadline_remaining()
+            if wait is not None and left is not None and wait > left:
+                wait = None  # never sleep past the surrounding `deadline`
         if wait is None:
             with self.stats._lock:
                 self.stats.gave_up += 1
@@ -388,18 +409,18 @@ def retry(
     func: Callable[..., Any] | None = None,
     /,
     *,
-    max_attempts: int | None = 3,
-    delay: float = 1.0,
-    backoff: float = 1.0,
-    max_delay: float | None = None,
-    jitter: float = 0.0,
-    max_time: float | None = None,
+    max_attempts: int | None = _UNSET,
+    delay: float = _UNSET,
+    backoff: float = _UNSET,
+    max_delay: float | None = _UNSET,
+    jitter: float = _UNSET,
+    max_time: float | None = _UNSET,
     on: ExceptionTypes = Exception,
     retry_if: Callable[[BaseException], bool] | None = None,
     on_retry: Callable[[RetryState], None] | None = None,
     delay_from: Callable[[BaseException], float | None] | None = None,
     logger: LoggerLike = None,
-    log_level: int | None = logging.WARNING,
+    log_level: int | None = _UNSET,
     log_exc_info: bool = False,
 ) -> Any:
     """Retry a function when it raises, optionally with exponential backoff.
@@ -416,6 +437,11 @@ def retry(
     `asyncio.CancelledError`, `KeyboardInterrupt`, `SystemExit` and `GeneratorExit` are
     never retried, even with `on=BaseException` or when listed in `on`. Cancelling an
     async call during the backoff sleep cancels it immediately.
+
+    Arguments you leave out fall back to `python_wrap.config.configure(retry={...})`
+    (read when the decorator is applied), then to the values shown here. Inside a
+    `python_wrap.deadline` block, it never sleeps past the time remaining: if the next
+    wait would outlast the deadline the last exception is re-raised instead.
 
     Statistics are available through `retry_stats`. The events `retry.attempt_failed`,
     `retry.succeeded` and `retry.gave_up` are emitted for `python_wrap.events`. Under
@@ -451,6 +477,22 @@ def retry(
         >>> @retry(max_attempts=5, delay=0.5, backoff=2, on=ConnectionError)
         ... def fetch() -> str: ...
     """
+    ds = _resolve_defaults(
+        max_attempts=max_attempts,
+        delay=delay,
+        backoff=backoff,
+        max_delay=max_delay,
+        jitter=jitter,
+        max_time=max_time,
+        log_level=log_level,
+    )
+    max_attempts, delay, backoff = ds["max_attempts"], ds["delay"], ds["backoff"]
+    max_delay, jitter, max_time, log_level = (
+        ds["max_delay"],
+        ds["jitter"],
+        ds["max_time"],
+        ds["log_level"],
+    )
     # Validate eagerly so a bad option fails at decoration time, even with no function yet.
     _validate(max_attempts, delay, backoff, max_delay, jitter, max_time)
 
@@ -609,18 +651,18 @@ class Retrying:
 
 def retrying(
     *,
-    max_attempts: int | None = 3,
-    delay: float = 1.0,
-    backoff: float = 1.0,
-    max_delay: float | None = None,
-    jitter: float = 0.0,
-    max_time: float | None = None,
+    max_attempts: int | None = _UNSET,
+    delay: float = _UNSET,
+    backoff: float = _UNSET,
+    max_delay: float | None = _UNSET,
+    jitter: float = _UNSET,
+    max_time: float | None = _UNSET,
     on: ExceptionTypes = Exception,
     retry_if: Callable[[BaseException], bool] | None = None,
     on_retry: Callable[[RetryState], None] | None = None,
     delay_from: Callable[[BaseException], float | None] | None = None,
     logger: LoggerLike = None,
-    log_level: int | None = logging.WARNING,
+    log_level: int | None = _UNSET,
     log_exc_info: bool = False,
     name: str = "retrying",
 ) -> Retrying:
@@ -661,6 +703,22 @@ def retrying(
         ...     with attempt:
         ...         do_work()  # doctest: +SKIP
     """
+    ds = _resolve_defaults(
+        max_attempts=max_attempts,
+        delay=delay,
+        backoff=backoff,
+        max_delay=max_delay,
+        jitter=jitter,
+        max_time=max_time,
+        log_level=log_level,
+    )
+    max_attempts, delay, backoff = ds["max_attempts"], ds["delay"], ds["backoff"]
+    max_delay, jitter, max_time, log_level = (
+        ds["max_delay"],
+        ds["jitter"],
+        ds["max_time"],
+        ds["log_level"],
+    )
     return Retrying(
         _Engine(
             name,

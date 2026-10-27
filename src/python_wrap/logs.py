@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from types import FrameType, MappingProxyType, TracebackType
 from typing import Any, TypeVar, cast, overload
 
-from python_wrap import _core
+from python_wrap import _core, config
 from python_wrap._core import F, LoggerLike, P, R
 
 __all__ = [
@@ -370,7 +370,8 @@ def log_args(
     *,
     logger: LoggerLike = None,
     level: int = logging.DEBUG,
-    redact: Iterable[str] = DEFAULT_REDACT,
+    redact: Iterable[str] | None = None,
+    redact_extra: Iterable[str] = (),
     max_length: int = 200,
 ) -> Callable[[F], F]: ...
 def log_args(
@@ -379,7 +380,8 @@ def log_args(
     *,
     logger: LoggerLike = None,
     level: int = logging.DEBUG,
-    redact: Iterable[str] = DEFAULT_REDACT,
+    redact: Iterable[str] | None = None,
+    redact_extra: Iterable[str] = (),
     max_length: int = 200,
 ) -> Any:
     """Log each call's arguments, by parameter name, before running it.
@@ -392,8 +394,11 @@ def log_args(
         logger: A ``logging.Logger``, a logger name, or ``None`` for the package logger.
         level: Log level. Defaults to ``DEBUG`` (v0.1 logged at ``INFO``).
         redact: Parameter-name fragments whose values are shown as ``'***'``
-            (case-insensitive substring match). Replaces the default
-            `DEFAULT_REDACT`; pass ``()`` to disable redaction.
+            (case-insensitive substring match). ``None`` (default) uses
+            `DEFAULT_REDACT` or the list set by `python_wrap.config.configure`. A list
+            given here **replaces** that; pass ``()`` to disable redaction.
+        redact_extra: Fragments to mask **in addition** to the list above (never
+            replaces it). Added to any `redact_extra` set via `configure`.
         max_length: Longest rendering of a single value before it is truncated.
 
     Returns:
@@ -403,7 +408,7 @@ def log_args(
         >>> @log_args(logger="app")
         ... def login(user, password): ...
     """
-    secret = _redact_predicate(tuple(redact))
+    secret = _redact_predicate(config.redaction(redact, DEFAULT_REDACT) + tuple(redact_extra))
 
     def decorate(f: Callable[P, R]) -> Callable[P, R]:
         lg = _core.get_logger(logger)
@@ -518,7 +523,8 @@ def audit(
     *,
     logger: LoggerLike = None,
     level: int = logging.INFO,
-    redact: Iterable[str] = DEFAULT_REDACT,
+    redact: Iterable[str] | None = None,
+    redact_extra: Iterable[str] = (),
     include_result: bool = False,
     sink: Callable[[AuditRecord], None] | None = None,
 ) -> Callable[[F], F]: ...
@@ -528,7 +534,8 @@ def audit(
     *,
     logger: LoggerLike = None,
     level: int = logging.INFO,
-    redact: Iterable[str] = DEFAULT_REDACT,
+    redact: Iterable[str] | None = None,
+    redact_extra: Iterable[str] = (),
     include_result: bool = False,
     sink: Callable[[AuditRecord], None] | None = None,
 ) -> Any:
@@ -544,7 +551,11 @@ def audit(
         logger: A ``logging.Logger``, a logger name, or ``None`` for the package logger.
         level: Log level of the audit line.
         redact: Parameter-name fragments whose values are masked as ``'***'``;
-            ``()`` disables redaction.
+            ``None`` (default) uses `DEFAULT_REDACT` or the list set by
+            `python_wrap.config.configure`; a list given here replaces it and ``()``
+            disables redaction.
+        redact_extra: Fragments to mask in addition to the list above (never
+            replaces it). Added to any `redact_extra` set via `configure`.
         include_result: Store the return value in ``record.result``.
         sink: Callable receiving every record, e.g. to write to a database.
 
@@ -556,7 +567,7 @@ def audit(
         >>> @audit(sink=records.append)
         ... def delete_user(user_id, token): ...
     """
-    secret = _redact_predicate(tuple(redact))
+    secret = _redact_predicate(config.redaction(redact, DEFAULT_REDACT) + tuple(redact_extra))
 
     def decorate(f: Callable[P, R]) -> Callable[P, R]:
         lg = _core.get_logger(logger)
