@@ -186,7 +186,7 @@ def test_fakeclock_basics() -> None:
     assert clock.sleeps == [3, -1]
     assert clock.total_slept == 2
     before = time.monotonic()
-    assert before <= FakeClock().now <= time.monotonic()
+    assert before <= FakeClock().now <= time.monotonic() + 1  # rounded up to a whole second
     assert FakeClock(start=1000.0).now == 1000.0
     with pytest.raises(ValueError):
         clock.advance(-1)
