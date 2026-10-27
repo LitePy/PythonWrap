@@ -18,7 +18,7 @@ Related details:
 
 - Signal-based timeouts need the **main thread**. `use_signals=True` raises `RuntimeError` anywhere else.
 - A C call that does not release the interpreter (a long regex, a blocking C extension) is interrupted only when control returns to Python.
-- `TimeoutExpired` is an ordinary exception. A `retry` with the default `on=Exception` that wraps the function inside an outer `timeout` can catch it. See [Stacking](stacking.md#timeout-above-or-below-retry).
+- `TimeoutExpired` is an ordinary exception. A `retry` with the default `on=Exception` that wraps the function inside an outer `timeout` can catch it. See [Stacking](../get-started/stacking.md#timeout-above-or-below-retry).
 
 ## Shared state on methods
 
@@ -73,6 +73,6 @@ If your function has a `tx` parameter, it is passed as the keyword `tx=`. Put `t
 ## Other things to know
 
 - **`debounce`** (sync) runs the function on a daemon timer thread, so it may be abandoned at interpreter exit with a call still pending. Call `.flush()` before shutting down if the last call matters.
-- **`enforce_types`** accepts, rather than rejects, annotations it cannot check (`TypedDict`, non-runtime-checkable protocols, unresolved forward references). It adds per-call cost proportional to container size. See [Validation](guides/validation.md#supported-annotations).
+- **`enforce_types`** accepts, rather than rejects, annotations it cannot check (`TypedDict`, non-runtime-checkable protocols, unresolved forward references). It adds per-call cost proportional to container size. See [Validation](../features/correctness/validation.md#supported-annotations).
 - **`retry`** with `max_attempts=None` retries forever. Pair it with `max_delay` and an `on=` that names only transient errors.
 - **Signal timers are process-wide.** `timeout` restores the previous `SIGALRM` handler and any armed timer afterwards, but other code that installs its own `SIGALRM` handler concurrently can conflict.

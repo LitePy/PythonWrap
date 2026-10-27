@@ -11,7 +11,7 @@ for post in posts:
 
 This is the "N+1" query problem, and it appears everywhere: ORMs, GraphQL resolvers, templates, serializers. Fixing it by hand means restructuring the code so someone collects all ids first, loads them in one query and passes the results back down, and that couples every layer to the loading strategy.
 
-[`batch_calls`](../guides/batching.md) is the DataLoader pattern: write **one bulk function** that takes a list of ids, and call it **one item at a time** from anywhere. Calls made close together are collected into a single bulk call, and each caller gets its own result.
+[`batch_calls`](../features/caching/batching.md) is the DataLoader pattern: write **one bulk function** that takes a list of ids, and call it **one item at a time** from anywhere. Calls made close together are collected into a single bulk call, and each caller gets its own result.
 
 ## The code
 

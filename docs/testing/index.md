@@ -4,6 +4,8 @@ Decorators that wait or remember make tests slow or order-dependent. python-wrap
 
 python-wrap ships its own testing helpers in `python_wrap.testing` (standard library only; pytest is optional). They cover the common jobs: skip the waiting, cap retries, switch off rate limits and caches, control time, observe calls and wait for background work.
 
+For a worked example of testing a whole service built on these decorators, see the cookbook recipe [Testing your code](../cookbook/testing-your-code.md).
+
 ## Fast mode: instant waits, retries still run
 
 `fast_mode()` makes every wait inside python-wrap instant (`no_sleep`). Retries still run the configured number of times and limiters still count; nothing actually sleeps. Use it as a context manager or a decorator on sync and async tests:

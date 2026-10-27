@@ -2,6 +2,28 @@
 
 Reject bad input at the door, with an error that names the parameter.
 
+```python
+from python_wrap import ValidationError, validate_args
+
+@validate_args(quantity=lambda q: q > 0)
+def order(sku: str, quantity: int) -> str:
+    return f"{quantity} x {sku}"
+
+assert order("SKU-1", 2) == "2 x SKU-1"
+
+try:
+    order("SKU-1", 0)
+except ValidationError as exc:
+    assert exc.parameter == "quantity"
+```
+
+## When to use it
+
+- Business rules (`amount > 0`, "not empty", "valid email"): `validate_args`.
+- "This must be an `int` or `str`": `check_type` is the lightest.
+- "My annotations should be true at runtime": `enforce_types`.
+- Use them at boundaries (public API, request handlers). For deep or hot paths, prefer static type checking.
+
 | Decorator | Checks | Raises |
 | --- | --- | --- |
 | [`validate_args`](#validate_args) | Your predicate per argument | `ValidationError` (a `ValueError`) |
@@ -199,11 +221,7 @@ for bad in ({"mode": "turbo"}, {"mode": "fast", "tags": {"a": ["x"]}}):
 !!! warning "A runtime cost"
     Checking a `list[int]` inspects every element on every call. Use `enforce_types` at boundaries (public API, request handlers), not inside hot loops.
 
-## Choosing between them
-
-- Business rules (`amount > 0`, "not empty", "valid email"): `validate_args`.
-- "This must be an `int` or `str`": `check_type` is the lightest.
-- "My annotations should be true at runtime": `enforce_types`.
+## Combining them
 
 They stack: `enforce_types` for shape, `validate_args` for rules.
 
@@ -217,3 +235,9 @@ def charge(account: str, amount: float) -> str:
 
 assert charge("acme", 5) == "acme: 5"
 ```
+
+## See also
+
+- [State safety](state.md)
+- [Stacking decorators](../../get-started/stacking.md)
+- [API reference](../../api/validation.md)

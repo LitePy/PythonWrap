@@ -2,10 +2,6 @@
 
 Keep objects consistent when something goes wrong halfway.
 
-## `revert_on_failure`
-
-If the function raises, restore the object's attributes to what they were before the call, then re-raise.
-
 ```python
 from python_wrap import revert_on_failure
 
@@ -31,7 +27,15 @@ assert account.balance == 10      # restored
 assert account.history == []      # the append was undone too
 ```
 
-By default it snapshots `vars(self)`: the first argument of the call. Attributes created during the call are deleted again on failure.
+## When to use it
+
+- `revert_on_failure` when a method changes several attributes and must leave the object untouched if it raises.
+- `Transaction` or `transactional` when a failure must undo things outside the object: files written, records created, payments taken.
+- Neither is a database transaction. They run your callbacks; they do not make the steps atomic.
+
+## `revert_on_failure`
+
+If the function raises, restore the object's attributes to what they were before the call, then re-raise. By default it snapshots `vars(self)`: the first argument of the call. Attributes created during the call are deleted again on failure.
 
 | Option | Meaning |
 | --- | --- |
@@ -63,10 +67,10 @@ assert cart.items[0]["qty"] == 1    # deep=True undoes nested mutation
 assert cart.coupon == "TEN"         # outside attrs, so not restored
 ```
 
-!!! warning "Copy semantics"
-    Each value is copied (`copy.copy`, or `copy.deepcopy` with `deep=True`) and the **copy** is restored. In-place mutation of a container attribute (`self.items.append(x)`) is undone, but the attribute ends up referring to a new list, so other references to the old list still see the mutation. A shallow copy does not protect nested objects: `self.items[0].count += 1` is only undone with `deep=True`. Values that cannot be copied are restored by reference. See [Limitations](../limitations.md#revert_on_failure).
-
 It works on `async def` methods too. It undoes attribute changes only, not side effects such as files written or requests sent; for those, use a transaction.
+
+!!! warning "Copy semantics"
+    Each value is copied (`copy.copy`, or `copy.deepcopy` with `deep=True`) and the **copy** is restored. In-place mutation of a container attribute (`self.items.append(x)`) is undone, but the attribute ends up referring to a new list, so other references to the old list still see the mutation. A shallow copy does not protect nested objects: `self.items[0].count += 1` is only undone with `deep=True`. Values that cannot be copied are restored by reference. See [Limitations](../../project/limitations.md).
 
 ## Transactions
 
@@ -125,7 +129,7 @@ A `Transaction` collects undo steps (`on_rollback`) and follow-up steps (`on_com
 
 ## `transactional`
 
-Wrap a function in a fresh `Transaction` per call. Returning normally commits; raising rolls back and re-raises. Receive the transaction as a keyword parameter named `tx` declared as `tx: Transaction = INJECTED`; `INJECTED` is a typed placeholder, so type checkers let callers omit `tx` (passing it yourself raises `TypeError`). Or fetch it anywhere in the call tree with `require_transaction()`, which raises `RuntimeError` outside a transaction, or `current_transaction()`, which returns `None` there.
+Wrap a function in a fresh `Transaction` per call. Returning normally commits; raising rolls back and re-raises. Receive the transaction as a keyword parameter named `tx` declared as `tx: Transaction = INJECTED`; `INJECTED` is a typed placeholder, so type checkers let callers omit `tx`. Or fetch it anywhere in the call tree with `require_transaction()`, which raises `RuntimeError` outside a transaction, or `current_transaction()`, which returns `None` there.
 
 === "Sync"
 
@@ -181,7 +185,7 @@ Wrap a function in a fresh `Transaction` per call. Returning normally commits; r
     ```
 
 !!! warning "Make `tx` keyword-only"
-    When the function has a parameter named `tx`, it is passed as the keyword argument `tx=`. Callers must not pass it themselves (a `TypeError` says so). Declaring it keyword-only, with the `INJECTED` default, keeps callers from colliding with it.
+    When the function has a parameter named `tx`, it is passed as the keyword argument `tx=`. Callers must not pass it themselves (a `TypeError` says so). A positional-only `tx` is rejected when you decorate, because it cannot be passed by keyword. Declare it keyword-only, with the `INJECTED` default, so callers cannot collide with it.
 
 ### Without a `tx` parameter
 
@@ -212,3 +216,9 @@ assert current_transaction() is None
 ```
 
 Nested `@transactional` calls each get their own transaction.
+
+## See also
+
+- [Validation](validation.md)
+- [Limitations](../../project/limitations.md)
+- [API reference](../../api/state.md)

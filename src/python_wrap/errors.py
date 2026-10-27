@@ -1,7 +1,9 @@
 """Exceptions raised by python-wrap.
 
-Each one also subclasses the closest built-in, so ``except TimeoutError`` or
-``except ValueError`` keeps working for code written against v0.1.
+Every one subclasses `PythonWrapError`. Those with a natural built-in counterpart also
+subclass it (`TimeoutExpired` is a `TimeoutError`, `ValidationError` a `ValueError`,
+`ArgumentTypeError` a `TypeError`), so ``except TimeoutError`` or ``except ValueError``
+keeps working for code written against v0.1.
 """
 
 from __future__ import annotations

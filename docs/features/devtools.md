@@ -1,10 +1,6 @@
 # Developer tools
 
-Tools for evolving an API, faking data, and keeping decorator stacks tidy.
-
-## `deprecate`
-
-Mark a function, method or class as deprecated. Every call (or, for `async def`, every await) emits a warning that **points at the caller's line**, not at the library, so users see which of their code to change. The wrapped object also gets a `__deprecated__` attribute (PEP 702).
+Tools for evolving an API, faking data, and keeping decorator stacks tidy: `deprecate`, `mock_data`, `compose`, `wrap_methods` and `no_debug`.
 
 ```python
 import warnings
@@ -22,6 +18,17 @@ assert caught[0].category is DeprecationWarning
 text = str(caught[0].message)
 assert "old_func" in text and "0.2" in text and "1.0" in text and "new_func" in text
 ```
+
+## When to use it
+
+- `deprecate` to retire a function, method or class without surprising callers.
+- `mock_data` to return fixed data in tests and local development.
+- `compose` to define a decorator stack once and reuse it.
+- `wrap_methods` to decorate many methods of a class in one line.
+
+## `deprecate`
+
+Mark a function, method or class as deprecated. Every call (or, for `async def`, every await) emits a warning that **points at the caller's line**, not at the library, so users see which of their code to change. The wrapped object also gets a `__deprecated__` attribute (PEP 702).
 
 The structured parts are combined into `"<name> is deprecated since ... and will be removed in ...; use ... instead."`. Pass a message to replace the generated text, and `category=` to change the warning class:
 
@@ -73,7 +80,10 @@ The structured parts are combined into `"<name> is deprecated since ... and will
     assert caught[0].category is FutureWarning
     ```
 
-Classes are changed in place: their `__init__` warns. Remember that Python hides `DeprecationWarning` by default outside `__main__` and test runners; use `category=FutureWarning` when end users, not developers, should see it.
+Classes are changed in place: their `__init__` warns.
+
+!!! note "Who sees the warning"
+    Python hides `DeprecationWarning` by default outside `__main__` and test runners. Use `category=FutureWarning` when end users, not developers, should see it.
 
 ## `mock_data`
 
@@ -115,7 +125,7 @@ assert asyncio.run(numbers()) == [1, 2, 3]
 ```
 
 !!! danger "Never ship it enabled"
-    `mock_data` silently replaces real behaviour. Tie `enabled=` to an explicit opt-in such as an environment variable that is off by default, never a default of `True` in code that reaches production. In tests, see [Testing](../testing.md#disabling-mock_data).
+    `mock_data` silently replaces real behaviour. Tie `enabled=` to an explicit opt-in such as an environment variable that is off by default, never a default of `True` in code that reaches production. In tests, see [Testing](../testing/index.md).
 
 ## `compose`
 
@@ -142,14 +152,14 @@ assert lookup("a") == "A"
 assert lookup_other("A") == "a"
 ```
 
-Define a stack once and reuse it across your codebase. `compose()` with no decorators returns the function unchanged, and a non-callable argument raises `TypeError`. The order rules in [Stacking decorators](../stacking.md) apply to the arguments.
+Define a stack once and reuse it across your codebase. `compose()` with no decorators returns the function unchanged, and a non-callable argument raises `TypeError`. The order rules in [Stacking decorators](../get-started/stacking.md) apply to the arguments.
 
 !!! note "Share state deliberately"
     `compose(memoize(...))` creates its `memoize` decorator once, but `memoize` still gives each decorated function its own cache. A `CircuitBreaker` instance, on the other hand, is shared by everything it decorates. That is usually what you want for a breaker, but check it.
 
 ## `wrap_methods`
 
-Apply decorators to the methods of a class in one line. Decorators are listed outermost first, like `compose`, and a [policy](policies.md) works as well.
+Apply decorators to the methods of a class in one line. Decorators are listed outermost first, like `compose`, and a [policy](resilience/policies.md) works as well.
 
 ```python
 import asyncio
@@ -191,4 +201,11 @@ Plain, `async def`, `@staticmethod` and `@classmethod` methods are decorated cor
 
 ## `no_debug`
 
-A deprecated no-op kept so v0.1 code keeps importing. It returns the function unchanged and warns when applied. It will be removed in 0.3. To hide debug output, configure [logging levels](observability.md#configuring-logging) instead.
+A deprecated no-op kept so v0.1 code keeps importing. It returns the function unchanged and warns when applied. It will be removed in 0.3. To hide debug output, configure [logging levels](observability/logging.md#configuring-logging) instead.
+
+## See also
+
+- [Stacking decorators](../get-started/stacking.md)
+- [Policies](resilience/policies.md)
+- [Testing](../testing/index.md)
+- [API reference](../api/devtools.md)

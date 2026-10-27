@@ -1,4 +1,4 @@
-# Project-wide configuration
+# Configuration
 
 Repeating `retry(max_attempts=5, delay=0.5, ...)` or `redact=(...)` on every decorator is how defaults drift. `python_wrap.config` sets them once.
 
@@ -14,6 +14,11 @@ configure(
 assert get_config()["retry"]["max_attempts"] == 5
 reset_config()
 ```
+
+## When to use it
+
+- Project-wide retry policy, logger, or redaction list that every decorator should share.
+- Not for one-off differences: pass the argument on that decorator, which always wins.
 
 ## When values are read
 
@@ -59,7 +64,7 @@ except TypeError as exc:
 
 Retry defaults are validated immediately (`ValueError` for `max_attempts=0`, and so on). Because `redact=` on a decorator replaces the list, prefer `redact_extra` in project settings; it is also what `redact_extra=` does on `log_args` and `audit` themselves.
 
-## In tests
+## Testing
 
 `configured()` applies defaults for a block and restores the previous state on exit, even after an error. Apply the decorators inside the block.
 
@@ -75,3 +80,14 @@ assert get_config()["retry"] == {}
 ```
 
 `reset_config()` forgets everything; `get_config()` returns a copy of what is in force.
+
+## Gotchas
+
+!!! warning "Configure before you decorate"
+    Decorators applied before `configure()` runs keep the defaults they saw. Put the call at the top of your entry point, before importing modules that define decorated functions.
+
+## See also
+
+- [Retry](resilience/retry.md), [Logging](observability/logging.md)
+- [Testing](../testing/index.md)
+- [API reference](../api/config.md)

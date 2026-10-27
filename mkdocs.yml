@@ -70,6 +70,28 @@ extra:
 
 plugins:
   - search
+  - redirects:
+      redirect_maps:
+        choosing.md: get-started/choosing.md
+        async.md: get-started/async-and-methods.md
+        stacking.md: get-started/stacking.md
+        testing.md: testing/index.md
+        performance.md: project/performance.md
+        limitations.md: project/limitations.md
+        migration.md: project/migration.md
+        changelog.md: project/changelog.md
+        guides/resilience.md: features/resilience/index.md
+        guides/policies.md: features/resilience/policies.md
+        guides/configuration.md: features/configuration.md
+        guides/caching.md: features/caching/index.md
+        guides/batching.md: features/caching/batching.md
+        guides/concurrency.md: features/concurrency/index.md
+        guides/async-toolkit.md: features/concurrency/async-helpers.md
+        guides/observability.md: features/observability/index.md
+        guides/metrics.md: features/observability/metrics.md
+        guides/validation.md: features/correctness/validation.md
+        guides/state.md: features/correctness/state.md
+        guides/devtools.md: features/devtools.md
   - mkdocstrings:
       handlers:
         python:
@@ -114,20 +136,51 @@ markdown_extensions:
 
 nav:
   - Home: index.md
-  - Choose a decorator: choosing.md
-  - Guides:
-      - Resilience: guides/resilience.md
-      - Caching: guides/caching.md
-      - Concurrency and rate limits: guides/concurrency.md
-      - Async toolkit and bulkheads: guides/async-toolkit.md
-      - Batching and hedging: guides/batching.md
-      - Observability: guides/observability.md
-      - Metrics and events: guides/metrics.md
-      - Validation: guides/validation.md
-      - State safety: guides/state.md
-      - Policies: guides/policies.md
-      - Developer tools: guides/devtools.md
-      - Project-wide configuration: guides/configuration.md
+  - Get started:
+      - get-started/index.md
+      - Installation: get-started/installation.md
+      - Quickstart: get-started/quickstart.md
+      - Choose a decorator: get-started/choosing.md
+      - Async and methods: get-started/async-and-methods.md
+      - Stacking decorators: get-started/stacking.md
+      - Errors: get-started/errors.md
+  - Features:
+      - features/index.md
+      - Resilience:
+          - features/resilience/index.md
+          - Retry: features/resilience/retry.md
+          - Circuit breaker: features/resilience/circuit-breaker.md
+          - Timeout and deadline: features/resilience/timeout.md
+          - Fallback and suppress: features/resilience/fallback.md
+          - Hedged requests: features/resilience/hedge.md
+          - Policies: features/resilience/policies.md
+      - Caching and batching:
+          - features/caching/index.md
+          - Memoize: features/caching/memoize.md
+          - Once: features/caching/once.md
+          - Cached property: features/caching/cached-property.md
+          - Singleflight: features/caching/singleflight.md
+          - Batching: features/caching/batching.md
+      - Concurrency and limits:
+          - features/concurrency/index.md
+          - Rate limits: features/concurrency/rate-limits.md
+          - Throttle and debounce: features/concurrency/throttle-debounce.md
+          - Bulkheads: features/concurrency/bulkheads.md
+          - Async helpers: features/concurrency/async-helpers.md
+          - Run in a thread: features/concurrency/run-in-thread.md
+      - Observability:
+          - features/observability/index.md
+          - Logging: features/observability/logging.md
+          - Audit: features/observability/audit.md
+          - Timing and profiling: features/observability/timing.md
+          - Metrics and events: features/observability/metrics.md
+      - Correctness:
+          - features/correctness/index.md
+          - Validation: features/correctness/validation.md
+          - State and transactions: features/correctness/state.md
+      - Developer tools: features/devtools.md
+      - Configuration: features/configuration.md
+  - Testing: testing/index.md
   - Cookbook:
       - cookbook/index.md
       - Resilient HTTP client: cookbook/resilient-http-client.md
@@ -138,33 +191,35 @@ nav:
       - DataLoader-style batching: cookbook/dataloader-batching.md
       - Testing your code: cookbook/testing-your-code.md
       - Observability: cookbook/observability.md
-  - Concepts:
-      - Async support: async.md
-      - Stacking decorators: stacking.md
-      - Testing: testing.md
-      - Limitations: limitations.md
-      - Performance: performance.md
-  - Migrating to 0.2: migration.md
   - API reference:
       - api/index.md
-      - Errors: api/errors.md
-      - Retry and fallback: api/retry.md
-      - Circuit breaker: api/circuit.md
-      - Deadline: api/deadline.md
+      - Resilience:
+          - Retry and fallback: api/retry.md
+          - Circuit breaker: api/circuit.md
+          - Deadline: api/deadline.md
+          - Hedging: api/hedging.md
+          - Policies: api/policy.md
+      - Caching and batching:
+          - Caching: api/caching.md
+          - Batching: api/batching.md
+      - Concurrency and limits:
+          - Concurrency: api/concurrency.md
+          - Async helpers: api/aio.md
+          - Bulkhead: api/bulkhead.md
+      - Observability:
+          - Logging and audit: api/logs.md
+          - Timing and profiling: api/timing.md
+          - Metrics: api/metrics.md
+          - Events: api/events.md
+      - Correctness:
+          - Validation: api/validation.md
+          - State: api/state.md
       - Configuration: api/config.md
-      - Caching: api/caching.md
-      - Concurrency: api/concurrency.md
-      - Async helpers: api/aio.md
-      - Bulkhead: api/bulkhead.md
-      - Batching: api/batching.md
-      - Hedging: api/hedging.md
-      - Timing and profiling: api/timing.md
-      - Logging and audit: api/logs.md
-      - Metrics: api/metrics.md
-      - Events: api/events.md
-      - Validation: api/validation.md
-      - State: api/state.md
-      - Policies: api/policy.md
       - Developer tools: api/devtools.md
       - Testing helpers: api/testing.md
-  - Changelog: changelog.md
+      - Errors: api/errors.md
+  - Project:
+      - Performance: project/performance.md
+      - Limitations: project/limitations.md
+      - Migrating to 0.2: project/migration.md
+      - Changelog: project/changelog.md

@@ -1,11 +1,6 @@
 # Metrics and events
 
-Two tools for seeing what your code does in production, with no dependencies:
-
-- `count_calls` keeps in-process call counts and latency percentiles for one function.
-- `python_wrap.events` publishes what the resilience decorators do (retries, cache hits, circuit changes, rejections) so you can forward them to Prometheus, OpenTelemetry, statsd or your logs.
-
-## `count_calls`
+See what your code does in production, with no dependencies: in-process call statistics, and an event stream you can forward to your monitoring system.
 
 ```python
 from python_wrap.metrics import count_calls
@@ -31,6 +26,14 @@ work.reset()
 assert work.stats.calls == 0
 ```
 
+## When to use it
+
+- `count_calls` when you want call counts, error rate and p50/p95/p99 for one function, read from your own code or an endpoint.
+- Events when you want to know what the resilience decorators did (retries, cache hits, circuit changes, rejections) and forward it to Prometheus, OpenTelemetry, statsd or your logs.
+- For per-call durations written to the log, use [`timing`](timing.md). For arguments and results, use [Logging](logging.md).
+
+## `count_calls`
+
 `.stats` is a live view with `calls`, `errors`, `in_flight`, `last_duration`, `mean`, `p50`, `p95` and `p99` (seconds). `calls` and `errors` count everything since the last `reset()`; the latency figures cover the last `window` finished calls (default 1000), failed ones included. Percentiles use the nearest-rank method. All of it is thread-safe.
 
 `async def` functions work the same, timed across the whole awaited coroutine, and `in_flight` shows how many calls are running right now:
@@ -51,7 +54,8 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-On methods the statistics belong to the function, so they are shared by every instance. Cancellation counts as an error.
+!!! note "Methods share statistics"
+    On methods the statistics belong to the function, so they are shared by every instance. Cancellation counts as an error.
 
 ## Events
 
@@ -84,8 +88,6 @@ assert seen[0].fields["attempt"] == 1
 - `listening(listener)` is the same as a `with` block.
 - `filter_events("retry.", listener)` wraps a listener so it only sees names with that prefix (or any of a tuple of prefixes).
 
-Listeners run synchronously in the thread that triggered the event, so keep them fast and never block. An exception in a listener is logged and swallowed: monitoring code can not break the decorated function. With no listeners registered, emitting is a single list check.
-
 ```python
 from python_wrap.events import Event, filter_events, subscribe
 
@@ -93,6 +95,9 @@ retries: list[Event] = []
 unsubscribe = subscribe(filter_events("retry.", retries.append))
 unsubscribe()
 ```
+
+!!! warning "Listeners run in the calling thread"
+    Listeners run synchronously in the thread that triggered the event, so keep them fast and never block. An exception in a listener is logged and swallowed: monitoring code can not break the decorated function. With no listeners registered, emitting is a single list check.
 
 ### Event catalogue
 
@@ -197,3 +202,9 @@ subscribe(to_structlog)
 ```
 
 With the standard library instead, call `logging.getLogger("myapp.events").info("%s %s", event.name, event.function, extra={"fields": event.fields})`.
+
+## See also
+
+- [Timing](timing.md), [Logging](logging.md)
+- [Retry](../resilience/retry.md), [Circuit breaker](../resilience/circuit-breaker.md) and the other pages that list the events they emit
+- [API reference](../../api/metrics.md), [events API](../../api/events.md)

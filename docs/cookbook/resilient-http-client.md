@@ -219,7 +219,7 @@ For `httpx.AsyncClient` make `get` and `_send` `async def` and use `await breake
 
 ## Test it
 
-The decorators wait and remember, so tests need the helpers from [`python_wrap.testing`](../testing.md): `fake_clock` makes sleeps instant and records them, `spy_on` counts transport calls and `disable_rate_limits` lets calls through limiters. (`fast_mode` skips waits without recording them; see [Testing code that uses python-wrap](testing-your-code.md).)
+The decorators wait and remember, so tests need the helpers from [`python_wrap.testing`](../testing/index.md): `fake_clock` makes sleeps instant and records them, `spy_on` counts transport calls and `disable_rate_limits` lets calls through limiters. (`fast_mode` skips waits without recording them; see [Testing code that uses python-wrap](testing-your-code.md).)
 
 ```python
 import threading

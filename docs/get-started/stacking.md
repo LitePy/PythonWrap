@@ -159,7 +159,7 @@ def load_profile(user_id: int) -> dict:
     ...
 ```
 
-Put the same stack on many functions with [`compose`](guides/devtools.md#compose).
+Put the same stack on many functions with [`compose`](../features/devtools.md).
 
 ## Rules of thumb
 
@@ -167,5 +167,5 @@ Put the same stack on many functions with [`compose`](guides/devtools.md#compose
 - **Observers go outside, guards go inside.** An `audit` or `timing` outside the retry loop records the outcome the caller experienced.
 - **Caches go outside the things that are expensive to repeat.** `memoize` above `retry` caches the final success and skips the retry loop on a hit.
 - **`singleflight` goes below `memoize`.** Cache first; only a miss needs de-duplicating.
-- **Decorators that hold state belong to the function.** Stacking never merges state, but see [shared state on methods](limitations.md#shared-state-on-methods).
-- **Async and sync stack the same way.** Every decorator preserves whether the function is `async def`, so the order rules are identical. See [Async support](async.md).
+- **Decorators that hold state belong to the function.** Stacking never merges state, but see [shared state on methods](../project/limitations.md#shared-state-on-methods).
+- **Async and sync stack the same way.** Every decorator preserves whether the function is `async def`, so the order rules are identical. See [Async and methods](async-and-methods.md).

@@ -1,4 +1,4 @@
-# Async support
+# Async and methods
 
 Every decorator in python-wrap works on `async def` functions. You use it the same way; the wrapper behaves correctly for coroutines.
 
@@ -35,7 +35,7 @@ for decorator in (
     assert inspect.iscoroutinefunction(decorator(probe)), decorator
 ```
 
-Methods work too, including `async def` methods; `self` is just the first argument.
+Methods work too, including `async def` methods; `self` is just the first argument. Read [Methods](#methods) below before decorating methods with limiters or caches.
 
 ## Per-decorator behaviour
 
@@ -52,7 +52,7 @@ Methods work too, including `async def` methods; `self` is just the first argume
 | `throttle` | Same semantics with an `async` wrapper. |
 | `debounce` | Schedules a task on the running loop. Every caller in a burst awaits the same outcome (the last call's result). Tracked per event loop. |
 | `run_in_thread` | The coroutine runs with `asyncio.run` in a new thread (its own loop). The wrapper is a plain function returning a `Future`. |
-| `timing`, `measure_memory`, `profile` | Cover the whole awaited coroutine. (`profile` includes event-loop work for other tasks; see [Limitations](limitations.md#measure_memory-and-profile).) |
+| `timing`, `measure_memory`, `profile` | Cover the whole awaited coroutine. (`profile` includes event-loop work for other tasks; see [Limitations](../project/limitations.md#measure_memory-and-profile).) |
 | `benchmark` / `benchmark_async` | Use `benchmark_async` for coroutine functions; `benchmark` raises `TypeError`. |
 | `log_args`, `log_return`, `audit`, `trace` | Log around the awaited call. |
 | `validate_args`, `check_type`, `enforce_types` | Validate at call time; `enforce_types` checks the awaited result against the return annotation. |
@@ -75,7 +75,16 @@ async def job() -> int:
 assert asyncio.run(job()) == 1
 ```
 
-To run a coroutine function in the background from sync code, use [`run_in_thread`](guides/concurrency.md#run_in_thread). It gives the coroutine its own event loop in a new thread and hands you a `Future`.
+To run a coroutine function in the background from sync code, use [`run_in_thread`](../features/concurrency/run-in-thread.md). It gives the coroutine its own event loop in a new thread and hands you a `Future`.
+
+## Methods
+
+Decorators work on instance methods; `self` is an ordinary first argument. Two things differ from plain functions:
+
+- **`rate_limit`, `throttle` and `debounce` keep their state on the decorated function**, so every instance shares one limiter, one throttle window and one pending call. Split the state with `key=` (for `rate_limit`) or build the decorated callable per instance in `__init__`.
+- **`memoize` includes `self` in the cache key**, so results are per instance, but the cache holds a strong reference to every instance it has seen. Set `maxsize` or `ttl` to let them go.
+
+Both are explained, with workarounds, in [Limitations](../project/limitations.md#shared-state-on-methods). To apply one decorator to every method of a class, see [`wrap_methods`](../features/devtools.md).
 
 ## Gotchas
 

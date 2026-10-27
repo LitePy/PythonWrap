@@ -1,6 +1,6 @@
 # Policies
 
-A **policy** is a reusable, named bundle of decorators. You say *which* protections a call needs; the policy applies them in the [recommended order](../stacking.md), however you list them.
+A **policy** is a reusable, named bundle of decorators. You say *which* protections a call needs; the policy applies them in the [recommended order](../../get-started/stacking.md), however you list them.
 
 ```python
 from python_wrap import CircuitBreaker, policy, retry, timeout
@@ -20,7 +20,13 @@ assert charge(5) == 5
 print(payments)   # Policy('payments', breaker > retry > timeout)
 ```
 
-## Why keyword roles
+## When to use it
+
+- Several calls need the same protections (every call to one service).
+- You want the stacking order guaranteed instead of hand-checked.
+- Not for a single call with one decorator: use the decorator directly.
+
+## Roles
 
 Each decorator goes into a named **role**. The role decides the position, so the code cannot be mis-ordered, and the arguments are checked by the type checker. Guessing a role from a decorator object would be fragile (factories return plain closures), so python-wrap does not guess.
 
@@ -58,7 +64,7 @@ assert no_retry.order == ("timeout",)
 
 ## Async and methods
 
-A policy is a decorator for plain, `async def`, instance, static and class methods, and keeps the function's type. Combine it with [`wrap_methods`](devtools.md#wrap_methods) to protect a whole class.
+A policy is a decorator for plain, `async def`, instance, static and class methods, and keeps the function's type. Combine it with [`wrap_methods`](../devtools.md#wrap_methods) to protect a whole class.
 
 ```python
 import asyncio
@@ -73,5 +79,16 @@ async def load(x: int) -> int:
 assert asyncio.run(load(1)) == 1
 ```
 
+## Gotchas
+
 !!! note "Shared state"
     A `CircuitBreaker` instance is shared by everything the policy decorates, which is usually what you want for one dependency. Other decorators create state per decorated function.
+
+!!! note "`python_wrap.policy` is the function"
+    The package attribute `python_wrap.policy` is the `policy` function, not the module.
+
+## See also
+
+- [Stacking](../../get-started/stacking.md) for the reasoning behind the order
+- [Retry](retry.md), [Circuit breaker](circuit-breaker.md), [Timeout](timeout.md), [Fallback](fallback.md)
+- [API reference](../../api/policy.md)
