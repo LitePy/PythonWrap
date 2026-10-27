@@ -101,6 +101,7 @@ nav:
       - Metrics and events: guides/metrics.md
       - Validation: guides/validation.md
       - State safety: guides/state.md
+      - Policies: guides/policies.md
       - Developer tools: guides/devtools.md
   - Concepts:
       - Async support: async.md
@@ -125,6 +126,7 @@ nav:
       - Events: api/events.md
       - Validation: api/validation.md
       - State: api/state.md
+      - Policies: api/policy.md
       - Developer tools: api/devtools.md
       - Testing helpers: api/testing.md
   - Changelog: changelog.md

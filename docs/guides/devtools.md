@@ -147,6 +147,48 @@ Define a stack once and reuse it across your codebase. `compose()` with no decor
 !!! note "Share state deliberately"
     `compose(memoize(...))` creates its `memoize` decorator once, but `memoize` still gives each decorated function its own cache. A `CircuitBreaker` instance, on the other hand, is shared by everything it decorates. That is usually what you want for a breaker, but check it.
 
+## `wrap_methods`
+
+Apply decorators to the methods of a class in one line. Decorators are listed outermost first, like `compose`, and a [policy](policies.md) works as well.
+
+```python
+import asyncio
+from python_wrap import policy, retry, timeout, wrap_methods
+
+calls = []
+
+@wrap_methods(
+    policy(retry=retry(max_attempts=2, delay=0)),
+    exclude=["close"],
+)
+class Client:
+    def get(self, key: str) -> str:
+        calls.append(key)
+        return key
+
+    async def fetch(self, key: str) -> str:
+        return key
+
+    @staticmethod
+    def parse(raw: str) -> int:
+        return int(raw)
+
+    def close(self) -> None: ...
+
+client = Client()
+assert client.get("a") == "a"
+assert asyncio.run(client.fetch("b")) == "b"
+assert Client.parse("3") == 3
+```
+
+Plain, `async def`, `@staticmethod` and `@classmethod` methods are decorated correctly (the underlying function is wrapped and put back in its descriptor). By default these are skipped: dunder methods, names starting with `_`, properties, non-function attributes and inherited methods.
+
+| Option | Meaning |
+| --- | --- |
+| `include` | Names (list/set) or a predicate. Restricts the selection. Naming a dunder or a property here opts it in. |
+| `exclude` | Names or a predicate to leave alone. Wins over `include`. |
+| `include_private` | Also select `_single_underscore` methods. |
+
 ## `no_debug`
 
 A deprecated no-op kept so v0.1 code keeps importing. It returns the function unchanged and warns when applied. It will be removed in 0.3. To hide debug output, configure [logging levels](observability.md#configuring-logging) instead.

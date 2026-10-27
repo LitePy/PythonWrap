@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import functools
+import inspect
 import warnings
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from typing import Any, TypeVar, cast, overload
 
 from python_wrap import _core
@@ -13,7 +14,7 @@ from python_wrap._core import P, R
 F = TypeVar("F", bound=Callable[..., Any])
 T = TypeVar("T")
 
-__all__ = ["compose", "deprecate", "mock_data", "no_debug"]
+__all__ = ["compose", "deprecate", "mock_data", "no_debug", "wrap_methods"]
 
 
 def _mark(obj: T, text: str) -> T:
@@ -287,5 +288,98 @@ def compose(*decorators: Callable[[Any], Any]) -> Callable[[F], F]:
         for decorator in reversed(decorators):
             result = decorator(result)
         return cast(F, result)
+
+    return decorate
+
+
+C = TypeVar("C", bound=type)
+
+
+def _is_dunder(name: str) -> bool:
+    return name.startswith("__") and name.endswith("__")
+
+
+def wrap_methods(
+    *decorators: Callable[[Any], Any],
+    include: Iterable[str] | Callable[[str], bool] | None = None,
+    exclude: Iterable[str] | Callable[[str], bool] | None = None,
+    include_private: bool = False,
+) -> Callable[[C], C]:
+    """Class decorator that applies decorators to the methods of a class.
+
+    Decorators are given outermost first, like `compose`; a `Policy` works too.
+    Plain, ``async def``, static and class methods are all handled: the underlying
+    function is decorated and re-wrapped in ``staticmethod``/``classmethod``. Only
+    methods defined on the class itself are touched, not inherited ones.
+
+    By default dunder methods, names starting with ``_`` and properties are skipped.
+    Naming one in `include` (a collection of names, not a predicate) opts it in;
+    for a property, the getter, setter and deleter are all decorated.
+
+    Args:
+        *decorators: Decorators to apply, outermost first.
+        include: Names (or a predicate on the name) to restrict the selection to.
+            ``None`` selects every eligible method.
+        exclude: Names (or a predicate) to leave alone. Wins over `include`.
+        include_private: Also select single-underscore names such as ``_helper``.
+
+    Returns:
+        A class decorator that modifies and returns the same class.
+
+    Raises:
+        TypeError: If any decorator is not callable.
+
+    Example:
+        ```python
+        @wrap_methods(retry(max_attempts=3, on=ConnectionError), exclude=["close"])
+        class Client:
+            def get(self, url: str) -> str: ...
+            def close(self) -> None: ...
+        ```
+    """
+    for index, decorator in enumerate(decorators):
+        if not callable(decorator):
+            raise TypeError(
+                f"wrap_methods() arguments must be callable; argument {index} is {decorator!r}"
+            )
+
+    def matcher(spec: Iterable[str] | Callable[[str], bool]) -> Callable[[str], bool]:
+        if callable(spec):
+            return spec
+        names = {spec} if isinstance(spec, str) else set(spec)
+        return names.__contains__
+
+    explicit: frozenset[str] = frozenset()
+    if include is not None and not callable(include):
+        explicit = frozenset({include} if isinstance(include, str) else include)
+    include_ok = matcher(include) if include is not None else (lambda _n: True)
+    exclude_ok = matcher(exclude) if exclude is not None else (lambda _n: False)
+
+    def decorate_func(func: Any) -> Any:
+        result = func
+        for decorator in reversed(decorators):
+            result = decorator(result)
+        return result
+
+    def decorate(cls: C) -> C:
+        for name, attr in list(vars(cls).items()):
+            if exclude_ok(name) or not include_ok(name):
+                continue
+            named = name in explicit
+            if not named and (_is_dunder(name) or (name.startswith("_") and not include_private)):
+                continue
+            if isinstance(attr, property):
+                if not named:
+                    continue
+                fget, fset, fdel = (
+                    decorate_func(p) if p is not None else None
+                    for p in (attr.fget, attr.fset, attr.fdel)
+                )
+                setattr(cls, name, property(fget, fset, fdel, attr.__doc__))
+            elif isinstance(attr, (staticmethod, classmethod)):
+                setattr(cls, name, type(attr)(decorate_func(attr.__func__)))
+            elif inspect.isfunction(attr):
+                setattr(cls, name, decorate_func(attr))
+        return cls
 
     return decorate

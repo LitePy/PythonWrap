@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import inspect
 import os
@@ -9,7 +10,8 @@ from typing import Any
 
 import pytest
 
-from python_wrap.devtools import compose, deprecate, mock_data, no_debug
+from python_wrap.devtools import compose, deprecate, mock_data, no_debug, wrap_methods
+from python_wrap.policy import policy
 
 
 def _deprecation_text(obj: Any) -> str:
@@ -433,3 +435,140 @@ def test_deprecate_subclass_of_deprecated_class_warns_once() -> None:
         f = Feet(2.0)
     assert f == 2.0
     assert len(rec) == 1
+
+
+# --- wrap_methods ----------------------------------------------------------
+
+
+def _tag(log: list[str]) -> Any:
+    def decorator(func: Any) -> Any:
+        @functools.wraps(func)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            log.append(func.__name__)
+            return func(*args, **kwargs)
+
+        return wrapper
+
+    return decorator
+
+
+def test_wrap_methods_handles_all_method_kinds() -> None:
+    log: list[str] = []
+
+    @wrap_methods(_tag(log))
+    class K:
+        def plain(self) -> int:
+            return 1
+
+        async def aplain(self) -> int:
+            return 2
+
+        @staticmethod
+        def stat() -> int:
+            return 3
+
+        @classmethod
+        def cls_m(cls) -> int:
+            return 4
+
+        def _private(self) -> int:
+            return 5
+
+        @property
+        def prop(self) -> int:
+            return 6
+
+        def __len__(self) -> int:
+            return 7
+
+        attr = 9
+
+    k = K()
+    assert (k.plain(), K.stat(), K.cls_m(), k._private(), k.prop, len(k)) == (1, 3, 4, 5, 6, 7)
+    assert asyncio.run(k.aplain()) == 2
+    assert log == ["plain", "stat", "cls_m", "aplain"]
+    assert isinstance(K.__dict__["stat"], staticmethod)
+    assert isinstance(K.__dict__["cls_m"], classmethod)
+    assert K.attr == 9
+
+
+def test_wrap_methods_include_exclude_private() -> None:
+    log: list[str] = []
+
+    @wrap_methods(_tag(log), exclude=lambda n: n == "skip", include_private=True)
+    class K:
+        def a(self) -> None: ...
+        def skip(self) -> None: ...
+        def _p(self) -> None: ...
+
+    k = K()
+    k.a()
+    k.skip()
+    k._p()
+    assert log == ["a", "_p"]
+
+    log.clear()
+
+    @wrap_methods(_tag(log), include="a")
+    class J:
+        def a(self) -> None: ...
+        def b(self) -> None: ...
+
+    J().a()
+    J().b()
+    assert log == ["a"]
+
+
+def test_wrap_methods_explicit_names_opt_in_dunders_and_properties() -> None:
+    log: list[str] = []
+
+    @wrap_methods(_tag(log), include=["__len__", "prop", "other"], exclude={"other"})
+    class K:
+        def __len__(self) -> int:
+            return 1
+
+        def other(self) -> None: ...
+
+        def __init__(self) -> None:
+            self._v = 0
+
+        @property
+        def prop(self) -> int:
+            return self._v
+
+        @prop.setter
+        def prop(self, value: int) -> None:
+            self._v = value
+
+    k = K()
+    k.prop = 5
+    assert k.prop == 5
+    assert len(k) == 1
+    k.other()
+    assert log == ["prop", "prop", "__len__"]
+
+
+def test_wrap_methods_works_with_policy_and_order() -> None:
+    log: list[str] = []
+
+    def named(label: str) -> Any:
+        def decorator(func: Any) -> Any:
+            def wrapper(*a: Any, **k: Any) -> Any:
+                log.append(label)
+                return func(*a, **k)
+
+            return wrapper
+
+        return decorator
+
+    @wrap_methods(policy(timeout=named("t"), retry=named("r")), named("first"))
+    class K:
+        def go(self) -> None: ...
+
+    K().go()
+    assert log == ["r", "t", "first"]
+
+
+def test_wrap_methods_rejects_non_callable() -> None:
+    with pytest.raises(TypeError, match="callable"):
+        wrap_methods(3)  # type: ignore[arg-type]
