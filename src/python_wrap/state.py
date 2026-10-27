@@ -424,7 +424,8 @@ def transactional(func: Callable[..., Any] | None = None, /, *, logger: LoggerLi
         The wrapped function, or a decorator when called with options.
 
     Raises:
-        TypeError: At call time, if the caller passes ``tx`` explicitly.
+        TypeError: At decoration time, if ``tx`` is positional-only, ``*tx`` or ``**tx``
+            (it is injected by keyword); at call time, if the caller passes ``tx``.
 
     Example:
         >>> @transactional
@@ -436,14 +437,19 @@ def transactional(func: Callable[..., Any] | None = None, /, *, logger: LoggerLi
         tx_pos: int | None = None
         try:
             params = inspect.signature(f).parameters
-            wants_tx = "tx" in params
-            if wants_tx:
-                names = list(params)
-                kind = params["tx"].kind
-                if kind in (kind.POSITIONAL_ONLY, kind.POSITIONAL_OR_KEYWORD):
-                    tx_pos = names.index("tx")
         except (TypeError, ValueError):
-            wants_tx = False
+            params = None
+        wants_tx = params is not None and "tx" in params
+        if params is not None and wants_tx:
+            kind = params["tx"].kind
+            if kind is not kind.POSITIONAL_OR_KEYWORD and kind is not kind.KEYWORD_ONLY:
+                raise TypeError(
+                    f"@transactional cannot inject 'tx' into {_core.qualname(f)}(): it is "
+                    f"{kind.description}; declare it as a normal or keyword-only parameter "
+                    "(tx: Transaction = INJECTED)"
+                )
+            if kind is kind.POSITIONAL_OR_KEYWORD:
+                tx_pos = list(params).index("tx")
 
         def check_not_passed(args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
             if ("tx" in kwargs and kwargs["tx"] is not INJECTED) or (

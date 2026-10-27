@@ -13,6 +13,7 @@ import pytest
 
 from python_wrap.aio import RaceFailed, amap_iter, gather_limit, map_async, race, run_sync
 from python_wrap.errors import PythonWrapError, TimeoutExpired
+from python_wrap.testing import fast_mode
 
 
 def other_tasks() -> set[asyncio.Task[Any]]:
@@ -395,11 +396,21 @@ async def test_race_all_fail_raises_group_in_input_order() -> None:
 async def test_race_timeout(fake_clock: Any) -> None:
     tr = Tracker()
     with pytest.raises(TimeoutExpired) as info:
-        await race(tr.run(0), tr.run(1), timeout=3)
-    assert info.value.seconds == 3
+        await race(tr.run(0), tr.run(1), timeout=0.01)
+    assert info.value.seconds == 0.01
     assert isinstance(info.value, TimeoutError)
-    assert fake_clock.sleeps == [3]
+    assert fake_clock.sleeps == []  # a deadline runs on real time, not the fake clock
     assert sorted(tr.cancelled) == [0, 1]
+    await assert_no_tasks_left()
+
+
+async def test_race_timeout_is_not_instant_under_fast_mode() -> None:
+    async def slow() -> str:
+        await asyncio.sleep(0.02)  # real I/O, well inside the timeout
+        return "ok"
+
+    with fast_mode():
+        assert await race(slow(), timeout=5) == "ok"
     await assert_no_tasks_left()
 
 

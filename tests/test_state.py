@@ -468,6 +468,24 @@ async def test_injected_tx_async_and_explicit_rejected() -> None:
         await charge(tx=Transaction())
 
 
+def test_tx_that_cannot_be_injected_by_keyword_is_rejected_at_decoration() -> None:
+    from python_wrap.state import INJECTED
+
+    def posonly(tx: Transaction = INJECTED, /) -> None: ...
+    def star(*tx: Any) -> None: ...
+    def starstar(**tx: Any) -> None: ...
+
+    for func, kind in ((posonly, "positional-only"), (star, "variadic"), (starstar, "variadic")):
+        with pytest.raises(TypeError, match=f"cannot inject 'tx'.*{kind}"):
+            transactional(func)
+
+    @transactional
+    def before_star(a: int, tx: Transaction = INJECTED, *rest: int) -> str:
+        return tx.state
+
+    assert before_star(1) == "pending"  # still open while the body runs
+
+
 def test_require_transaction_outside_raises() -> None:
     from python_wrap.state import require_transaction
 

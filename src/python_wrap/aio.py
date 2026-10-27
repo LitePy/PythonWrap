@@ -481,8 +481,8 @@ async def race(*aws: Awaitable[T], timeout: float | None = None) -> T:
 
     Args:
         *aws: Coroutines, tasks or futures; at least one.
-        timeout: Give up after this many seconds (measured with `_core.async_sleep`, so
-            the test clock applies). `None` waits forever.
+        timeout: Give up after this many seconds of real time (`fast_mode()` and
+            `fake_clock()` do not shorten it). `None` waits forever.
 
     Returns:
         The winner's result.
@@ -522,7 +522,7 @@ async def race(*aws: Awaitable[T], timeout: float | None = None) -> T:
             contestants.append(_start(aw))
         order: dict[asyncio.Future[Any], int] = {fut: i for i, fut in enumerate(contestants)}
         if timeout is not None:
-            timer = asyncio.ensure_future(_core.async_sleep(timeout))
+            timer = asyncio.ensure_future(asyncio.sleep(timeout))  # real time
         pending: set[asyncio.Future[Any]] = set(contestants)
         while pending:
             watch = pending if timer is None else pending | {timer}

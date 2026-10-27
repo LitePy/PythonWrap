@@ -9,6 +9,12 @@ Rules every module follows:
 * Read time through ``_core.monotonic()`` / ``_core.perf_counter()`` and wait through
   ``_core.sleep()`` / ``_core.async_sleep()`` — always as module attributes, never
   imported by name — so tests can patch one place to get a fake clock.
+* ``_core.sleep`` / ``_core.async_sleep`` are only for deliberate backoff waits (retry
+  delays, a blocked rate limiter). A limit on how long to wait — a timeout, a deadline
+  for a slot, a hedge delay, a batching or debounce window — runs on real time
+  (``asyncio.timeout`` / ``asyncio.sleep`` timers, ``threading.Timer``, ``wait(timeout=)``
+  and ``time.monotonic()``), so the test overrides and the fake clock never shorten
+  it, and sync and async code behave the same.
 * Honour the process-wide test overrides (see below).
 
 Test overrides contract
@@ -23,11 +29,13 @@ time**, not at decoration time, so a test can flip it after import:
 * ``no_sleep``: `sleep` / `async_sleep` return immediately (the async one
   still yields to the event loop once). Handled here; other modules need do nothing as
   long as they wait only through ``_core``. A fake clock installed by ``fake_clock()``
-  replaces the sleeps and so still advances time.
+  replaces the sleeps and so still advances time. A blocking rate limiter that would
+  have to wait lets the call through at once (still counted) instead of spinning.
 * ``max_attempts``: when not ``None``, ``retry`` uses
   ``min(configured_max_attempts, _core.overrides.max_attempts)`` attempts.
-* ``disable_rate_limits``: when true, ``rate_limit`` / ``throttle`` (and any other
-  limiter that delays or rejects calls) let every call through immediately.
+* ``disable_rate_limits``: when true, rate limiters (``rate_limit``, ``RateLimiter``)
+  and ``throttle`` let every call through immediately. Concurrency limits
+  (``Bulkhead``, ``limit_concurrency``) are not affected.
 * ``disable_caching``: when true, ``memoize`` / ``cache`` / ``once``-style caches
   neither read nor write their stores and always call the wrapped function.
 """

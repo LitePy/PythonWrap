@@ -86,7 +86,22 @@ assert clock.now == start + 7.0
 
 `FakeClock()` starts at the real `time.monotonic()` of the moment it is created, so entries stamped before it was installed are in its past and still expire; pass `start=` for a fixed reading. It has `.now`, `.advance(seconds)`, `.sleeps` and `.total_slept`; pass your own instance with `fake_clock(clock)`.
 
-The actual deadlines of `timeout` (signal timer, worker thread, `asyncio.wait_for`) and `debounce` (`threading.Timer`, event-loop tasks) use real timers and are not affected by the fake clock. Test them with tiny real durations, or call `debounce`'s `.flush()`.
+## What the overrides affect
+
+python-wrap separates two kinds of waiting:
+
+- **Backoff waits** go through `_core.sleep` / `_core.async_sleep`: `retry` delays and a blocking rate limiter (`block=True`) waiting for a slot. `fast_mode()` makes them instant; `fake_clock()` turns them into clock advances you can assert on.
+- **Limits on how long to wait** use real timers: the deadline of `timeout` (signal timer, worker thread, `asyncio.timeout`), `Bulkhead(timeout=...)` / `limit_concurrency` waiting for a slot, `race(timeout=...)`, the `hedge` delay before a backup attempt, the `batch_calls` window and the `debounce` quiet period. Neither `fast_mode()` nor `fake_clock()` changes them, and sync and async code behave the same. Making them instant would turn "wait at most 5 s" into "fail at once" (or "hedge at once"). Test them with tiny real durations, or call `.flush()` / `.aflush()` on `debounce` and `batch_calls`.
+
+| Behaviour | `fast_mode()` | `fake_clock()` |
+| --- | --- | --- |
+| `retry` backoff | instant | advances the clock |
+| `rate_limit(block=True)` / `RateLimiter(block=True)` waiting | the call goes through at once and is counted | advances the clock, then goes through |
+| `rate_limit` / `throttle` non-blocking rejection | still rejects | windows follow the fake clock |
+| TTLs, circuit breaker recovery, `deadline` remaining time | real time | follow the fake clock |
+| `timeout`, `Bulkhead` / `race` timeouts, `hedge` delay, `batch_calls` / `debounce` windows | real time | real time |
+
+Bulkhead and other concurrency limits are not rate limits: `disable_rate_limits()` leaves them on.
 
 ## pytest fixtures
 

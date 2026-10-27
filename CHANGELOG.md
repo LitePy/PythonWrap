@@ -181,6 +181,12 @@ Core:
   `DEFAULT_REDACT`". Pass `redact=()` to turn redaction off.
 - `audit` with no `sink` and a disabled log level builds no record at all.
 - `Limited.bulkhead` is a read-only property.
+- Test overrides apply only to backoff waits. `fast_mode()` and `fake_clock()` no longer shorten
+  limits on how long to wait: async `Bulkhead`/`limit_concurrency` timeouts, `race(timeout=)`,
+  async `hedge` delays and async `batch_calls`/`debounce` windows run on real time, like their
+  sync versions and `timeout`.
+- Under `fast_mode()`, a blocking rate limiter (`block=True`) that would wait lets the call
+  through at once and still counts it.
 
 ### Fixed
 
@@ -195,6 +201,17 @@ Core:
 - `audit` reported the wrapper's own frame as the caller.
 - `once` was not thread-safe, and now retries after an exception.
 - `validate_args` rebuilt the function signature on every call.
+- Under `fast_mode()` or `fake_clock()`, async bulkhead and `race` timeouts expired at once and
+  `hedge` launched every backup attempt immediately.
+- A blocking `RateLimiter`/`rate_limit(block=True)` busy-spun at full CPU under `fast_mode()`.
+- `timeout`'s thread fallback reported a call as late when it advanced the fake clock (for
+  example a `retry` inside it), and a nested signal-based `timeout` did not fire under
+  `fake_clock()`.
+- `@transactional` on a function with a positional-only (or `*tx` / `**tx`) `tx` parameter
+  crashed at call time; it now raises `TypeError` when decorating.
+- `singleflight`'s default key treated `f(1, b=2)` and `f((1,), (("b", 2),))` as the same call,
+  and `memoize` on a callable without an inspectable signature treated `f(1, b=2)` and
+  `f(1, 2)` as the same call.
 
 ### Performance
 

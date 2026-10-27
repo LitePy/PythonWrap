@@ -12,6 +12,7 @@ import pytest
 from python_wrap import _core
 from python_wrap.bulkhead import Bulkhead, limit_concurrency
 from python_wrap.errors import BulkheadFull, PythonWrapError
+from python_wrap.testing import fast_mode
 
 
 def other_tasks() -> set[asyncio.Task[Any]]:
@@ -203,6 +204,19 @@ async def test_async_caps_concurrency() -> None:
     assert (bh.active, bh.waiting) == (0, 0)
 
 
+async def test_async_timeout_is_not_instant_under_fast_mode() -> None:
+    bh = Bulkhead(1, timeout=5)
+
+    @bh
+    async def work() -> int:
+        await asyncio.sleep(0.02)  # real I/O, well inside the timeout
+        return 1
+
+    with fast_mode():
+        assert await asyncio.gather(work(), work()) == [1, 1]
+    assert (bh.active, bh.waiting) == (0, 0)
+
+
 async def test_async_max_waiting_zero_fails_fast() -> None:
     bh = Bulkhead(1, max_waiting=0)
     async with bh:
@@ -211,12 +225,12 @@ async def test_async_max_waiting_zero_fails_fast() -> None:
     assert (bh.active, bh.waiting) == (0, 0)
 
 
-async def test_async_timeout_uses_core_clock(fake_clock: Any) -> None:
-    bh = Bulkhead(1, timeout=2)
+async def test_async_timeout_is_real_time(fake_clock: Any) -> None:
+    bh = Bulkhead(1, timeout=0.01)
     async with bh:
-        with pytest.raises(BulkheadFull, match="within 2s"):
+        with pytest.raises(BulkheadFull, match=r"within 0\.01s"):
             await bh.acquire_async()
-    assert fake_clock.sleeps == [2]
+    assert fake_clock.sleeps == []  # a deadline, not a backoff: the fake clock is not used
     assert (bh.active, bh.waiting) == (0, 0)
     async with bh:
         pass

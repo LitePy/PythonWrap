@@ -390,7 +390,7 @@ def _batch_async(
         return entry.future.result()
 
     async def wait_then_start(state: _LoopState, batch: _AsyncBatch) -> None:
-        await _core.async_sleep(max_wait)
+        await asyncio.sleep(max_wait)  # a window, not a backoff: real time
         start(state, batch)
 
     @functools.wraps(func)

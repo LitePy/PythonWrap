@@ -115,7 +115,7 @@ def hedge(
                     if timer is not None:
                         timer.cancel()
                     timer = (
-                        loop.create_task(_core.async_sleep(delay))
+                        loop.create_task(asyncio.sleep(delay))  # real time
                         if len(attempts) < max_attempts
                         else None
                     )

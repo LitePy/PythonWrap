@@ -26,11 +26,22 @@ import queue
 import signal
 import sys
 import threading
+import time
 import weakref
 from collections import deque
 from collections.abc import Awaitable, Callable, Coroutine, Hashable, Iterable
 from types import FrameType, TracebackType
-from typing import Any, Concatenate, Generic, ParamSpec, Protocol, TypeVar, cast, overload
+from typing import (
+    Any,
+    Concatenate,
+    Final,
+    Generic,
+    ParamSpec,
+    Protocol,
+    TypeVar,
+    cast,
+    overload,
+)
 
 from python_wrap import _core
 from python_wrap import deadline as _deadline
@@ -97,14 +108,16 @@ class _Alarm:
         self._previous_interval = 0.0
 
     def __enter__(self) -> None:
-        self._start = _core.monotonic()
+        # The itimer counts real time, so the deadline arithmetic does too (a fake clock
+        # installed by tests must not move it).
+        self._start = time.monotonic()
         deadline = self._start + self.seconds
         self._previous_handler = previous_handler = signal.getsignal(signal.SIGALRM)
 
         def handler(signum: int, frame: FrameType | None) -> None:
             previous_delay = self._previous_delay
             if previous_delay is not None and (
-                not previous_delay or _core.monotonic() >= deadline - 1e-3
+                not previous_delay or time.monotonic() >= deadline - 1e-3
             ):
                 self.error = TimeoutExpired(
                     _timeout_message(self.label, self.seconds), seconds=self.seconds
@@ -134,7 +147,7 @@ class _Alarm:
         if not self._outer_fired:
             signal.signal(signal.SIGALRM, self._previous_handler)
             if self._previous_delay:
-                remaining = self._previous_delay - (_core.monotonic() - self._start)
+                remaining = self._previous_delay - (time.monotonic() - self._start)
                 # Re-arm the enclosing timer; if its deadline already passed, fire ASAP.
                 signal.setitimer(signal.ITIMER_REAL, max(remaining, 1e-6), self._previous_interval)
         if exc is not None and exc is self.error:
@@ -172,7 +185,7 @@ class _Job:
         self.result: Any = None
         self.error: BaseException | None = None
         self.abandoned = False  # the caller timed out and stopped waiting
-        self.finished = 0.0  # `_core.monotonic()` when the call returned
+        self.finished = 0.0  # `time.monotonic()` when the call returned (real time)
 
     def run(self) -> None:
         try:
@@ -180,7 +193,7 @@ class _Job:
         except BaseException as exc:
             self.error = exc
         self.func = self.args = self.kwargs = None  # type: ignore[assignment]
-        self.finished = _core.monotonic()
+        self.finished = time.monotonic()
         self.done.release()
 
 
@@ -249,7 +262,9 @@ def _call_in_worker(
 ) -> R:
     """Run ``func`` in a pooled daemon thread and stop waiting for it after ``seconds``."""
     job = _Job(func, args, kwargs)
-    start = _core.monotonic()
+    # Real time, like the wait itself: a fake clock advanced by sleeps inside the call
+    # (e.g. a retry) must not turn a quick call into a late one.
+    start = time.monotonic()
     _workers.submit(job)
     if not job.done.acquire(timeout=seconds):
         _workers.abandon(job)
@@ -612,6 +627,16 @@ class _SlidingWindow:
                 bucket.append(now)
             return 0.0
 
+    def admit(self, key: Hashable) -> None:
+        """Record a call now even if a limit is full (for `fast_mode()`'s blocked calls)."""
+        with self._lock:
+            now = _core.monotonic()
+            buckets = self._buckets.get(key)
+            if buckets is None:
+                buckets = self._buckets[key] = tuple(deque() for _ in self.limits)
+            for bucket in buckets:
+                bucket.append(now)
+
     def clear(self) -> None:
         with self._lock:
             self._buckets.clear()
@@ -643,7 +668,10 @@ class RateLimiter:
     ``limits=[(5, 1.0), (600, 900.0)]`` every limit must allow the call. Rejected or
     still-waiting calls are not counted. Thread-safe; async callers wait with ``await``
     and never block the event loop. While ``python_wrap.testing`` disables rate limits,
-    every call goes through and nothing is recorded.
+    every call goes through and nothing is recorded. Under ``fast_mode()`` (``no_sleep``)
+    a blocking call that would wait is let through at once and still recorded, so later
+    non-blocking calls see the limit; under ``fake_clock()`` the wait advances the fake
+    clock instead.
 
     Events: ``rate_limit.rejected(retry_after)`` for each rejected call and
     ``rate_limit.waited(seconds)`` after a call had to wait, reported under ``name``
@@ -740,6 +768,11 @@ class RateLimiter:
             if _core.overrides.disable_rate_limits:
                 break
             wait = self._window.acquire(key)
+            if wait > 0 and _core.overrides.no_sleep:
+                # fast_mode() and the sleep did not move the clock: admit the call
+                # instead of spinning (it still counts toward the limit).
+                self._window.admit(key)
+                break
         _core.emit("rate_limit.waited", label, seconds=_core.monotonic() - start)
         return True
 
@@ -766,6 +799,9 @@ class RateLimiter:
             if _core.overrides.disable_rate_limits:
                 break
             wait = self._window.acquire(key)
+            if wait > 0 and _core.overrides.no_sleep:
+                self._window.admit(key)  # as in `_take`: never spin under fast_mode()
+                break
         _core.emit("rate_limit.waited", label, seconds=_core.monotonic() - start)
         return True
 
@@ -927,7 +963,8 @@ def rate_limit(
     between several functions, create a `RateLimiter` and use it as the decorator. Pass
     ``limits=[(5, 1.0), (600, 900.0)]`` to enforce several limits at once (all must
     allow a call). While ``python_wrap.testing`` disables rate limits, every call goes
-    through. Emits ``rate_limit.rejected`` and ``rate_limit.waited``.
+    through; under ``fast_mode()`` a ``block=True`` call that would wait goes through at
+    once (and is counted). Emits ``rate_limit.rejected`` and ``rate_limit.waited``.
 
     Args:
         calls: Maximum number of calls per window; at least 1.
@@ -1331,7 +1368,7 @@ def _debounce_async(func: Callable[..., Awaitable[Any]], wait: float) -> Callabl
         return result
 
     async def sleep_then_run(burst: _AsyncBurst) -> None:
-        await _core.async_sleep(wait)
+        await asyncio.sleep(wait)  # real time, like the sync `threading.Timer`
         burst.timer = None  # past the cancellation point: run even if called again now
         with contextlib.suppress(Exception):  # delivered to callers via burst.outcome
             await run(burst)
@@ -1449,8 +1486,21 @@ def debounce(wait: float) -> _DebounceDecorator:
 # ---------------------------------------------------------------------------------------
 
 
+class _KwargsMark:
+    """Private marker in keys built from keyword arguments (never equal to user data)."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "<kwargs>"
+
+
+_KWARGS: Final = _KwargsMark()
+
+
 def _default_key(*args: Any, **kwargs: Any) -> Hashable:
-    return (args, tuple(sorted(kwargs.items()))) if kwargs else args
+    # The marker keeps ``f(1, b=2)`` and ``f((1,), (("b", 2),))`` apart.
+    return (args, _KWARGS, tuple(sorted(kwargs.items()))) if kwargs else args
 
 
 class _Flights(Generic[T]):

@@ -179,8 +179,13 @@ def fast_mode() -> _Scope:
     """Make every wait instant while keeping retries running.
 
     Sets `no_sleep=True` only: `retry` still retries the configured number of times and
-    rate limiters still count, but nothing actually sleeps. Combine with
-    `disable_retries()` if you also want a single attempt. Context manager and decorator.
+    rate limiters still count, but nothing actually sleeps. A blocking rate limiter
+    (`block=True`) that would have to wait lets the call through at once and records it,
+    so a later non-blocking call still sees the limit; under `fake_clock()` it waits on
+    the fake clock instead. Limits on how long to wait — `timeout`, `Bulkhead(timeout=)`,
+    `race(timeout=)`, `hedge` delays, `batch_calls` and `debounce` windows — run on real
+    time and are not shortened. Combine with `disable_retries()` if you also want a
+    single attempt. Context manager and decorator.
 
     Example:
         ```python

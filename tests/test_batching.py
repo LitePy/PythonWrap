@@ -10,6 +10,7 @@ import pytest
 
 from python_wrap.batching import batch_calls
 from python_wrap.errors import BatchError, PythonWrapError
+from python_wrap.testing import fast_mode
 
 
 def wait_until(predicate, timeout=2.0):
@@ -56,7 +57,7 @@ async def test_async_coalesces_concurrent_calls(fake_clock):
     results = await asyncio.gather(load(1), load(2), load(3))
     assert results == ["u1", "u2", "u3"]
     assert calls == [[1, 2, 3]]
-    assert fake_clock.sleeps == [0.01]
+    assert fake_clock.sleeps == []  # the window runs on real time
     assert load.pending == 0
     assert only_current_task()
 
@@ -132,6 +133,24 @@ async def test_async_non_sequence_result_is_a_batch_error(fake_clock, bad):
     results = await asyncio.gather(load(1), load(2), return_exceptions=True)
     assert all(isinstance(r, BatchError) for r in results)
     assert "must return a sequence or a mapping" in str(results[0])
+
+
+async def test_async_window_is_not_instant_under_fast_mode():
+    calls = []
+
+    @batch_calls(max_wait=0.5)
+    async def load(ids: list[int]) -> list[int]:
+        calls.append(list(ids))
+        return ids
+
+    with fast_mode():
+        first = asyncio.ensure_future(load(1))
+        await asyncio.sleep(0.01)  # real time, well inside the window
+        second = asyncio.ensure_future(load(2))
+        await asyncio.sleep(0)
+        await load.aflush()  # close the window now instead of waiting it out
+        assert await asyncio.gather(first, second) == [1, 2]
+    assert calls == [[1, 2]]  # one window: fast_mode does not close it at once
 
 
 async def test_async_cancelled_caller_drops_its_unsent_item():
@@ -570,7 +589,7 @@ async def test_async_inline_batch_caller_cancel_and_aflush():
 async def test_async_max_size_reached_by_follower_still_shares_one_task(fake_clock):
     calls = []
 
-    @batch_calls(max_size=2, max_wait=10)
+    @batch_calls(max_size=2, max_wait=0.01)
     async def load(items):
         calls.append(items)
         return items

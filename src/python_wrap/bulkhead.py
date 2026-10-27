@@ -50,13 +50,16 @@ class _AsyncPool(_Pool):
 
 
 async def _acquire_within(semaphore: asyncio.Semaphore, seconds: float) -> bool:
-    """Acquire ``semaphore`` unless ``seconds`` pass first (timed with ``_core``).
+    """Acquire ``semaphore`` unless ``seconds`` pass first (real time).
+
+    The limit is a deadline, not a backoff wait, so it uses `asyncio.sleep` directly:
+    `fast_mode()` and `fake_clock()` do not shorten it, matching the sync side.
 
     Never leaks a permit: if the acquisition wins at the last moment while we time out or
     are cancelled, the permit is either kept (timeout) or released (cancellation).
     """
     acquire = asyncio.ensure_future(semaphore.acquire())
-    timer = asyncio.ensure_future(_core.async_sleep(seconds))
+    timer = asyncio.ensure_future(asyncio.sleep(seconds))
     try:
         await asyncio.wait((acquire, timer), return_when=asyncio.FIRST_COMPLETED)
     except BaseException:

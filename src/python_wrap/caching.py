@@ -172,6 +172,7 @@ class _Tag:
 
 
 _LIST, _DICT, _SET = _Tag("list"), _Tag("dict"), _Tag("set")
+_KWARGS = _Tag("kwargs")  # separates keyword arguments in keys built without a signature
 
 
 def _freeze(value: Any) -> Hashable:
@@ -233,11 +234,16 @@ def _make_key_builder(
             bound = sig.bind(*args, **kwargs)
             bound.apply_defaults()
             named = list(bound.arguments.items())
+            frozen = tuple(_freeze_arg(n, v) for n, v in named)
         else:
             named = [(f"#{i}", v) for i, v in enumerate(args)]
-            named += [(n, v) for n, v in sorted(kwargs.items())]
+            frozen = tuple(_freeze_arg(n, v) for n, v in named)
+            if kwargs:
+                # Keep the names (and a marker), or f(1, b=2) would equal f(1, 2).
+                items = sorted(kwargs.items())
+                named += items
+                frozen += (_KWARGS, *((n, _freeze_arg(n, v)) for n, v in items))
         values = [v for _, v in named]
-        frozen = tuple(_freeze_arg(n, v) for n, v in named)
         if typed:
             return (frozen, tuple(type(v) for v in values))
         return frozen

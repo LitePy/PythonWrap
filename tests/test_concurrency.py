@@ -9,6 +9,7 @@ import signal
 import sys
 import threading
 import time
+import types
 
 import pytest
 
@@ -24,7 +25,7 @@ from python_wrap.concurrency import (
     timeout,
 )
 from python_wrap.errors import RateLimitExceeded, TimeoutExpired
-from python_wrap.testing import disable_rate_limits
+from python_wrap.testing import disable_rate_limits, fast_mode
 
 HAS_SIGNALS = hasattr(signal, "setitimer")
 needs_signals = pytest.mark.skipif(not HAS_SIGNALS, reason="needs signal.setitimer")
@@ -148,6 +149,32 @@ def test_timeout_thread_fallback_times_out_and_keeps_running():
     assert not finished.is_set()
     release.set()
     assert finished.wait(1)  # the work kept running in the background
+
+
+def test_timeout_thread_fallback_ignores_fake_clock_sleeps(fake_clock):
+    @timeout(1, use_signals=False)
+    def work():
+        _core.sleep(10)  # e.g. a retry backoff inside the limit: fake time only
+        return "ok"
+
+    assert work() == "ok"  # finished quickly in real time, so it is not late
+    assert fake_clock.sleeps == [10]
+
+
+@pytest.mark.skipif(not hasattr(signal, "setitimer"), reason="needs SIGALRM")
+def test_timeout_signal_nested_deadline_is_real_time_under_fake_clock(fake_clock):
+    @timeout(0.02)
+    def inner():
+        time.sleep(1)  # real blocking: the inner deadline must fire
+
+    @timeout(5)
+    def outer():
+        inner()
+
+    start = time.monotonic()
+    with pytest.raises(TimeoutExpired, match=r"within 0\.02s"):
+        outer()
+    assert time.monotonic() - start < 0.5
 
 
 def test_timeout_in_worker_thread_uses_fallback():
@@ -321,6 +348,77 @@ def test_rate_limit_block_sleeps(fake_clock):
     start = fake_clock.now
     assert f() == start
     assert f() == start + 5
+    assert fake_clock.sleeps == [5]
+
+
+def test_rate_limit_block_under_fast_mode_admits_without_spinning(monkeypatch):
+    sleeps = []
+    real_sleep = _core.sleep
+    monkeypatch.setattr(_core, "sleep", lambda s: (sleeps.append(s), real_sleep(s)))
+    limiter = RateLimiter(1, 60, block=True)
+    events = []
+
+    @limiter
+    def f():
+        return 1
+
+    _core.listeners.append(lambda e: events.append(e.name))
+    try:
+        with fast_mode():
+            start = time.monotonic()
+            assert [f(), f(), f()] == [1, 1, 1]
+            assert time.monotonic() - start < 1
+            assert not limiter.try_acquire()  # the admitted calls were counted
+    finally:
+        _core.listeners.pop()
+    assert len(sleeps) == 2  # one (no-op) sleep per blocked call, no busy loop
+    assert events.count("rate_limit.waited") == 2
+
+
+async def test_rate_limit_block_async_under_fast_mode_admits_without_spinning(monkeypatch):
+    sleeps = []
+    real_sleep = _core.async_sleep
+
+    async def counting(s):
+        sleeps.append(s)
+        await real_sleep(s)
+
+    monkeypatch.setattr(_core, "async_sleep", counting)
+    limiter = RateLimiter(1, 60, block=True)
+
+    @limiter
+    async def g():
+        return 1
+
+    with fast_mode():
+        start = time.monotonic()
+        assert [await g(), await g(), await g()] == [1, 1, 1]
+        assert time.monotonic() - start < 1
+        assert not limiter.try_acquire()
+    assert len(sleeps) == 2
+
+
+def test_rate_limit_block_under_fast_mode_and_fake_clock_advances_it(fake_clock):
+    @rate_limit(1, 5, block=True)
+    def f():
+        return fake_clock.now
+
+    with fast_mode():
+        start = fake_clock.now
+        assert f() == start
+        assert f() == start + 5  # the wait advances the fake clock
+    assert fake_clock.sleeps == [5]
+
+
+async def test_rate_limit_block_async_under_fast_mode_and_fake_clock(fake_clock):
+    @rate_limit(1, 5, block=True)
+    async def g():
+        return fake_clock.now
+
+    with fast_mode():
+        start = fake_clock.now
+        assert await g() == start
+        assert await g() == start + 5
     assert fake_clock.sleeps == [5]
 
 
@@ -720,6 +818,23 @@ async def test_debounce_async_burst_shares_result():
     assert calls == [3, 4]
 
 
+async def test_debounce_async_quiet_period_is_real_time_under_fast_mode():
+    calls = []
+
+    @debounce(0.05)
+    async def f(x):
+        calls.append(x)
+        return x
+
+    async def later(x, delay):
+        await asyncio.sleep(delay)  # real time, inside the quiet period
+        return await f(x)
+
+    with fast_mode():
+        assert await asyncio.gather(f(1), later(2, 0.01)) == [2, 2]
+    assert calls == [2]  # one burst, as with the sync `threading.Timer`
+
+
 async def test_debounce_async_exception_shared():
     @debounce(0.01)
     async def f():
@@ -869,6 +984,12 @@ def test_singleflight_threads_share_exception():
     with pytest.raises(ValueError):
         boom(1)
     assert calls == [1, 1]
+
+
+def test_singleflight_default_key_keeps_kwargs_apart_from_lookalike_positionals():
+    assert concurrency._default_key(1, b=2) != concurrency._default_key((1,), (("b", 2),))
+    assert concurrency._default_key(1, b=2) == concurrency._default_key(1, b=2)
+    assert concurrency._default_key(1, 2) == (1, 2)  # positional calls: the args tuple
 
 
 def test_singleflight_different_keys_run_separately():
@@ -1665,10 +1786,13 @@ async def test_singleflight_async_flight_outcome_races():
     assert waiter.exception() is not None  # retrieved, so never logged
 
 
-def test_timeout_fallback_result_arriving_after_the_limit_is_a_timeout(fake_clock, events):
+def test_timeout_fallback_result_arriving_after_the_limit_is_a_timeout(monkeypatch, events):
+    now = [100.0]  # the late-result check reads real time: fake it for this module only
+    monkeypatch.setattr(concurrency, "time", types.SimpleNamespace(monotonic=lambda: now[0]))
+
     @timeout(1, use_signals=False)
     def late():
-        fake_clock.advance(2)  # finishes, but only after its limit
+        now[0] += 2  # finishes, but only after its limit (an overslept wait)
         return "late"
 
     with pytest.raises(TimeoutExpired):

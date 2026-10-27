@@ -9,6 +9,7 @@ import threading
 import pytest
 
 from python_wrap.hedging import hedge
+from python_wrap.testing import fast_mode
 
 
 def only_current_task():
@@ -45,11 +46,11 @@ async def test_async_fast_call_runs_once():
     assert only_current_task()
 
 
-async def test_async_slow_call_is_hedged_and_loser_cancelled(fake_clock):
+async def test_async_slow_call_is_hedged_and_loser_cancelled():
     cancelled = []
     calls = []
 
-    @hedge(0.2)
+    @hedge(0.005)
     async def fetch() -> str:
         n = len(calls)
         calls.append(n)
@@ -63,7 +64,6 @@ async def test_async_slow_call_is_hedged_and_loser_cancelled(fake_clock):
 
     assert await fetch() == "attempt1"
     assert cancelled == [0]
-    assert fake_clock.sleeps == [0.2]
     assert only_current_task()
 
 
@@ -81,10 +81,10 @@ async def test_async_failure_starts_the_next_attempt_immediately():
     assert only_current_task()
 
 
-async def test_async_all_fail_raises_the_last_exception(fake_clock):
+async def test_async_all_fail_raises_the_last_exception():
     calls = []
 
-    @hedge(0.1, max_extra=2)
+    @hedge(0.005, max_extra=2)
     async def fetch() -> None:
         calls.append(1)
         raise ValueError(len(calls))
@@ -95,10 +95,10 @@ async def test_async_all_fail_raises_the_last_exception(fake_clock):
     assert len(calls) == 3
 
 
-async def test_async_non_matching_error_is_raised_at_once(fake_clock):
+async def test_async_non_matching_error_is_raised_at_once():
     cancelled = []
 
-    @hedge(0.1, on=OSError)
+    @hedge(0.005, on=OSError)
     async def fetch(n: list[int]) -> None:
         n.append(1)
         if len(n) == 1:
@@ -115,11 +115,11 @@ async def test_async_non_matching_error_is_raised_at_once(fake_clock):
     assert only_current_task()
 
 
-async def test_async_max_extra_caps_the_attempts(fake_clock):
+async def test_async_max_extra_caps_the_attempts():
     started = []
     gate = asyncio.Event()
 
-    @hedge(0.1, max_extra=2)
+    @hedge(0.005, max_extra=2)
     async def fetch() -> int:
         started.append(1)
         n = len(started)
@@ -133,10 +133,10 @@ async def test_async_max_extra_caps_the_attempts(fake_clock):
     assert only_current_task()
 
 
-async def test_async_max_extra_zero_never_hedges(fake_clock):
+async def test_async_max_extra_zero_never_hedges():
     calls = []
 
-    @hedge(0.1, max_extra=0)
+    @hedge(0.005, max_extra=0)
     async def fetch() -> int:
         calls.append(1)
         await asyncio.sleep(0)
@@ -144,14 +144,13 @@ async def test_async_max_extra_zero_never_hedges(fake_clock):
 
     assert await fetch() == 1
     assert calls == [1]
-    assert fake_clock.sleeps == []
 
 
-async def test_async_cancelling_the_caller_cancels_every_attempt(fake_clock):
+async def test_async_cancelling_the_caller_cancels_every_attempt():
     started = []
     cancelled = []
 
-    @hedge(0.1, max_extra=1)
+    @hedge(0.005, max_extra=1)
     async def fetch() -> None:
         started.append(1)
         try:
@@ -170,10 +169,10 @@ async def test_async_cancelling_the_caller_cancels_every_attempt(fake_clock):
     assert only_current_task()
 
 
-async def test_async_loser_error_while_cancelling_is_swallowed(fake_clock):
+async def test_async_loser_error_while_cancelling_is_swallowed():
     calls = []
 
-    @hedge(0.1)
+    @hedge(0.005)
     async def fetch() -> str:
         calls.append(1)
         if len(calls) == 1:
@@ -187,6 +186,31 @@ async def test_async_loser_error_while_cancelling_is_swallowed(fake_clock):
     gc.collect()  # an unretrieved task exception would be reported (filterwarnings=error)
 
 
+async def test_async_hedge_delay_is_real_time_under_fast_mode():
+    calls = []
+
+    @hedge(5, max_extra=3)
+    async def fetch() -> int:
+        calls.append(1)
+        await asyncio.sleep(0.02)  # real I/O, shorter than the hedge delay
+        return len(calls)
+
+    with fast_mode():
+        assert await fetch() == 1
+    assert calls == [1]  # the delay is a deadline, not a backoff: no instant hedges
+    assert only_current_task()
+
+
+async def test_async_hedge_delay_ignores_the_fake_clock(fake_clock):
+    @hedge(5)
+    async def fetch() -> str:
+        await asyncio.sleep(0.01)
+        return "ok"
+
+    assert await fetch() == "ok"
+    assert fake_clock.sleeps == []
+
+
 async def test_async_attempt_cancelled_from_inside_propagates():
     @hedge(10)
     async def fetch() -> None:
@@ -196,11 +220,11 @@ async def test_async_attempt_cancelled_from_inside_propagates():
         await fetch()
 
 
-async def test_async_methods_and_context(fake_clock):
+async def test_async_methods_and_context():
     var = contextvars.ContextVar("var", default="unset")
 
     class Client:
-        @hedge(0.1)
+        @hedge(0.005)
         async def get(self, path: str) -> str:
             return f"{var.get()}:{path}"
 

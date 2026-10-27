@@ -492,6 +492,21 @@ def test_memoize_ttl_without_maxsize_sweeps_expired_entries(fake_clock: FakeCloc
     assert len(store) <= 130
 
 
+def test_memoize_without_signature_keeps_keyword_names_in_the_key() -> None:
+    class NoSignature:
+        __signature__ = "not a signature"  # inspect.signature() raises TypeError
+
+        def __call__(self, *args: Any, **kwargs: Any) -> tuple[Any, ...]:
+            return (args, kwargs)
+
+    m = memoize(NoSignature())
+    assert m(1, b=2) == ((1,), {"b": 2})
+    assert m(1, 2) == ((1, 2), {})  # not the cached f(1, b=2)
+    assert m(1, c=2) == ((1,), {"c": 2})
+    assert m(1, b=2) == ((1,), {"b": 2})
+    assert m.cache_info().hits == 1
+
+
 def test_memoized_bound_method_keeps_parameter_types() -> None:
     class C:
         @memoize
