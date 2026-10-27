@@ -136,3 +136,40 @@ def is_async(func: Callable[..., Any]) -> bool:
 def qualname(func: Callable[..., Any]) -> str:
     """A readable name for log messages."""
     return getattr(func, "__qualname__", None) or getattr(func, "__name__", None) or repr(func)
+
+
+# ---------------------------------------------------------------------------- events
+# One process-wide hook for metrics. Decorators call ``_core.emit(...)`` at interesting
+# moments (a retry, a cache hit, a circuit opening); ``python_wrap.events`` is the public
+# face. With no listener registered, ``emit`` is a single list check.
+
+
+@dataclass(frozen=True)
+class Event:
+    """Something a decorator did, for metrics and tracing.
+
+    Attributes:
+        name: Dotted event name, e.g. ``"retry.attempt_failed"``.
+        function: Qualified name of the decorated function (or the breaker/limiter name).
+        fields: Event-specific data, e.g. ``{"attempt": 2, "next_delay": 0.5}``.
+    """
+
+    name: str
+    function: str
+    fields: dict[str, Any]
+
+
+listeners: list[Callable[[Event], None]] = []
+listeners_lock = threading.Lock()
+
+
+def emit(name: str, function: str, **fields: Any) -> None:
+    """Deliver an event to every listener. A failing listener is logged, never raised."""
+    if not listeners:
+        return
+    event = Event(name, function, fields)
+    for listener in tuple(listeners):
+        try:
+            listener(event)
+        except Exception:
+            get_logger().exception("python_wrap event listener %r failed", listener)
