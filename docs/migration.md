@@ -206,6 +206,15 @@ python-wrap 0.2 requires Python 3.10 or newer. Stay on 0.1 if you cannot upgrade
         print(exc)   # names the unknown parameter
     ```
 
+## Behaviour details to know
+
+These are not breaking for most code, but they can surprise you if you read the early 0.2 notes or wrote your own wrappers around python-wrap.
+
+- **`timeout(...)` returns a `Timeout` object.** It is still a decorator (`@timeout(5)` and `@timeout(5)` on `async def` are unchanged), and is now also a context manager: `with timeout(5):` and `async with timeout(5):`.
+- **`retry` never retries cancellation-type exceptions.** `asyncio.CancelledError`, `KeyboardInterrupt`, `SystemExit` and `GeneratorExit` propagate immediately, even if you list them (or `BaseException`) in `on=`. Shutdown and task cancellation are no longer swallowed by a retry loop.
+- **`redact=` on `log_args` and `audit` defaults to `None`.** `None` means "use the value from `configure()`, or `DEFAULT_REDACT`". Passing `redact=()` still turns redaction off, and `redact_extra=` adds fragments to whichever list is in force.
+- **`audit` may skip building a record.** With no `sink=` and the log level disabled, nobody could see the `AuditRecord`, so none is built (no work, no `include_result` evaluation). Pass a `sink=` if you always need the record.
+
 ## Behaviour that was broken and is now fixed
 
 These were bugs in v0.1. Code that worked around them may need to change.
@@ -236,5 +245,10 @@ You do not need these to migrate, but they replace common hand-written code:
 - `throttle`, `debounce`, `singleflight`.
 - `enforce_types` for runtime checks from annotations.
 - `compose`, `mock_data(enabled=...)`, `deprecate(since=, removed_in=, alternative=)`.
+- `retry(delay_from=retry_after_header, max_time=)`, `retrying(...)` blocks, `deadline()` and `with timeout(...)`.
+- `Bulkhead`, `RateLimiter`, `gather_limit` / `map_async` / `race`, `batch_calls` and `hedge`.
+- `cached_property(ttl=)`, `count_calls`, the `python_wrap.events` hook and `log_context`.
+- `policy(...)` and `configure(...)` for reusable stacks and project-wide defaults.
+- `python_wrap.testing`: `fast_mode`, `FakeClock`, `spy` and pytest fixtures.
 
 See the [changelog](changelog.md) for the full list.
