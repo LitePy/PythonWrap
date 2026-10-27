@@ -1,6 +1,6 @@
 # Migrating from 0.1 to 0.2
 
-Version 0.2 is a rewrite of the internals with a handful of deliberate breaking changes. Most v0.1 code keeps working: `from python_wrap.decorators import x` still resolves (a compatibility module re-exports everything), and the new exceptions subclass the closest built-ins.
+Version 0.2 is a rewrite of the internals with a handful of deliberate breaking changes. Most v0.1 code keeps working: `from python_wrap.decorators import x` still resolves (a compatibility module re-exports everything), and the exceptions with a natural built-in counterpart subclass it (`TimeoutExpired` is a `TimeoutError`, `ValidationError` a `ValueError`).
 
 **Checklist**
 

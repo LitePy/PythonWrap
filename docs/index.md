@@ -15,7 +15,7 @@ hide:
 bulkhead, batching, async helpers, metrics and test helpers. One import, sync and async,
 fully typed, zero dependencies.</p>
 
-[Get started](#install){ .md-button .md-button--primary }
+[Get started](get-started/quickstart.md){ .md-button .md-button--primary }
 [Choose a decorator](get-started/choosing.md){ .md-button }
 [View on GitHub](https://github.com/LitePy/PythonWrap){ .md-button }
 
@@ -225,7 +225,7 @@ Not sure which decorator you need? Start with [Choose a decorator](get-started/c
 
     ---
 
-    Its own exceptions (`TimeoutExpired`, `RateLimitExceeded`, `CircuitOpenError`, `BulkheadFull`, ...) also subclass the closest built-in, so `except TimeoutError` keeps working.
+    Every error subclasses `PythonWrapError`, and `TimeoutExpired`, `ValidationError` and `ArgumentTypeError` also subclass the matching built-in, so `except TimeoutError` keeps working. See [Errors](get-started/errors.md).
 
 </div>
 
@@ -235,23 +235,23 @@ Some of these tools cannot do everything (a thread timeout cannot stop the work,
 
 <div class="grid cards" markdown>
 
+-   :material-rocket-launch-outline:{ .lg .middle } __[Quickstart](get-started/quickstart.md)__
+
+    ---
+
+    Build a resilient client step by step: retry, timeout, cache, circuit breaker, policy, metrics and fast tests.
+
 -   :material-compass-outline:{ .lg .middle } __[Choose a decorator](get-started/choosing.md)__
 
     ---
 
     A table by problem: what to reach for, and what to combine it with.
 
--   :material-book-open-variant:{ .lg .middle } __Guides__
+-   :material-view-grid-outline:{ .lg .middle } __[Features](features/index.md)__
 
     ---
 
-    [Resilience](features/resilience/index.md), [Caching](features/caching/index.md), [Concurrency](features/concurrency/index.md), [Async toolkit](features/concurrency/async-helpers.md), [Batching](features/caching/batching.md), [Observability](features/observability/index.md), [Metrics](features/observability/metrics.md), [Validation](features/correctness/validation.md), [State](features/correctness/state.md), [Policies](features/resilience/policies.md), [Dev tools](features/devtools.md), [Configuration](features/configuration.md).
-
--   :material-chef-hat:{ .lg .middle } __[Cookbook](cookbook/index.md)__
-
-    ---
-
-    Complete recipes for HTTP clients, crawlers, FastAPI, Django, CLIs and tests.
+    One page per feature: resilience, caching and batching, concurrency and limits, observability, correctness.
 
 -   :material-test-tube:{ .lg .middle } __[Testing](testing/index.md)__
 
@@ -259,11 +259,11 @@ Some of these tools cannot do everything (a thread timeout cannot stop the work,
 
     `fast_mode`, a fake clock, spies and `eventually`: instant, deterministic tests.
 
--   :material-layers-triple-outline:{ .lg .middle } __[Stacking decorators](get-started/stacking.md)__
+-   :material-chef-hat:{ .lg .middle } __[Cookbook](cookbook/index.md)__
 
     ---
 
-    Order matters. The recommended order, and why `policy(...)` applies it for you.
+    Complete recipes for HTTP clients, crawlers, FastAPI, Django, CLIs and tests.
 
 -   :material-swap-horizontal:{ .lg .middle } __[Migrating from 0.1](project/migration.md)__
 

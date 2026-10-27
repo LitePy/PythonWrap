@@ -1,4 +1,4 @@
-# Caching and deduplication
+# Caching and batching
 
 These decorators avoid doing the same work twice: remembering a result, running setup once, computing an attribute lazily, sharing one in-flight call between duplicate callers, or turning many small lookups into one bulk call.
 
