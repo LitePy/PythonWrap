@@ -44,7 +44,26 @@ def _message_for(
 
 
 def _wrap_class(cls: type, text: str, category: type[Warning]) -> type:
-    """Wrap ``__init__`` in place, so the class stays the same object."""
+    """Wrap ``__init__`` (or ``__new__``) in place, so the class stays the same object.
+
+    ``__new__`` is wrapped instead when the class has no ``__init__`` of its own but
+    a custom ``__new__`` (``float`` subclasses, ``NamedTuple``...): installing an
+    ``__init__`` there would make ``object.__init__`` reject the arguments.
+    """
+    current_new: Any = cls.__new__
+    use_new = "__init__" not in cls.__dict__ and current_new is not object.__new__
+    if use_new:
+        original_new = current_new
+
+        def warned_new(klass: Any, *args: Any, **kwargs: Any) -> Any:
+            warnings.warn(text, category, stacklevel=2)
+            return original_new(klass, *args, **kwargs)
+
+        warned_new.__name__ = "__new__"
+        warned_new.__qualname__ = f"{cls.__qualname__}.__new__"
+        cls.__new__ = staticmethod(warned_new)  # type: ignore[method-assign,assignment]
+        return _mark(cls, text)
+
     original_init: Any = cls.__init__  # type: ignore[misc]
 
     @functools.wraps(original_init)

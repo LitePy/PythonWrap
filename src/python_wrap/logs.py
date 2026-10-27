@@ -55,6 +55,14 @@ _PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
 # --------------------------------------------------------------------------- helpers
 
 
+def _safe_repr(value: object) -> str:
+    """``repr(value)`` that never raises."""
+    try:
+        return repr(value)
+    except BaseException:
+        return f"<unrepresentable {type(value).__name__}>"
+
+
 def _instrument(
     func: Callable[P, R],
     start: Callable[[tuple[Any, ...], dict[str, Any]], S],
@@ -65,8 +73,16 @@ def _instrument(
     ``start(args, kwargs)`` runs before the call and returns a state object.
     ``finish(state, ok, value)`` runs afterwards with the return value (``ok=True``) or the
     raised exception (``ok=False``); the exception is then re-raised. For ``async def``
-    functions the hooks surround the awaited coroutine.
+    functions the hooks surround the awaited coroutine. A failing ``finish`` is logged and
+    swallowed: it never replaces the function's result or exception.
     """
+
+    def run_finish(state: S, ok: bool, value: Any) -> None:
+        try:
+            finish(state, ok, value)
+        except Exception:
+            _core.get_logger(None).exception("%s: logging hook failed", _core.qualname(func))
+
     if _core.is_async(func):
 
         @functools.wraps(func)
@@ -75,9 +91,9 @@ def _instrument(
             try:
                 result = await func(*args, **kwargs)  # type: ignore[misc]
             except BaseException as exc:
-                finish(state, False, exc)
+                run_finish(state, False, exc)
                 raise
-            finish(state, True, result)
+            run_finish(state, True, result)
             return result
 
         return cast("Callable[P, R]", awrapper)
@@ -88,9 +104,9 @@ def _instrument(
         try:
             result = func(*args, **kwargs)
         except BaseException as exc:
-            finish(state, False, exc)
+            run_finish(state, False, exc)
             raise
-        finish(state, True, result)
+        run_finish(state, True, result)
         return result
 
     return cast("Callable[P, R]", wrapper)
@@ -398,7 +414,7 @@ def audit(
                 caller=caller,
                 arguments=arguments,
                 status="success" if ok else "error",
-                error=None if ok else repr(value),
+                error=None if ok else _safe_repr(value),
                 duration=_core.perf_counter() - began,
                 result=value if (ok and include_result) else None,
             )

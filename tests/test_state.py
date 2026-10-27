@@ -387,3 +387,46 @@ async def test_transactional_async() -> None:
     assert current_transaction() is None
     results = await asyncio.gather(work(False), work(False))
     assert results == ["ok", "ok"]
+
+
+def test_revert_on_classmethod_target_keeps_original_exception() -> None:
+    class Config:
+        value = 1
+
+        @classmethod
+        @revert_on_failure
+        def update(cls, v: int) -> None:
+            cls.value = v
+            cls.extra = v  # type: ignore[attr-defined]
+            raise ValueError("boom")
+
+        @classmethod
+        def helper(cls) -> int:
+            return 7
+
+    with pytest.raises(ValueError, match="boom"):
+        Config.update(5)
+    assert Config.value == 1
+    assert not hasattr(Config, "extra")
+    assert Config.helper() == 7
+
+
+def test_restore_failure_is_logged_and_original_exception_propagates(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class Guard:
+        def __init__(self) -> None:
+            object.__setattr__(self, "a", 1)
+
+        def __setattr__(self, name: str, value: Any) -> None:
+            raise RuntimeError("frozen")
+
+    @revert_on_failure
+    def f(g: Guard) -> None:
+        object.__setattr__(g, "a", 2)
+        raise ValueError("orig")
+
+    g = Guard()
+    with caplog.at_level(logging.WARNING), pytest.raises(ValueError, match="orig"):
+        f(g)
+    assert any("could not" in r.getMessage() for r in caplog.records)
