@@ -6,13 +6,17 @@ import enum
 import functools
 import threading
 from collections.abc import Callable, Coroutine
-from typing import Any, cast, overload
+from typing import Any, Concatenate, ParamSpec, Protocol, TypeVar, cast, overload
 
 from python_wrap import _core
-from python_wrap._core import LoggerLike, P, R
+from python_wrap._core import F, LoggerLike, P, R
 from python_wrap.errors import CircuitOpenError
 
-__all__ = ["CircuitBreaker", "CircuitState", "circuit_breaker"]
+__all__ = ["CircuitBreaker", "CircuitProtected", "CircuitState", "circuit_breaker"]
+
+R_co = TypeVar("R_co", covariant=True)
+P2 = ParamSpec("P2")
+T = TypeVar("T")
 
 ExceptionTypes = type[BaseException] | tuple[type[BaseException], ...]
 
@@ -29,7 +33,7 @@ class CircuitBreaker:
     """Stop calling a failing dependency until it has had time to recover.
 
     The breaker is closed at first. After ``failure_threshold`` consecutive matching
-    failures it opens and rejects calls with :class:`~python_wrap.errors.CircuitOpenError`.
+    failures it opens and rejects calls with `CircuitOpenError`.
     After ``recovery_timeout`` seconds it goes half-open and lets up to
     ``half_open_max_calls`` trial calls through: a success closes it, a failure
     re-opens it. One instance can decorate several functions to share state.
@@ -225,24 +229,71 @@ class CircuitBreaker:
         self._success(generation, trial)
         return result
 
-    def __call__(self, func: Callable[P, R]) -> Callable[P, R]:
-        """Decorate ``func`` so every call goes through this breaker."""
+    def __call__(self, func: F) -> F:
+        """Decorate ``func`` so every call goes through this breaker.
+
+        The wrapper keeps the exact type of ``func``, so attributes added by decorators
+        applied underneath (such as ``cache_info()`` from ``memoize``) stay visible.
+        """
         if _core.is_async(func):
 
             @functools.wraps(func)
             async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
                 return await self._acall(func, args, kwargs)
 
-            return cast("Callable[P, R]", async_wrapper)
+            return cast(F, async_wrapper)
 
         @functools.wraps(func)
-        def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
             return self.call(func, *args, **kwargs)
 
-        return wrapper
+        return cast(F, wrapper)
 
     def __repr__(self) -> str:
         return f"CircuitBreaker(name={self.name!r}, state={self.state.value!r})"
+
+
+class CircuitProtected(Protocol[P, R_co]):
+    """A function wrapped by `circuit_breaker`: callable, with its own breaker attached.
+
+    Use it to annotate a decorated function, e.g. ``CircuitProtected[[int], str]``.
+    Binds ``self`` and ``cls`` like `python_wrap.caching.Memoized`, with the same typing
+    limitations.
+    """
+
+    def __call__(self, *args: P.args, **kwargs: P.kwargs) -> R_co: ...
+
+    @overload
+    def __get__(
+        self: CircuitProtected[Concatenate[type[T], P2], R_co], instance: None, owner: type[T]
+    ) -> _CircuitProtectedOnClass[P, P2, R_co]: ...
+    @overload
+    def __get__(self, instance: None, owner: type | None = None) -> CircuitProtected[P, R_co]: ...
+    @overload
+    def __get__(
+        self: CircuitProtected[Concatenate[Any, P2], R_co],
+        instance: object,
+        owner: type | None = None,
+    ) -> CircuitProtected[P2, R_co]: ...
+
+    @property
+    def breaker(self) -> CircuitBreaker:
+        """The dedicated `CircuitBreaker` (inspect ``.state`` or call ``.reset()``)."""
+        ...
+
+
+class _CircuitProtectedOnClass(CircuitProtected[P, R_co], Protocol[P, P2, R_co]):
+    """`CircuitProtected` read from a class: accepts the call with and without the first argument.
+
+    Returned for class access (``Cls.attr``) when the first parameter could be ``cls``.
+    pyright only picks it under ``@classmethod``; mypy cannot tell a classmethod from an
+    instance or static method there, so both call forms are accepted.
+    """
+
+    @overload
+    def __call__(self, *args: P2.args, **kwargs: P2.kwargs) -> R_co: ...
+    @overload
+    def __call__(self, *args: P.args, **kwargs: P.kwargs) -> R_co: ...
 
 
 @overload
@@ -256,7 +307,7 @@ def circuit_breaker(
     on: ExceptionTypes = ...,
     name: str | None = ...,
     logger: LoggerLike = ...,
-) -> Callable[P, R]: ...
+) -> CircuitProtected[P, R]: ...
 @overload
 def circuit_breaker(
     func: None = None,
@@ -268,9 +319,9 @@ def circuit_breaker(
     on: ExceptionTypes = ...,
     name: str | None = ...,
     logger: LoggerLike = ...,
-) -> Callable[[Callable[P, R]], Callable[P, R]]: ...
+) -> Callable[[Callable[P, R]], CircuitProtected[P, R]]: ...
 def circuit_breaker(
-    func: Callable[P, R] | None = None,
+    func: Callable[..., Any] | None = None,
     /,
     *,
     failure_threshold: int = 5,
@@ -279,11 +330,11 @@ def circuit_breaker(
     on: ExceptionTypes = Exception,
     name: str | None = None,
     logger: LoggerLike = None,
-) -> Callable[P, R] | Callable[[Callable[P, R]], Callable[P, R]]:
-    """Decorate a function with its own dedicated :class:`CircuitBreaker`.
+) -> Any:
+    """Decorate a function with its own dedicated `CircuitBreaker`.
 
     The wrapper exposes the breaker as ``wrapper.breaker``. To share one breaker
-    between several functions, create a :class:`CircuitBreaker` and use it as a
+    between several functions, create a `CircuitBreaker` and use it as a
     decorator instead.
 
     Args:
@@ -306,7 +357,7 @@ def circuit_breaker(
         ... def call_api() -> None: ...
     """
 
-    def decorate(f: Callable[P, R]) -> Callable[P, R]:
+    def decorate(f: Callable[..., Any]) -> Any:
         breaker = CircuitBreaker(
             failure_threshold=failure_threshold,
             recovery_timeout=recovery_timeout,
@@ -315,8 +366,8 @@ def circuit_breaker(
             name=name or _core.qualname(f),
             logger=logger,
         )
-        wrapped = breaker(f)
-        wrapped.breaker = breaker  # type: ignore[attr-defined]
+        wrapped: Any = breaker(f)
+        wrapped.breaker = breaker
         return wrapped
 
     return decorate if func is None else decorate(func)

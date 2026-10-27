@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Any, overload
 
 from python_wrap import _core
-from python_wrap._core import LoggerLike, P, R
+from python_wrap._core import F, LoggerLike, P, R
 from python_wrap.logs import _instrument
 
 __all__ = [
@@ -88,7 +88,7 @@ class TimingRecord:
 
 
 @overload
-def timing(func: Callable[P, R], /) -> Callable[P, R]: ...
+def timing(func: F, /) -> F: ...
 @overload
 def timing(
     func: None = None,
@@ -98,16 +98,16 @@ def timing(
     level: int = logging.INFO,
     threshold: float | None = None,
     callback: Callable[[TimingRecord], None] | None = None,
-) -> Callable[[Callable[P, R]], Callable[P, R]]: ...
+) -> Callable[[F], F]: ...
 def timing(
-    func: Callable[P, R] | None = None,
+    func: Callable[..., Any] | None = None,
     /,
     *,
     logger: LoggerLike = None,
     level: int = logging.INFO,
     threshold: float | None = None,
     callback: Callable[[TimingRecord], None] | None = None,
-) -> Callable[P, R] | Callable[[Callable[P, R]], Callable[P, R]]:
+) -> Any:
     """Measure and log how long each call takes.
 
     Logs ``<name> took 12.34 ms``. If the call raises, logs
@@ -120,7 +120,7 @@ def timing(
         level: Log level.
         threshold: If set, successful calls are only logged when slower than this many
             seconds. Failed calls are always logged.
-        callback: Called with a :class:`TimingRecord` for *every* call, regardless of
+        callback: Called with a `TimingRecord` for *every* call, regardless of
             ``threshold``; use it to feed a metrics system. Errors in the callback are
             logged and swallowed.
 
@@ -163,7 +163,20 @@ def timing(
 
 @dataclass(frozen=True)
 class BenchmarkResult:
-    """Statistics from :func:`benchmark`; all times are in seconds."""
+    """Statistics from `benchmark` or `benchmark_async`; all times are in seconds.
+
+    Warm-up calls are not included. ``str(result)`` gives a one-line summary.
+
+    Attributes:
+        name: Qualified name of the benchmarked function.
+        runs: Number of measured calls.
+        timings: Duration of each measured call, in call order.
+        mean: Arithmetic mean of ``timings``.
+        median: Median of ``timings``.
+        min: Fastest call.
+        max: Slowest call.
+        stdev: Sample standard deviation of ``timings`` (``0.0`` when ``runs`` is 1).
+    """
 
     name: str
     runs: int
@@ -225,10 +238,10 @@ def benchmark(
         warmup: Unmeasured runs executed first (>= 0).
 
     Returns:
-        A :class:`BenchmarkResult`.
+        A `BenchmarkResult`.
 
     Raises:
-        TypeError: If ``func`` is an ``async def`` function; use :func:`benchmark_async`.
+        TypeError: If ``func`` is an ``async def`` function; use `benchmark_async`.
         ValueError: If ``runs`` or ``warmup`` is out of range.
 
     Example:
@@ -260,7 +273,7 @@ async def benchmark_async(
     runs: int = 5,
     warmup: int = 1,
 ) -> BenchmarkResult:
-    """Like :func:`benchmark`, for ``async def`` functions (each run is awaited).
+    """Like `benchmark`, for ``async def`` functions (each run is awaited).
 
     Args:
         func: The coroutine function to measure.
@@ -270,10 +283,10 @@ async def benchmark_async(
         warmup: Unmeasured runs executed first (>= 0).
 
     Returns:
-        A :class:`BenchmarkResult`.
+        A `BenchmarkResult`.
 
     Raises:
-        TypeError: If ``func`` is not an ``async def`` function; use :func:`benchmark`.
+        TypeError: If ``func`` is not an ``async def`` function; use `benchmark`.
         ValueError: If ``runs`` or ``warmup`` is out of range.
 
     Example:
@@ -335,7 +348,7 @@ def _trace_release() -> None:
 
 
 @overload
-def measure_memory(func: Callable[P, R], /) -> Callable[P, R]: ...
+def measure_memory(func: F, /) -> F: ...
 @overload
 def measure_memory(
     func: None = None,
@@ -344,16 +357,16 @@ def measure_memory(
     logger: LoggerLike = None,
     level: int = logging.INFO,
     callback: Callable[[MemoryRecord], None] | None = None,
-) -> Callable[[Callable[P, R]], Callable[P, R]]: ...
+) -> Callable[[F], F]: ...
 def measure_memory(
-    func: Callable[P, R] | None = None,
+    func: Callable[..., Any] | None = None,
     /,
     *,
     logger: LoggerLike = None,
     level: int = logging.INFO,
     callback: Callable[[MemoryRecord], None] | None = None,
-) -> Callable[P, R] | Callable[[Callable[P, R]], Callable[P, R]]:
-    """Measure the Python memory a call allocates, using :mod:`tracemalloc`.
+) -> Any:
+    """Measure the Python memory a call allocates, using `tracemalloc`.
 
     Works on every OS (v0.1 used ``resource.ru_maxrss``, which is Unix-only and reports
     process-wide peak in inconsistent units). Tracing is started if it is not already
@@ -370,7 +383,7 @@ def measure_memory(
         func: The function, when used as a bare ``@measure_memory``.
         logger: A ``logging.Logger``, a logger name, or ``None`` for the package logger.
         level: Log level.
-        callback: Called with a :class:`MemoryRecord` for every call.
+        callback: Called with a `MemoryRecord` for every call.
 
     Returns:
         The decorated function, with its signature preserved.
@@ -417,7 +430,7 @@ def _another_profiler_active() -> bool:
 
 
 @overload
-def profile(func: Callable[P, R], /) -> Callable[P, R]: ...
+def profile(func: F, /) -> F: ...
 @overload
 def profile(
     func: None = None,
@@ -428,9 +441,9 @@ def profile(
     sort: str = "cumulative",
     limit: int | None = 20,
     callback: Callable[[pstats.Stats], None] | None = None,
-) -> Callable[[Callable[P, R]], Callable[P, R]]: ...
+) -> Callable[[F], F]: ...
 def profile(
-    func: Callable[P, R] | None = None,
+    func: Callable[..., Any] | None = None,
     /,
     *,
     logger: LoggerLike = None,
@@ -438,8 +451,8 @@ def profile(
     sort: str = "cumulative",
     limit: int | None = 20,
     callback: Callable[[pstats.Stats], None] | None = None,
-) -> Callable[P, R] | Callable[[Callable[P, R]], Callable[P, R]]:
-    """Profile each call with :mod:`cProfile` and log the top rows.
+) -> Any:
+    """Profile each call with `cProfile` and log the top rows.
 
     If another profiler is already active (Python 3.12+ raises ``ValueError`` when
     profilers nest), a warning is logged once and the function simply runs unprofiled.
@@ -453,15 +466,15 @@ def profile(
         func: The function, when used as a bare ``@profile``.
         logger: A ``logging.Logger``, a logger name, or ``None`` for the package logger.
         level: Log level.
-        sort: A :class:`pstats.SortKey` value such as ``"cumulative"`` or ``"tottime"``.
+        sort: A `pstats.SortKey` value such as ``"cumulative"`` or ``"tottime"``.
         limit: Number of rows to log; ``None`` logs all.
-        callback: Called with the :class:`pstats.Stats` of every profiled call.
+        callback: Called with the `pstats.Stats` of every profiled call.
 
     Returns:
         The decorated function, with its signature preserved.
 
     Raises:
-        ValueError: If ``sort`` is not a valid :class:`pstats.SortKey`.
+        ValueError: If ``sort`` is not a valid `pstats.SortKey`.
 
     Example:
         >>> @profile(sort="tottime", limit=10)

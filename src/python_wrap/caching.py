@@ -1,4 +1,4 @@
-"""Caching decorators: :func:`memoize`, :func:`cache` and :func:`once`."""
+"""Caching decorators: `memoize`, `cache` and `once`."""
 
 from __future__ import annotations
 
@@ -14,11 +14,12 @@ from typing import Any, Concatenate, NamedTuple, ParamSpec, Protocol, TypeVar, o
 
 from python_wrap import _core
 
-__all__ = ["CacheInfo", "cache", "memoize", "once"]
+__all__ = ["CacheInfo", "Memoized", "Once", "cache", "memoize", "once"]
 
 P = ParamSpec("P")
 R = TypeVar("R")
 R_co = TypeVar("R_co", covariant=True)
+T = TypeVar("T")
 P2 = ParamSpec("P2")
 
 _MISSING: Any = object()
@@ -34,10 +35,29 @@ class CacheInfo(NamedTuple):
 
 
 class Memoized(Protocol[P, R_co]):
-    """A function wrapped by :func:`memoize` (callable plus cache controls)."""
+    """A function wrapped by `memoize` (callable plus cache controls).
+
+    Use it to annotate decorated functions, e.g. ``Memoized[[int], str]``. The
+    ``__get__`` overloads let type checkers bind ``self`` on instance access
+    (``obj.method(x)``) and ``cls`` under a ``@classmethod`` stacked above
+    (``Cls.method(x)``).
+
+    Typing limitations (runtime behaviour is unaffected):
+
+    * Read from the class (``Cls.method``), the wrapper accepts the call both with and
+      without its first argument, because mypy cannot tell a classmethod from an
+      instance or static method there. So ``Cls.method(x)`` on an instance method is
+      not flagged by mypy (pyright flags it), and ``Cls.cm(Cls, x)`` is accepted by both.
+    * Under a ``@staticmethod`` stacked above, ``Cls.method(x)`` type-checks but
+      ``obj.method(x)`` is reported as an error by both mypy and pyright.
+    """
 
     def __call__(self, *args: P.args, **kwargs: P.kwargs) -> R_co: ...
 
+    @overload
+    def __get__(
+        self: Memoized[Concatenate[type[T], P2], R_co], instance: None, owner: type[T]
+    ) -> _MemoizedOnClass[P, P2, R_co]: ...
     @overload
     def __get__(self, instance: None, owner: type | None = None) -> Memoized[P, R_co]: ...
     @overload
@@ -55,13 +75,34 @@ class Memoized(Protocol[P, R_co]):
         """Drop the entry for these arguments. Returns True if one existed."""
 
 
+class _MemoizedOnClass(Memoized[P, R_co], Protocol[P, P2, R_co]):
+    """`Memoized` read from a class: accepts the call with and without the first argument.
+
+    Returned for class access (``Cls.attr``) when the first parameter could be ``cls``.
+    pyright only picks it under ``@classmethod``; mypy cannot tell a classmethod from an
+    instance or static method there, so both call forms are accepted.
+    """
+
+    @overload
+    def __call__(self, *args: P2.args, **kwargs: P2.kwargs) -> R_co: ...
+    @overload
+    def __call__(self, *args: P.args, **kwargs: P.kwargs) -> R_co: ...
+
+
 class Once(Protocol[P, R_co]):
-    """A function wrapped by :func:`once`."""
+    """A function wrapped by `once` (callable plus ``called`` and ``reset()``).
+
+    Binds ``self`` and ``cls`` like `Memoized`, with the same typing limitations.
+    """
 
     called: bool
 
     def __call__(self, *args: P.args, **kwargs: P.kwargs) -> R_co: ...
 
+    @overload
+    def __get__(
+        self: Once[Concatenate[type[T], P2], R_co], instance: None, owner: type[T]
+    ) -> _OnceOnClass[P, P2, R_co]: ...
     @overload
     def __get__(self, instance: None, owner: type | None = None) -> Once[P, R_co]: ...
     @overload
@@ -71,6 +112,20 @@ class Once(Protocol[P, R_co]):
 
     def reset(self) -> None:
         """Forget the stored result so the next call runs the function again."""
+
+
+class _OnceOnClass(Once[P, R_co], Protocol[P, P2, R_co]):
+    """`Once` read from a class: accepts the call with and without the first argument.
+
+    Returned for class access (``Cls.attr``) when the first parameter could be ``cls``.
+    pyright only picks it under ``@classmethod``; mypy cannot tell a classmethod from an
+    instance or static method there, so both call forms are accepted.
+    """
+
+    @overload
+    def __call__(self, *args: P2.args, **kwargs: P2.kwargs) -> R_co: ...
+    @overload
+    def __call__(self, *args: P.args, **kwargs: P.kwargs) -> R_co: ...
 
 
 # --------------------------------------------------------------------------- keys
@@ -111,7 +166,7 @@ def _freeze(value: Any) -> Hashable:
 
 
 class _Unhashable(TypeError):
-    """Raised by :func:`_freeze`; carries the offending type name."""
+    """Raised by `_freeze`; carries the offending type name."""
 
     def __init__(self, type_name: str) -> None:
         super().__init__(type_name)
@@ -240,13 +295,13 @@ def memoize(
     A method of a class whose instances are unhashable (for example an ``eq=True``
     dataclass) fails with a ``TypeError`` naming ``self``: ``id(self)`` is deliberately not
     used as a fallback because ids are reused after garbage collection. Pass ``key=`` or
-    use :func:`functools.cached_property` instead.
+    use `functools.cached_property` instead.
 
     Methods: ``self`` is part of the key, so results are per instance. The cache holds a
     strong reference to every instance it has seen, keeping it alive; use ``maxsize`` or
     ``ttl`` (or ``key=`` ignoring ``self``) on methods of many short-lived objects.
 
-    The wrapper has ``cache_clear()``, ``cache_info()`` (a :class:`CacheInfo`) and
+    The wrapper has ``cache_clear()``, ``cache_info()`` (a `CacheInfo`) and
     ``cache_delete(*args, **kwargs)``.
 
     Args:
@@ -404,7 +459,7 @@ def cache(
     """Cache results for ``duration``; an alias of ``memoize(ttl=duration, maxsize=maxsize)``.
 
     Kept for v0.1 compatibility. Prefer ``memoize(ttl=...)`` in new code; note this name
-    also clashes with :func:`functools.cache`. Every decorated function gets its own
+    also clashes with `functools.cache`. Every decorated function gets its own
     store, even when one ``cache(...)`` result is applied to several functions.
 
     Args:

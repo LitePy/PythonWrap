@@ -1,11 +1,11 @@
 """Concurrency and flow-control decorators.
 
-* :func:`timeout` — bound how long a call may run.
-* :func:`rate_limit` — at most *N* calls per period, rejecting or waiting.
-* :func:`run_in_thread` — start a call in a new thread and get a ``Future`` back.
-* :func:`throttle` — run at most once per interval; calls in between are skipped.
-* :func:`debounce` — run once activity has stopped for a while.
-* :func:`singleflight` — concurrent identical calls share one execution.
+* `timeout` — bound how long a call may run.
+* `rate_limit` — at most *N* calls per period, rejecting or waiting.
+* `run_in_thread` — start a call in a new thread and get a ``Future`` back.
+* `throttle` — run at most once per interval; calls in between are skipped.
+* `debounce` — run once activity has stopped for a while.
+* `singleflight` — concurrent identical calls share one execution.
 
 Every decorator works on plain functions, ``async def`` functions and methods. State
 kept by a decorator (rate-limit buckets, throttle windows, pending debounced calls) belongs
@@ -27,10 +27,10 @@ import weakref
 from collections import deque
 from collections.abc import Awaitable, Callable, Coroutine, Hashable
 from types import FrameType
-from typing import Any, Generic, Protocol, TypeVar, cast, overload
+from typing import Any, Concatenate, Generic, ParamSpec, Protocol, TypeVar, cast, overload
 
 from python_wrap import _core
-from python_wrap._core import P, R
+from python_wrap._core import F, P, R
 from python_wrap.errors import RateLimitExceeded, TimeoutExpired
 
 __all__ = [
@@ -46,6 +46,7 @@ __all__ = [
 
 T = TypeVar("T")
 R_co = TypeVar("R_co", covariant=True)
+P2 = ParamSpec("P2")
 
 # ---------------------------------------------------------------------------------------
 # timeout
@@ -121,7 +122,7 @@ if sys.version_info >= (3, 11):
     async def _await_with_deadline(
         awaitable: Awaitable[T], func: Callable[..., Any], seconds: float
     ) -> T:
-        """Await under :func:`asyncio.timeout`; convert only *our* expiry to TimeoutExpired."""
+        """Await under `asyncio.timeout`; convert only *our* expiry to TimeoutExpired."""
         cm = asyncio.timeout(seconds)
         try:
             async with cm:
@@ -153,19 +154,17 @@ else:  # pragma: no cover - exercised by the Python 3.10 CI job
         raise TimeoutExpired(_timeout_message(func, seconds), seconds=seconds)
 
 
-def timeout(
-    seconds: float, *, use_signals: bool | None = None
-) -> Callable[[Callable[P, R]], Callable[P, R]]:
-    """Raise :class:`~python_wrap.errors.TimeoutExpired` if a call runs longer than ``seconds``.
+def timeout(seconds: float, *, use_signals: bool | None = None) -> Callable[[F], F]:
+    """Raise `TimeoutExpired` if a call runs longer than ``seconds``.
 
     ``TimeoutExpired`` subclasses the built-in ``TimeoutError``.
 
-    * ``async def`` functions are cancelled at the deadline (with :func:`asyncio.timeout`
+    * ``async def`` functions are cancelled at the deadline (with `asyncio.timeout`
       on Python 3.11+, or by running the call as a task on 3.10). Only the decorator's own
       deadline is turned into ``TimeoutExpired``: a ``TimeoutError`` raised by the wrapped
       function itself propagates unchanged.
     * Sync functions, with signals (the default on Unix when called from the main thread):
-      a ``SIGALRM`` timer from :func:`signal.setitimer` interrupts the call. The previous
+      a ``SIGALRM`` timer from `signal.setitimer` interrupts the call. The previous
       ``SIGALRM`` handler and any already-armed timer are restored afterwards, so nested
       timeouts work.
     * Sync functions, without signals (Windows, non-main threads, or
@@ -241,7 +240,7 @@ def timeout(
 
         return wrapper
 
-    return decorate
+    return cast("Callable[[F], F]", decorate)
 
 
 # ---------------------------------------------------------------------------------------
@@ -290,7 +289,7 @@ def rate_limit(
     *,
     block: bool = False,
     key: Callable[..., Hashable] | None = None,
-) -> Callable[[Callable[P, R]], Callable[P, R]]:
+) -> Callable[[F], F]:
     """Allow at most ``calls`` calls per ``period`` seconds.
 
     Uses a sliding-window log: a call is allowed when fewer than ``calls`` calls started
@@ -365,7 +364,7 @@ def rate_limit(
 
         return wrapper
 
-    return decorate
+    return cast("Callable[[F], F]", decorate)
 
 
 # ---------------------------------------------------------------------------------------
@@ -399,11 +398,11 @@ def run_in_thread(
     daemon: bool = False,
     name: str | None = None,
 ) -> Any:
-    """Run each call in a new thread and return a :class:`concurrent.futures.Future`.
+    """Run each call in a new thread and return a `concurrent.futures.Future`.
 
     The future resolves to the function's return value, or raises its exception from
     ``future.result()``. For ``async def`` functions the coroutine is run with
-    :func:`asyncio.run` inside the new thread (so it gets its own event loop), and the
+    `asyncio.run` inside the new thread (so it gets its own event loop), and the
     wrapper itself is a plain function returning a ``Future``. The caller's
     ``contextvars`` are copied into the thread.
 
@@ -549,9 +548,24 @@ def throttle(interval: float) -> _ThrottleDecorator:
 
 
 class Debounced(Protocol[P, R_co]):
-    """A debounced sync function: calls return ``None``; the real call happens later."""
+    """A debounced sync function: calls return ``None``; the real call happens later.
+
+    Binds ``self`` and ``cls`` like `python_wrap.caching.Memoized`, with the same typing
+    limitations.
+    """
 
     def __call__(self, *args: P.args, **kwargs: P.kwargs) -> None: ...
+
+    @overload
+    def __get__(
+        self: Debounced[Concatenate[type[T], P2], R_co], instance: None, owner: type[T]
+    ) -> _DebouncedOnClass[P, P2, R_co]: ...
+    @overload
+    def __get__(self, instance: None, owner: type | None = None) -> Debounced[P, R_co]: ...
+    @overload
+    def __get__(
+        self: Debounced[Concatenate[Any, P2], R_co], instance: object, owner: type | None = None
+    ) -> Debounced[P2, R_co]: ...
 
     def cancel(self) -> None:
         """Drop the pending call, if any."""
@@ -560,16 +574,61 @@ class Debounced(Protocol[P, R_co]):
         """Run the pending call now and return its result (``None`` if nothing pending)."""
 
 
+class _DebouncedOnClass(Debounced[P, R_co], Protocol[P, P2, R_co]):
+    """`Debounced` read from a class: accepts the call with and without the first argument.
+
+    Returned for class access (``Cls.attr``) when the first parameter could be ``cls``.
+    pyright only picks it under ``@classmethod``; mypy cannot tell a classmethod from an
+    instance or static method there, so both call forms are accepted.
+    """
+
+    @overload
+    def __call__(self, *args: P2.args, **kwargs: P2.kwargs) -> None: ...
+    @overload
+    def __call__(self, *args: P.args, **kwargs: P.kwargs) -> None: ...
+
+
 class AsyncDebounced(Protocol[P, R_co]):
-    """A debounced ``async def`` function; see :func:`debounce` for the await semantics."""
+    """A debounced ``async def`` function; see `debounce` for the await semantics.
+
+    Binds ``self`` and ``cls`` like `python_wrap.caching.Memoized`, with the same typing
+    limitations.
+    """
 
     def __call__(self, *args: P.args, **kwargs: P.kwargs) -> Coroutine[Any, Any, R_co]: ...
+
+    @overload
+    def __get__(
+        self: AsyncDebounced[Concatenate[type[T], P2], R_co], instance: None, owner: type[T]
+    ) -> _AsyncDebouncedOnClass[P, P2, R_co]: ...
+    @overload
+    def __get__(self, instance: None, owner: type | None = None) -> AsyncDebounced[P, R_co]: ...
+    @overload
+    def __get__(
+        self: AsyncDebounced[Concatenate[Any, P2], R_co],
+        instance: object,
+        owner: type | None = None,
+    ) -> AsyncDebounced[P2, R_co]: ...
 
     def cancel(self) -> None:
         """Drop the pending call; callers awaiting it get ``CancelledError``."""
 
     def flush(self) -> Coroutine[Any, Any, R_co | None]:
         """Run the pending call now; awaiting returns its result (``None`` if none)."""
+
+
+class _AsyncDebouncedOnClass(AsyncDebounced[P, R_co], Protocol[P, P2, R_co]):
+    """`AsyncDebounced` read from a class: accepts the call with and without the first argument.
+
+    Returned for class access (``Cls.attr``) when the first parameter could be ``cls``.
+    pyright only picks it under ``@classmethod``; mypy cannot tell a classmethod from an
+    instance or static method there, so both call forms are accepted.
+    """
+
+    @overload
+    def __call__(self, *args: P2.args, **kwargs: P2.kwargs) -> Coroutine[Any, Any, R_co]: ...
+    @overload
+    def __call__(self, *args: P.args, **kwargs: P.kwargs) -> Coroutine[Any, Any, R_co]: ...
 
 
 class _DebounceDecorator(Protocol):
@@ -717,7 +776,7 @@ def debounce(wait: float) -> _DebounceDecorator:
     Each call restarts the countdown and replaces the pending arguments, so only the last
     call of a burst runs.
 
-    * Sync functions: the countdown is a daemon :class:`threading.Timer`, so the function
+    * Sync functions: the countdown is a daemon `threading.Timer`, so the function
       runs in the timer's thread. The wrapper returns ``None`` immediately.
     * ``async def`` functions: a call schedules a task on the running loop (cancelling the
       previously scheduled one) and then waits for the burst to finish. **Every caller in
@@ -739,7 +798,7 @@ def debounce(wait: float) -> _DebounceDecorator:
         wait: Quiet period in seconds; must be non-negative.
 
     Returns:
-        A decorator producing a :class:`Debounced` or :class:`AsyncDebounced` wrapper.
+        A decorator producing a `Debounced` or `AsyncDebounced` wrapper.
 
     Raises:
         ValueError: If ``wait`` is negative.
@@ -785,7 +844,7 @@ def _consume_outcome(task: asyncio.Task[Any]) -> None:
 async def _await_shared(loop: asyncio.AbstractEventLoop, task: asyncio.Task[T]) -> T:
     """Wait for a shared task without letting the caller's cancellation cancel it.
 
-    Like :func:`asyncio.shield`, but a cancelled waiter simply detaches: the task's
+    Like `asyncio.shield`, but a cancelled waiter simply detaches: the task's
     eventual exception is not reported as an unhandled "exception in shielded future".
     """
     waiter: asyncio.Future[T] = loop.create_future()
@@ -811,17 +870,17 @@ async def _await_shared(loop: asyncio.AbstractEventLoop, task: asyncio.Task[T]) 
 
 
 @overload
-def singleflight(func: Callable[P, R], /) -> Callable[P, R]: ...
+def singleflight(func: F, /) -> F: ...
 @overload
 def singleflight(
     func: None = None, /, *, key: Callable[..., Hashable] | None = None
-) -> Callable[[Callable[P, R]], Callable[P, R]]: ...
+) -> Callable[[F], F]: ...
 def singleflight(
-    func: Callable[P, R] | None = None,
+    func: Callable[..., Any] | None = None,
     /,
     *,
     key: Callable[..., Hashable] | None = None,
-) -> Callable[P, R] | Callable[[Callable[P, R]], Callable[P, R]]:
+) -> Any:
     """Let concurrent calls with the same arguments share a single execution.
 
     While a call for a given key is running, further calls with that key do not start
