@@ -1,0 +1,120 @@
+site_name: python-wrap
+site_description: Everyday Python decorators that just work. Retry, cache, time out, rate limit and more. Typed, async-aware, zero dependencies.
+site_author: Mahmoud Ahmed
+site_url: https://python-wrap.readthedocs.io/
+repo_url: https://github.com/LitePy/PythonWrap
+repo_name: LitePy/PythonWrap
+edit_uri: edit/main/docs/
+copyright: Copyright &copy; 2026 Mahmoud Ahmed &middot; MIT licence
+
+strict: true
+validation:
+  links:
+    anchors: warn
+
+theme:
+  name: material
+  icon:
+    repo: fontawesome/brands/github
+  palette:
+    - media: "(prefers-color-scheme)"
+      toggle:
+        icon: material/brightness-auto
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Follow the system
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - navigation.indexes
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.tabs.link
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/LitePy/PythonWrap
+    - icon: fontawesome/brands/python
+      link: https://pypi.org/project/python-wrap/
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            docstring_style: google
+            show_signature_annotations: true
+            separate_signature: true
+            members_order: source
+            show_root_heading: true
+            show_root_full_path: false
+            show_source: false
+            heading_level: 2
+            merge_init_into_class: true
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets:
+      base_path: [.]
+      check_paths: true
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+
+nav:
+  - Home: index.md
+  - Choose a decorator: choosing.md
+  - Guides:
+      - Resilience: guides/resilience.md
+      - Caching: guides/caching.md
+      - Concurrency and rate limits: guides/concurrency.md
+      - Observability: guides/observability.md
+      - Validation: guides/validation.md
+      - State safety: guides/state.md
+      - Developer tools: guides/devtools.md
+  - Concepts:
+      - Async support: async.md
+      - Stacking decorators: stacking.md
+      - Testing: testing.md
+      - Limitations: limitations.md
+  - Migrating to 0.2: migration.md
+  - API reference:
+      - api/index.md
+      - Errors: api/errors.md
+      - Retry and fallback: api/retry.md
+      - Circuit breaker: api/circuit.md
+      - Caching: api/caching.md
+      - Concurrency: api/concurrency.md
+      - Timing and profiling: api/timing.md
+      - Logging and audit: api/logs.md
+      - Validation: api/validation.md
+      - State: api/state.md
+      - Developer tools: api/devtools.md
+  - Changelog: changelog.md
