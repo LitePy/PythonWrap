@@ -5,11 +5,13 @@ import contextlib
 import inspect
 import logging
 import threading
+from collections.abc import Iterator
 
 import pytest
 
 from conftest import FakeClock
-from python_wrap.circuit import CircuitBreaker, CircuitState, circuit_breaker
+from python_wrap import _core
+from python_wrap.circuit import CircuitBreaker, CircuitState, CircuitStats, circuit_breaker
 from python_wrap.errors import CircuitOpenError
 
 
@@ -280,3 +282,190 @@ def test_thread_safety_exact_counts() -> None:
         t.join()
     assert b.failure_count == 800
     assert b.state is CircuitState.CLOSED
+
+
+# -------------------------------------------------------------------- 0.2 features
+
+
+@pytest.fixture
+def events() -> Iterator[list[_core.Event]]:
+    seen: list[_core.Event] = []
+    _core.listeners.append(seen.append)
+    try:
+        yield seen
+    finally:
+        _core.listeners.remove(seen.append)
+
+
+def test_success_threshold_needs_consecutive_trials(fake_clock: FakeClock) -> None:
+    b = CircuitBreaker(failure_threshold=1, recovery_timeout=5, success_threshold=3)
+    trip(b, 1)
+    fake_clock.advance(5)
+    assert b.call(ok) == "ok"
+    assert b.call(ok) == "ok"
+    assert b.state is CircuitState.HALF_OPEN  # two of three trials so far
+    assert b.call(ok) == "ok"
+    assert b.state is CircuitState.CLOSED
+
+
+def test_success_threshold_failure_during_trials_reopens(fake_clock: FakeClock) -> None:
+    b = CircuitBreaker(failure_threshold=1, recovery_timeout=5, success_threshold=2)
+    trip(b, 1)
+    fake_clock.advance(5)
+    assert b.call(ok) == "ok"
+    trip(b, 1)
+    assert b.state is CircuitState.OPEN
+    fake_clock.advance(5)
+    assert b.call(ok) == "ok"  # the count starts again from zero
+    assert b.state is CircuitState.HALF_OPEN
+    assert b.call(ok) == "ok"
+    assert b.state is CircuitState.CLOSED
+
+
+def test_success_threshold_validated() -> None:
+    with pytest.raises(ValueError):
+        CircuitBreaker(success_threshold=0)
+
+
+def test_exclude_never_counts_and_propagates(fake_clock: FakeClock) -> None:
+    b = CircuitBreaker(failure_threshold=1, recovery_timeout=5, exclude=KeyError)
+
+    def missing() -> None:
+        raise KeyError("nope")
+
+    with pytest.raises(KeyError):
+        b.call(missing)
+    assert b.state is CircuitState.CLOSED
+    assert b.stats.failures == 0
+    trip(b, 1)
+    fake_clock.advance(5)
+    with pytest.raises(KeyError):  # an excluded error frees the trial slot
+        b.call(missing)
+    assert b.state is CircuitState.HALF_OPEN
+    assert b.call(ok) == "ok"
+    assert b.state is CircuitState.CLOSED
+
+
+def test_on_state_change_listener_and_events(
+    fake_clock: FakeClock, events: list[_core.Event]
+) -> None:
+    seen: list[tuple[CircuitBreaker, CircuitState, CircuitState]] = []
+    b = CircuitBreaker(
+        failure_threshold=1,
+        recovery_timeout=5,
+        name="db",
+        on_state_change=lambda br, old, new: seen.append((br, old, new)),
+    )
+    trip(b, 1)
+    with pytest.raises(CircuitOpenError):
+        b.call(ok)
+    fake_clock.advance(5)
+    assert b.call(ok) == "ok"
+    assert [(old, new) for br, old, new in seen] == [
+        (CircuitState.CLOSED, CircuitState.OPEN),
+        (CircuitState.OPEN, CircuitState.HALF_OPEN),
+        (CircuitState.HALF_OPEN, CircuitState.CLOSED),
+    ]
+    assert all(br is b for br, _, _ in seen)
+    changed = [e for e in events if e.name == "circuit.state_changed"]
+    assert [(e.fields["old"], e.fields["new"]) for e in changed] == [
+        (old, new) for _, old, new in seen
+    ]
+    assert {e.function for e in events} == {"db"}
+    rejected = [e for e in events if e.name == "circuit.rejected"]
+    assert len(rejected) == 1
+    assert rejected[0].fields["retry_after"] == pytest.approx(5)
+
+
+def test_listener_can_read_breaker_and_errors_are_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    states: list[CircuitState] = []
+
+    def listener(br: CircuitBreaker, old: CircuitState, new: CircuitState) -> None:
+        states.append(br.state)  # re-entering the breaker must not deadlock
+        raise RuntimeError("listener bug")
+
+    b = CircuitBreaker(failure_threshold=1, on_state_change=listener, name="svc")
+    with caplog.at_level(logging.ERROR, logger="python_wrap"):
+        trip(b, 1)
+    assert states == [CircuitState.OPEN]
+    assert "on_state_change listener failed" in caplog.text
+    b.reset()
+    assert states == [CircuitState.OPEN, CircuitState.CLOSED]
+
+
+def test_stats_snapshot(fake_clock: FakeClock) -> None:
+    b = CircuitBreaker(failure_threshold=2, recovery_timeout=5, name="api")
+    s = b.stats
+    assert (s.name, s.state, s.failures, s.successes, s.rejected) == (
+        "api",
+        CircuitState.CLOSED,
+        0,
+        0,
+        0,
+    )
+    assert s.opened_at is None
+    b.call(ok)
+    trip(b, 2)
+    opened = fake_clock.now
+    with pytest.raises(CircuitOpenError):
+        b.call(ok)
+    s = b.stats
+    assert (s.failures, s.successes, s.rejected, s.consecutive_failures) == (2, 1, 1, 2)
+    assert s.state is CircuitState.OPEN
+    assert s.opened_at == opened
+    fake_clock.advance(5)
+    assert b.stats.state is CircuitState.HALF_OPEN
+    b.reset()
+    assert b.stats == CircuitStats("api", CircuitState.CLOSED, 0, 0, 0, 0, None)
+
+
+def test_circuit_breaker_decorator_accepts_new_options(fake_clock: FakeClock) -> None:
+    changes: list[str] = []
+
+    @circuit_breaker(
+        failure_threshold=1,
+        recovery_timeout=1,
+        success_threshold=2,
+        exclude=KeyError,
+        on_state_change=lambda br, old, new: changes.append(new.value),
+    )
+    def f(x: int) -> int:
+        if x < 0:
+            raise ValueError
+        if x == 0:
+            raise KeyError
+        return x
+
+    with pytest.raises(KeyError):
+        f(0)
+    with pytest.raises(ValueError):
+        f(-1)
+    fake_clock.advance(1)
+    assert f(1) == 1
+    assert f(2) == 2
+    assert changes == ["open", "half_open", "closed"]
+    assert f.breaker.name.endswith("f")
+    assert f.breaker.stats.successes == 2
+
+
+def test_async_success_threshold(fake_clock: FakeClock) -> None:
+    b = CircuitBreaker(failure_threshold=1, recovery_timeout=1, success_threshold=2)
+
+    @b
+    async def work(fail: bool) -> str:
+        if fail:
+            raise ValueError
+        return "ok"
+
+    async def scenario() -> None:
+        with pytest.raises(ValueError):
+            await work(True)
+        fake_clock.advance(1)
+        assert await work(False) == "ok"
+        assert b.state is CircuitState.HALF_OPEN
+        assert await work(False) == "ok"
+        assert b.state is CircuitState.CLOSED
+
+    asyncio.run(scenario())

@@ -27,6 +27,7 @@ from python_wrap.errors import BulkheadFull
 __all__ = ["Bulkhead", "Limited", "limit_concurrency"]
 
 R_co = TypeVar("R_co", covariant=True)
+T = TypeVar("T")
 P2 = ParamSpec("P2")
 
 
@@ -90,7 +91,8 @@ class Bulkhead:
 
     A caller that finds no free slot queues for one, unless `max_waiting` callers are
     already queued (then it gets `BulkheadFull` immediately). A queued caller gives up
-    with `BulkheadFull` after `timeout` seconds.
+    with `BulkheadFull` after `timeout` seconds. Each rejection emits the
+    `bulkhead.rejected` event with the `active` and `waiting` counts at that moment.
 
     Args:
         max_concurrent: Maximum number of calls running at once (>= 1).
@@ -177,7 +179,9 @@ class Bulkhead:
 
     # -- bookkeeping --------------------------------------------------------------------
 
-    def _full(self, why: str) -> BulkheadFull:
+    def _full(self, why: str, active: int, waiting: int) -> BulkheadFull:
+        """Build the rejection and emit ``bulkhead.rejected`` (call without the lock)."""
+        _core.emit("bulkhead.rejected", self.name or "bulkhead", active=active, waiting=waiting)
         label = f"bulkhead {self.name!r}" if self.name else "bulkhead"
         return BulkheadFull(
             f"{label} is full: {why}", name=self.name, max_concurrent=self.max_concurrent
@@ -185,12 +189,17 @@ class Bulkhead:
 
     def _start_waiting(self, pool: _Pool) -> None:
         with self._lock:
-            if self.max_waiting is not None and pool.waiting >= self.max_waiting:
-                raise self._full(
-                    f"{self.max_concurrent} calls running and "
-                    f"{pool.waiting} waiting (max_waiting={self.max_waiting})"
-                )
-            pool.waiting += 1
+            active, waiting = pool.active, pool.waiting
+            full = self.max_waiting is not None and waiting >= self.max_waiting
+            if not full:
+                pool.waiting += 1
+        if full:
+            raise self._full(
+                f"{self.max_concurrent} calls running and "
+                f"{waiting} waiting (max_waiting={self.max_waiting})",
+                active,
+                waiting,
+            )
 
     def _stop_waiting(self, pool: _Pool) -> None:
         with self._lock:
@@ -204,8 +213,10 @@ class Bulkhead:
         with self._lock:
             pool.active -= 1
 
-    def _timed_out(self) -> BulkheadFull:
-        return self._full(f"no slot freed up within {self.timeout}s")
+    def _timed_out(self, pool: _Pool) -> BulkheadFull:
+        with self._lock:
+            active, waiting = pool.active, pool.waiting
+        return self._full(f"no slot freed up within {self.timeout}s", active, waiting)
 
     # -- sync ---------------------------------------------------------------------------
 
@@ -227,7 +238,7 @@ class Bulkhead:
             finally:
                 self._stop_waiting(pool)
             if not got:
-                raise self._timed_out()
+                raise self._timed_out(pool)
         self._enter(pool)
 
     def release(self) -> None:
@@ -271,7 +282,7 @@ class Bulkhead:
                 if self.timeout is None:
                     await semaphore.acquire()
                 elif not await _acquire_within(semaphore, self.timeout):
-                    raise self._timed_out()
+                    raise self._timed_out(pool)
             finally:
                 self._stop_waiting(pool)
         else:
@@ -318,18 +329,43 @@ class Bulkhead:
 
 
 class Limited(Protocol[P, R_co]):
-    """A function wrapped by `limit_concurrency`; `.bulkhead` is its own `Bulkhead`."""
+    """A function wrapped by `limit_concurrency`; `.bulkhead` is its own `Bulkhead`.
 
-    bulkhead: Bulkhead
+    Binds `self` and `cls` (including under a `@classmethod` stacked above) like
+    `python_wrap.caching.Memoized`, with the same typing limitations.
+    """
 
     def __call__(self, *args: P.args, **kwargs: P.kwargs) -> R_co: ...
 
+    @overload
+    def __get__(
+        self: Limited[Concatenate[type[T], P2], R_co], instance: None, owner: type[T]
+    ) -> _LimitedOnClass[P, P2, R_co]: ...
     @overload
     def __get__(self, instance: None, owner: type | None = None) -> Limited[P, R_co]: ...
     @overload
     def __get__(
         self: Limited[Concatenate[Any, P2], R_co], instance: object, owner: type | None = None
     ) -> Limited[P2, R_co]: ...
+
+    @property
+    def bulkhead(self) -> Bulkhead:
+        """The function's own `Bulkhead` (inspect `.active` and `.waiting`)."""
+        ...
+
+
+class _LimitedOnClass(Limited[P, R_co], Protocol[P, P2, R_co]):
+    """`Limited` read from a class: accepts the call with and without the first argument.
+
+    Returned for class access (`Cls.attr`) when the first parameter could be `cls`.
+    pyright only picks it under `@classmethod`; mypy cannot tell a classmethod from an
+    instance or static method there, so both call forms are accepted.
+    """
+
+    @overload
+    def __call__(self, *args: P2.args, **kwargs: P2.kwargs) -> R_co: ...
+    @overload
+    def __call__(self, *args: P.args, **kwargs: P.kwargs) -> R_co: ...
 
 
 def limit_concurrency(n: int, /) -> Callable[[Callable[P, R]], Limited[P, R]]:

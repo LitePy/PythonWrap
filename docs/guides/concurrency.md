@@ -5,6 +5,7 @@ Control how often a function runs and how many identical calls run at once.
 | Decorator | One-line behaviour |
 | --- | --- |
 | [`rate_limit`](#rate_limit) | At most N calls per period; reject or wait. |
+| [`RateLimiter`](#one-budget-for-several-functions-ratelimiter) | One rate limit shared by several functions and blocks. |
 | [`throttle`](#throttle) | At most one run per interval; skipped calls return the last result. |
 | [`debounce`](#debounce) | Run once, after calls have stopped for a while. |
 | [`singleflight`](#singleflight) | Identical concurrent calls share one execution. |
@@ -98,6 +99,89 @@ else:
 
 !!! tip "Per-instance limits on methods"
     Use `key=lambda self, *a, **kw: id(self)` (or an identifying attribute) to give each instance its own limit.
+
+### Several limits at once
+
+APIs often have more than one quota, such as "5 per second and 600 per 15 minutes". Pass them all with `limits=`; a call goes through only when **every** limit allows it, and a rejected call uses up none of them. `retry_after` (and the wait with `block=True`) is the time until all of them allow a call.
+
+```python
+from python_wrap import RateLimitExceeded, rate_limit
+
+@rate_limit(limits=[(5, 1.0), (600, 900.0)])
+def strava(activity: int) -> int:
+    return activity
+
+for n in range(5):
+    strava(n)
+try:
+    strava(5)                        # the per-second limit is used up
+except RateLimitExceeded as exc:
+    assert 0 < exc.retry_after <= 1
+else:
+    raise AssertionError("expected the limit to apply")
+```
+
+`limits=` can also be combined with the positional pair: `rate_limit(5, 1.0, limits=[(600, 900.0)])`.
+
+### One budget for several functions: `RateLimiter`
+
+`rate_limit` gives each decorated function its own budget. When several functions call the same service, create one `RateLimiter` and use it everywhere: as a decorator, as `with limiter:` / `async with limiter:` around a block, or through its methods.
+
+```python
+from python_wrap import RateLimitExceeded
+from python_wrap.concurrency import RateLimiter
+
+github = RateLimiter(2, 60, name="github")
+
+@github
+def get_repo(name: str) -> str:
+    return name
+
+@github
+def get_user(name: str) -> str:
+    return name
+
+get_repo("python-wrap")
+get_user("ana")            # same budget: 2 of 2 used
+try:
+    with github:           # a plain block counts against it too
+        pass
+except RateLimitExceeded as exc:
+    assert "github rate limit" in str(exc)
+else:
+    raise AssertionError("expected the shared limit to apply")
+```
+
+`RateLimiter(calls, period, *, limits=None, block=False, name=None)` takes the same limits as `rate_limit`. `block` decides what the decorator and `with` do when over the limit (raise, or wait). For explicit control:
+
+| Method | Behaviour |
+| --- | --- |
+| `try_acquire()` | Take a slot if one is free now; returns `True` or `False`. |
+| `acquire(block=True, timeout=None)` | Wait in this thread for a slot. With `timeout`, returns `False` as soon as the next slot is further away than that. |
+| `await acquire_async(block=True, timeout=None)` | The same for async code; never blocks the event loop. |
+
+```python
+import asyncio
+from python_wrap.concurrency import RateLimiter
+
+limiter = RateLimiter(1, 0.02, block=True)
+
+async def main() -> None:
+    async with limiter:
+        pass
+    async with limiter:            # waits about 20 ms, without blocking the loop
+        pass
+    assert not limiter.try_acquire()
+    assert await limiter.acquire_async(timeout=1)
+
+asyncio.run(main())
+```
+
+### Rate limits in tests and metrics
+
+`python_wrap.testing.disable_rate_limits()` (or `fast_mode()`) makes `rate_limit`, `RateLimiter` and `throttle` let every call through. The switch is read at call time, so it also works on functions decorated at import. See [Testing](../testing.md).
+
+Rate limits emit `rate_limit.rejected` (`retry_after`) when a call is refused and `rate_limit.waited` (`seconds`) after a call had to wait; `throttle` emits `throttle.skipped` for each skipped call. See [Observability](observability.md).
 
 ## `throttle`
 

@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from python_wrap import _core
 from python_wrap.bulkhead import Bulkhead, limit_concurrency
 from python_wrap.errors import BulkheadFull, PythonWrapError
 
@@ -356,3 +357,65 @@ def test_limit_concurrency_on_method() -> None:
 def test_limit_concurrency_validates() -> None:
     with pytest.raises(ValueError):
         limit_concurrency(0)
+
+
+# ------------------------------------------------------------------ events and classmethods
+
+
+@pytest.fixture
+def events() -> Any:
+    seen: list[_core.Event] = []
+    _core.listeners.append(seen.append)
+    try:
+        yield seen
+    finally:
+        _core.listeners.remove(seen.append)
+
+
+def test_rejection_emits_event_with_counts(events: list[_core.Event]) -> None:
+    bh = Bulkhead(1, max_waiting=0, name="db")
+    reads: list[int] = []
+
+    def listener_reads_bulkhead(event: _core.Event) -> None:
+        reads.append(bh.active)  # the lock is not held while listeners run
+
+    _core.listeners.append(listener_reads_bulkhead)
+    try:
+        with bh, pytest.raises(BulkheadFull):
+            bh.acquire()
+    finally:
+        _core.listeners.remove(listener_reads_bulkhead)
+    assert reads == [1]
+    assert [(e.name, e.function, e.fields) for e in events] == [
+        ("bulkhead.rejected", "db", {"active": 1, "waiting": 0})
+    ]
+
+
+def test_timeout_rejection_emits_event(events: list[_core.Event]) -> None:
+    bh = Bulkhead(1, timeout=0.01)
+    with bh, pytest.raises(BulkheadFull):
+        bh.acquire()
+    assert [(e.name, e.function, e.fields) for e in events] == [
+        ("bulkhead.rejected", "bulkhead", {"active": 1, "waiting": 0})
+    ]
+
+
+async def test_async_timeout_rejection_emits_event(events: list[_core.Event]) -> None:
+    bh = Bulkhead(1, timeout=0.01, name="api")
+    async with bh:
+        with pytest.raises(BulkheadFull):
+            await bh.acquire_async()
+    assert [e.name for e in events] == ["bulkhead.rejected"]
+    assert events[0].fields["active"] == 1
+
+
+def test_limit_concurrency_under_classmethod() -> None:
+    class Pool:
+        @classmethod
+        @limit_concurrency(1)
+        def make(cls, x: int) -> tuple[type, int]:
+            return cls, x
+
+    assert Pool.make(2) == (Pool, 2)
+    assert Pool().make(3) == (Pool, 3)
+    assert Pool.make.bulkhead.max_concurrent == 1

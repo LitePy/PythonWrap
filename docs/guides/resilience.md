@@ -362,6 +362,56 @@ You can also call through a breaker without decorating: `breaker.call(func, *arg
 
 Only exceptions matching `on=` count as failures; others pass through uncounted. `half_open_max_calls` limits how many trial calls may run at once while half-open.
 
+### Tuning recovery, exclusions and monitoring
+
+| Option | Default | What it does |
+| --- | --- | --- |
+| `success_threshold` | `1` | Consecutive successful trial calls needed to close a half-open circuit. Any counted failure during the trials re-opens it. |
+| `exclude` | `()` | Exception types that are never counted, even when they match `on=` (for example a "not found" error that proves the service is up). They propagate unchanged. |
+| `on_state_change` | `None` | `listener(breaker, old_state, new_state)`, called after every transition, outside the breaker's lock. An exception from the listener is logged, never raised. |
+| `name` | function name | Used in log messages, `CircuitOpenError` messages and events. |
+
+`breaker.stats` returns a frozen `CircuitStats` snapshot: `state`, total `failures`, `successes` and `rejected` calls (since creation or the last `reset()`), `consecutive_failures`, and `opened_at` (the `monotonic()` time the circuit last opened, `None` while closed).
+
+```python
+from python_wrap import CircuitBreaker, CircuitState
+
+class NotFound(Exception):
+    pass
+
+changes = []
+inventory = CircuitBreaker(
+    failure_threshold=2,
+    recovery_timeout=0,          # half-open again straight away, for the example
+    success_threshold=2,         # two good trial calls before trusting it again
+    exclude=NotFound,            # a 404 means the service is up
+    on_state_change=lambda b, old, new: changes.append(new.value),
+    name="inventory",
+)
+
+@inventory
+def lookup(sku: str) -> int:
+    if sku == "missing":
+        raise NotFound(sku)
+    if sku == "broken":
+        raise ConnectionError("down")
+    return 3
+
+for sku in ("missing", "broken", "broken"):
+    try:
+        lookup(sku)
+    except (NotFound, ConnectionError):
+        pass
+
+assert inventory.stats.failures == 2   # NotFound was not counted
+assert lookup("ok") == 3               # first trial: still half-open
+assert inventory.state is CircuitState.HALF_OPEN
+assert lookup("ok") == 3               # second trial closes it
+assert changes == ["open", "half_open", "closed"]
+```
+
+The breaker also emits the `circuit.state_changed` (`old`, `new`) and `circuit.rejected` (`retry_after`) [events](observability.md), reported under the breaker's name.
+
 ## `timeout`
 
 Raise `TimeoutExpired` (a subclass of the built-in `TimeoutError`) if a call runs too long.
@@ -408,7 +458,7 @@ How the deadline is enforced depends on the function and the platform:
 
 | Situation | Strategy | Stops the work? |
 | --- | --- | --- |
-| `async def` | `asyncio.wait_for` cancels the coroutine | Yes |
+| `async def` | `asyncio.timeout` (3.11+) or a cancellation timer (3.10) cancels the coroutine | Yes |
 | Sync, Unix, main thread | `SIGALRM` timer interrupts the call | Yes |
 | Sync on Windows, in a non-main thread, or `use_signals=False` | Runs in a daemon worker thread; the caller stops waiting | **No** |
 
@@ -416,3 +466,85 @@ How the deadline is enforced depends on the function and the platform:
     When signals are unavailable, the function keeps running in the background after the timeout, and its result is discarded. Do not rely on it to cancel side effects. See [Limitations](../limitations.md#timeout).
 
 Nested timeouts work: the previous `SIGALRM` handler and any already-armed timer are restored afterwards. `use_signals=True` forces signals (and raises `RuntimeError` where unavailable); `use_signals=False` forces the thread strategy.
+
+Every expiry emits the `timeout.expired` (`seconds`) [event](observability.md).
+
+### Timing out a block
+
+The object `timeout(...)` returns is also a context manager, so you can limit a block of code without wrapping it in a function. The same object still works as a decorator.
+
+=== "Async"
+
+    ```python
+    import asyncio
+    from python_wrap import TimeoutExpired, timeout
+
+    async def main() -> None:
+        try:
+            async with timeout(0.02):
+                await asyncio.sleep(1)
+        except TimeoutExpired as exc:
+            assert exc.seconds == 0.02
+        else:
+            raise AssertionError("expected a timeout")
+
+    asyncio.run(main())
+    ```
+
+=== "Sync"
+
+    ```python
+    import time
+    from python_wrap import TimeoutExpired, timeout
+
+    try:
+        with timeout(0.02):   # Unix, main thread only
+            time.sleep(1)
+    except TimeoutExpired:
+        pass
+    ```
+
+`async with timeout(...)` uses `asyncio.timeout` on Python 3.11+ and a cancellation timer on 3.10; as with the decorator, a `TimeoutError` raised by your own code inside the block propagates unchanged.
+
+The sync `with timeout(...)` form only exists on top of `SIGALRM`: it needs Unix and the main thread. Elsewhere (Windows, worker threads, `use_signals=False`) entering it raises `RuntimeError`, because a block of code cannot be moved to a worker thread. Decorate a function instead, which falls back to the thread strategy.
+
+### Deadlines: one budget for many steps
+
+A `timeout` limits one call. A **deadline** limits everything inside a block — several calls, retries, sub-steps — to one shared budget. `deadline(seconds)` stores an absolute expiry in a context variable, so it is visible to every function called inside the block, sync or async, and to tasks started from it. Nested deadlines never extend an outer one: the earliest wins.
+
+A deadline does not interrupt anything by itself. Instead:
+
+* `timeout` (decorator or block) clamps its limit to the time the deadline has left. If the deadline has already passed, the call is not started and `TimeoutExpired` is raised at once.
+* `remaining()` returns the seconds left (or `None` outside any deadline). Pass it on, for example as an HTTP client's timeout, or use it to cap your own retry loop.
+* `check()` raises `TimeoutExpired` once the deadline has passed. Call it between steps of a long job.
+
+```python
+import asyncio
+from python_wrap import TimeoutExpired, timeout
+from python_wrap.deadline import check, deadline, remaining
+
+@timeout(30)                     # generous per-call limit...
+async def fetch(part: int) -> int:
+    await asyncio.sleep(0.01 if part < 2 else 1)
+    return part
+
+async def handle_request() -> list[int]:
+    results = []
+    async with deadline(0.1):    # ...but the whole request gets 0.1s
+        for part in range(5):
+            check()              # stop early once the budget is spent
+            left = remaining()
+            assert left is not None and left <= 0.1
+            results.append(await fetch(part))   # clamped to what is left
+    return results
+
+async def main() -> None:
+    try:
+        await handle_request()
+    except TimeoutExpired as exc:
+        assert exc.seconds <= 0.1
+    else:
+        raise AssertionError("expected the deadline to run out")
+
+asyncio.run(main())
+```

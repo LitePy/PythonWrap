@@ -36,9 +36,11 @@ from python_wrap import (
     transactional,
     validate_args,
 )
+from python_wrap.bulkhead import Bulkhead, Limited, limit_concurrency
 from python_wrap.caching import CacheInfo, Memoized, Once
-from python_wrap.circuit import CircuitProtected
-from python_wrap.concurrency import AsyncDebounced, Debounced
+from python_wrap.circuit import CircuitProtected, CircuitState, CircuitStats
+from python_wrap.concurrency import AsyncDebounced, Debounced, RateLimiter, Timeout
+from python_wrap.deadline import Deadline, deadline, remaining
 
 if TYPE_CHECKING:
     from typing_extensions import assert_type
@@ -278,3 +280,80 @@ async def coro(x: int) -> str:
 
 adebounced: AsyncDebounced[[int], str] = debounce(0.1)(coro)
 callback: Callable[[int], Any] = memoized
+
+# --- 5. limit_concurrency binds self and cls (classmethod stacked above); 0.2 features
+
+
+class Pool:
+    @limit_concurrency(2)
+    def meth(self, x: int) -> int:
+        return x
+
+    @classmethod
+    @limit_concurrency(2)
+    def cm(cls, x: int) -> str:
+        return str(x)
+
+    @classmethod
+    @limit_concurrency(2)
+    async def acm(cls, x: int) -> str:
+        return str(x)
+
+
+pool = Pool()
+assert_type(pool.meth(1), int)
+assert_type(pool.meth.bulkhead, Bulkhead)
+assert_type(Pool.cm(1), str)
+assert_type(pool.cm(1), str)
+assert_type(Pool.cm.bulkhead, Bulkhead)
+pool.meth("x")  # type: ignore[arg-type]
+Pool.cm("x")  # type: ignore[call-overload]
+pool.meth.bulkhead = Bulkhead(1)  # type: ignore[misc]
+limited: Limited[[int], str] = limit_concurrency(3)(plain)
+
+shared = RateLimiter(limits=[(5, 1.0), (600, 900.0)], name="api")
+
+
+@shared
+@memoize
+def shared_cached(a: int) -> int:
+    return a
+
+
+@timeout(2.0)
+@rate_limit(limits=[(5, 1.0)])
+def limited_twice(a: int) -> int:
+    return a
+
+
+assert_type(shared_cached(1), int)
+assert_type(shared_cached.cache_info(), CacheInfo)
+assert_type(limited_twice(1), int)
+assert_type(shared.try_acquire(), bool)
+assert_type(shared.acquire(timeout=1.0), bool)
+assert_type(remaining(), float | None)
+
+
+def use_sync_blocks() -> None:
+    with timeout(1) as block_timeout, shared as block_limiter, deadline(3) as budget:
+        assert_type(block_timeout, Timeout)
+        assert_type(block_limiter, RateLimiter)
+        assert_type(budget, Deadline)
+
+
+async def use_async_blocks() -> None:
+    assert_type(await Pool.acm(1), str)
+    async with timeout(1) as t, shared as lim, deadline(1) as d:
+        assert_type(t, Timeout)
+        assert_type(lim, RateLimiter)
+        assert_type(d, Deadline)
+
+
+transitions: list[tuple[CircuitState, CircuitState]] = []
+tuned = CircuitBreaker(
+    success_threshold=2,
+    exclude=(KeyError,),
+    on_state_change=lambda b, old, new: transitions.append((old, new)),
+)
+assert_type(tuned.stats, CircuitStats)
+assert_type(tuned.stats.opened_at, float | None)

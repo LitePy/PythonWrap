@@ -6,13 +6,21 @@ import enum
 import functools
 import threading
 from collections.abc import Callable, Coroutine
+from dataclasses import dataclass
 from typing import Any, Concatenate, ParamSpec, Protocol, TypeVar, cast, overload
 
 from python_wrap import _core
 from python_wrap._core import F, LoggerLike, P, R
 from python_wrap.errors import CircuitOpenError
 
-__all__ = ["CircuitBreaker", "CircuitProtected", "CircuitState", "circuit_breaker"]
+__all__ = [
+    "CircuitBreaker",
+    "CircuitProtected",
+    "CircuitState",
+    "CircuitStats",
+    "StateChangeListener",
+    "circuit_breaker",
+]
 
 R_co = TypeVar("R_co", covariant=True)
 P2 = ParamSpec("P2")
@@ -29,30 +37,96 @@ class CircuitState(str, enum.Enum):
     HALF_OPEN = "half_open"
 
 
+StateChangeListener = Callable[["CircuitBreaker", CircuitState, CircuitState], None]
+"""Signature of ``on_state_change``: ``listener(breaker, old_state, new_state)``."""
+
+
+@dataclass(frozen=True)
+class CircuitStats:
+    """A point-in-time snapshot of a `CircuitBreaker`, from its ``.stats`` property.
+
+    Attributes:
+        name: The breaker's name.
+        state: Current state.
+        failures: Calls that failed with a counted exception (since creation or the last
+            ``reset()``).
+        successes: Calls that returned normally (same period).
+        rejected: Calls refused with `CircuitOpenError` (same period).
+        consecutive_failures: Counted failures since the last success.
+        opened_at: ``_core.monotonic()`` time at which the circuit last opened, or
+            ``None`` while it is closed.
+    """
+
+    name: str
+    state: CircuitState
+    failures: int
+    successes: int
+    rejected: int
+    consecutive_failures: int
+    opened_at: float | None
+
+
 class CircuitBreaker:
     """Stop calling a failing dependency until it has had time to recover.
 
     The breaker is closed at first. After ``failure_threshold`` consecutive matching
     failures it opens and rejects calls with `CircuitOpenError`.
     After ``recovery_timeout`` seconds it goes half-open and lets up to
-    ``half_open_max_calls`` trial calls through: a success closes it, a failure
-    re-opens it. One instance can decorate several functions to share state.
+    ``half_open_max_calls`` trial calls run at once: ``success_threshold`` consecutive
+    successful trials close it, any counted failure re-opens it. One instance can
+    decorate several functions to share state.
+
+    Exceptions matching ``on`` are counted as failures, unless they also match
+    ``exclude``. Excluded and non-matching exceptions propagate to the caller without
+    affecting the breaker (they count neither as a failure nor as a success).
+
+    Each transition calls ``on_state_change(breaker, old, new)`` (outside the breaker's
+    lock; a failing listener is logged, never raised) and emits the
+    ``circuit.state_changed`` event. Every rejected call emits ``circuit.rejected``.
 
     Args:
         failure_threshold: Consecutive failures that open the circuit (>= 1).
         recovery_timeout: Seconds to stay open before allowing trial calls.
         half_open_max_calls: Concurrent trial calls allowed while half-open (>= 1).
+        success_threshold: Consecutive successful trial calls needed to close a
+            half-open circuit (>= 1).
         on: Exception type(s) that count as failures; others pass through uncounted.
-        name: Name used in log messages.
+        exclude: Exception type(s) never counted, even when they match ``on``, e.g.
+            ``exclude=NotFound`` with ``on=Exception``.
+        on_state_change: Listener called with ``(breaker, old_state, new_state)``.
+        name: Name used in log messages, errors and events.
         logger: Logger (or name) for state transitions.
 
     Raises:
         ValueError: If a numeric option is out of range.
 
     Example:
-        >>> breaker = CircuitBreaker(failure_threshold=3, recovery_timeout=10)
-        >>> @breaker
-        ... def call_api() -> None: ...
+        ```python
+        from python_wrap.circuit import CircuitBreaker, CircuitState
+
+        changes = []
+        breaker = CircuitBreaker(
+            failure_threshold=2,
+            exclude=KeyError,
+            on_state_change=lambda b, old, new: changes.append((old.value, new.value)),
+            name="payments",
+        )
+
+        @breaker
+        def charge(fail: bool) -> str:
+            if fail:
+                raise ConnectionError("down")
+            return "ok"
+
+        for _ in range(2):
+            try:
+                charge(True)
+            except ConnectionError:
+                pass
+        assert breaker.state is CircuitState.OPEN
+        assert changes == [("closed", "open")]
+        assert breaker.stats.failures == 2
+        ```
     """
 
     def __init__(
@@ -61,7 +135,10 @@ class CircuitBreaker:
         failure_threshold: int = 5,
         recovery_timeout: float = 30.0,
         half_open_max_calls: int = 1,
+        success_threshold: int = 1,
         on: ExceptionTypes = Exception,
+        exclude: ExceptionTypes = (),
+        on_state_change: StateChangeListener | None = None,
         name: str | None = None,
         logger: LoggerLike = None,
     ) -> None:
@@ -71,10 +148,15 @@ class CircuitBreaker:
             raise ValueError(f"recovery_timeout must be >= 0, got {recovery_timeout!r}")
         if half_open_max_calls < 1:
             raise ValueError(f"half_open_max_calls must be >= 1, got {half_open_max_calls!r}")
+        if success_threshold < 1:
+            raise ValueError(f"success_threshold must be >= 1, got {success_threshold!r}")
         self.failure_threshold = failure_threshold
         self.recovery_timeout = recovery_timeout
         self.half_open_max_calls = half_open_max_calls
+        self.success_threshold = success_threshold
         self.on = on
+        self.exclude = exclude
+        self.on_state_change = on_state_change
         self.name = name or "circuit"
         self._log = _core.get_logger(logger)
         self._lock = threading.Lock()
@@ -82,7 +164,13 @@ class CircuitBreaker:
         self._failures = 0
         self._opened_at = 0.0
         self._trials = 0
+        self._trial_successes = 0
         self._generation = 0
+        self._total_failures = 0
+        self._total_successes = 0
+        self._total_rejected = 0
+        # Transitions made under the lock, delivered to listeners after releasing it.
+        self._pending: list[tuple[CircuitState, CircuitState]] = []
 
     # -- introspection -------------------------------------------------------------
     @property
@@ -90,7 +178,9 @@ class CircuitBreaker:
         """Current state (an open circuit past its timeout reports ``half_open``)."""
         with self._lock:
             self._maybe_half_open()
-            return self._state
+            state = self._state
+        self._notify()
+        return state
 
     @property
     def failure_count(self) -> int:
@@ -98,31 +188,61 @@ class CircuitBreaker:
         with self._lock:
             return self._failures
 
+    @property
+    def stats(self) -> CircuitStats:
+        """A consistent `CircuitStats` snapshot of the counters and state."""
+        with self._lock:
+            self._maybe_half_open()
+            snapshot = CircuitStats(
+                name=self.name,
+                state=self._state,
+                failures=self._total_failures,
+                successes=self._total_successes,
+                rejected=self._total_rejected,
+                consecutive_failures=self._failures,
+                opened_at=None if self._state is CircuitState.CLOSED else self._opened_at,
+            )
+        self._notify()
+        return snapshot
+
     def reset(self) -> None:
-        """Force the breaker back to closed with a zero failure count."""
+        """Force the breaker back to closed and zero every counter."""
         with self._lock:
             if self._state is not CircuitState.CLOSED:
                 self._log.info("circuit %s reset to closed", self.name)
-            self._state = CircuitState.CLOSED
+                self._set_state(CircuitState.CLOSED)
             self._failures = 0
             self._trials = 0
+            self._trial_successes = 0
+            self._total_failures = 0
+            self._total_successes = 0
+            self._total_rejected = 0
             self._generation += 1
+        self._notify()
 
     # -- internals (call with the lock held) ---------------------------------------
+    def _set_state(self, new: CircuitState) -> None:
+        old = self._state
+        self._state = new
+        if old is not new:
+            self._pending.append((old, new))
+
     def _maybe_half_open(self) -> None:
         if (
             self._state is CircuitState.OPEN
             and _core.monotonic() - self._opened_at >= self.recovery_timeout
         ):
-            self._state = CircuitState.HALF_OPEN
+            self._set_state(CircuitState.HALF_OPEN)
             self._trials = 0
+            self._trial_successes = 0
             self._generation += 1
             self._log.info("circuit %s is half-open; allowing trial calls", self.name)
 
     def _open(self) -> None:
-        self._state = CircuitState.OPEN
+        self._set_state(CircuitState.OPEN)
         self._opened_at = _core.monotonic()
         self._trials = 0
+        self._trial_successes = 0
         self._generation += 1
         self._log.warning(
             "circuit %s opened after %d failure(s); rejecting calls for %.1fs",
@@ -131,44 +251,81 @@ class CircuitBreaker:
             self.recovery_timeout,
         )
 
+    # -- internals (call WITHOUT the lock) -----------------------------------------
+    def _notify(self) -> None:
+        """Deliver pending transitions to the listener and the event hook."""
+        if not self._pending:
+            return
+        with self._lock:
+            pending, self._pending = self._pending, []
+        for old, new in pending:
+            _core.emit("circuit.state_changed", self.name, old=old, new=new)
+            listener = self.on_state_change
+            if listener is None:
+                continue
+            try:
+                listener(self, old, new)
+            except Exception:
+                self._log.exception("circuit %s on_state_change listener failed", self.name)
+
     def _acquire(self) -> tuple[int, bool]:
         """Admit a call. Returns ``(generation, is_trial)`` or raises CircuitOpenError."""
+        error: CircuitOpenError | None = None
         with self._lock:
             self._maybe_half_open()
+            admitted = (self._generation, self._state is CircuitState.HALF_OPEN)
             if self._state is CircuitState.OPEN:
-                remaining = self.recovery_timeout - (_core.monotonic() - self._opened_at)
-                raise CircuitOpenError(
+                remaining = max(self.recovery_timeout - (_core.monotonic() - self._opened_at), 0)
+                error = CircuitOpenError(
                     f"circuit {self.name} is open; retry in {remaining:.1f}s",
-                    retry_after=max(remaining, 0.0),
+                    retry_after=remaining,
                 )
-            if self._state is CircuitState.HALF_OPEN:
+            elif self._state is CircuitState.HALF_OPEN:
                 if self._trials >= self.half_open_max_calls:
-                    raise CircuitOpenError(
+                    error = CircuitOpenError(
                         f"circuit {self.name} is half-open and its trial calls are in use",
                         retry_after=0.0,
                     )
-                self._trials += 1
-                return self._generation, True
-            return self._generation, False
+                else:
+                    self._trials += 1
+            if error is not None:
+                self._total_rejected += 1
+        self._notify()
+        if error is not None:
+            _core.emit("circuit.rejected", self.name, retry_after=error.retry_after)
+            raise error
+        return admitted
 
     def _success(self, generation: int, trial: bool) -> None:
         with self._lock:
+            self._total_successes += 1
             if generation != self._generation:
                 return
             if trial:
-                self._state = CircuitState.CLOSED
-                self._trials = 0
-                self._generation += 1
-                self._log.info("circuit %s closed after a successful trial call", self.name)
+                self._trials = max(self._trials - 1, 0)
+                self._trial_successes += 1
+                if self._trial_successes >= self.success_threshold:
+                    self._set_state(CircuitState.CLOSED)
+                    self._trials = 0
+                    self._trial_successes = 0
+                    self._generation += 1
+                    self._log.info(
+                        "circuit %s closed after %d successful trial call(s)",
+                        self.name,
+                        self.success_threshold,
+                    )
             self._failures = 0
+        self._notify()
 
     def _failure(self, generation: int, trial: bool) -> None:
         with self._lock:
+            self._total_failures += 1
             if generation != self._generation:
                 return
             self._failures += 1
             if trial or self._failures >= self.failure_threshold:
                 self._open()
+        self._notify()
 
     def _release(self, generation: int, trial: bool) -> None:
         """A non-counted exception ended the call: free its trial slot, if any."""
@@ -177,6 +334,13 @@ class CircuitBreaker:
         with self._lock:
             if generation == self._generation:
                 self._trials = max(self._trials - 1, 0)
+
+    def _settle(self, generation: int, trial: bool, exc: BaseException) -> None:
+        """Book a call that raised ``exc``: a failure, or uncounted."""
+        if isinstance(exc, self.on) and not isinstance(exc, self.exclude):
+            self._failure(generation, trial)
+        else:
+            self._release(generation, trial)
 
     # -- public call API -----------------------------------------------------------
     @overload
@@ -206,11 +370,8 @@ class CircuitBreaker:
         generation, trial = self._acquire()
         try:
             result = func(*args, **kwargs)
-        except self.on:
-            self._failure(generation, trial)
-            raise
-        except BaseException:
-            self._release(generation, trial)
+        except BaseException as exc:
+            self._settle(generation, trial, exc)
             raise
         self._success(generation, trial)
         return result
@@ -220,11 +381,8 @@ class CircuitBreaker:
         generation, trial = self._acquire()
         try:
             result = await func(*args, **kwargs)
-        except self.on:
-            self._failure(generation, trial)
-            raise
-        except BaseException:
-            self._release(generation, trial)
+        except BaseException as exc:
+            self._settle(generation, trial, exc)
             raise
         self._success(generation, trial)
         return result
@@ -304,7 +462,10 @@ def circuit_breaker(
     failure_threshold: int = ...,
     recovery_timeout: float = ...,
     half_open_max_calls: int = ...,
+    success_threshold: int = ...,
     on: ExceptionTypes = ...,
+    exclude: ExceptionTypes = ...,
+    on_state_change: StateChangeListener | None = ...,
     name: str | None = ...,
     logger: LoggerLike = ...,
 ) -> CircuitProtected[P, R]: ...
@@ -316,7 +477,10 @@ def circuit_breaker(
     failure_threshold: int = ...,
     recovery_timeout: float = ...,
     half_open_max_calls: int = ...,
+    success_threshold: int = ...,
     on: ExceptionTypes = ...,
+    exclude: ExceptionTypes = ...,
+    on_state_change: StateChangeListener | None = ...,
     name: str | None = ...,
     logger: LoggerLike = ...,
 ) -> Callable[[Callable[P, R]], CircuitProtected[P, R]]: ...
@@ -327,7 +491,10 @@ def circuit_breaker(
     failure_threshold: int = 5,
     recovery_timeout: float = 30.0,
     half_open_max_calls: int = 1,
+    success_threshold: int = 1,
     on: ExceptionTypes = Exception,
+    exclude: ExceptionTypes = (),
+    on_state_change: StateChangeListener | None = None,
     name: str | None = None,
     logger: LoggerLike = None,
 ) -> Any:
@@ -342,8 +509,11 @@ def circuit_breaker(
         failure_threshold: Consecutive failures that open the circuit.
         recovery_timeout: Seconds to stay open before allowing trial calls.
         half_open_max_calls: Trial calls allowed while half-open.
+        success_threshold: Consecutive successful trials needed to close again.
         on: Exception type(s) counted as failures.
-        name: Name for log messages (defaults to the function's qualified name).
+        exclude: Exception type(s) never counted, even when they match ``on``.
+        on_state_change: Listener called with ``(breaker, old_state, new_state)``.
+        name: Name for log messages, errors and events (defaults to the function's qualified name).
         logger: Logger (or name) for state transitions.
 
     Returns:
@@ -362,7 +532,10 @@ def circuit_breaker(
             failure_threshold=failure_threshold,
             recovery_timeout=recovery_timeout,
             half_open_max_calls=half_open_max_calls,
+            success_threshold=success_threshold,
             on=on,
+            exclude=exclude,
+            on_state_change=on_state_change,
             name=name or _core.qualname(f),
             logger=logger,
         )
