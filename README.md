@@ -1,6 +1,11 @@
 <div align="center">
 
-# python-wrap
+<a href="https://python-wrap.readthedocs.io">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/LitePy/PythonWrap/main/docs/assets/logo-dark.svg">
+    <img alt="python-wrap" src="https://raw.githubusercontent.com/LitePy/PythonWrap/main/docs/assets/logo-light.svg" height="64">
+  </picture>
+</a>
 
 **The resilience and concurrency toolkit you add to every Python project.**<br>
 Retry (with `Retry-After`), circuit breaker, timeout, cache, rate limit, bulkhead, batching, async helpers, metrics and test helpers. One import, sync and async, zero dependencies.

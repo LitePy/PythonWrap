@@ -9,7 +9,7 @@ from conftest import FakeClock
 from python_wrap import _core
 from python_wrap.config import configure, configured, get_config, reset_config
 from python_wrap.deadline import deadline
-from python_wrap.logs import audit, log_args
+from python_wrap.logs import AuditRecord, audit, log_args
 from python_wrap.retry import retry, retry_stats, retrying
 
 
@@ -202,8 +202,10 @@ def test_redact_config_for_log_args_and_audit(caplog: pytest.LogCaptureFixture) 
     def g(ssn: str, password: str) -> None: ...
 
     g("123", "pw")
-    text = repr(records[0])
-    assert "123" not in text and "pw" in text
+    record = records[0]
+    assert isinstance(record, AuditRecord)
+    # Only the arguments: the timestamp or duration can contain "123" by chance.
+    assert record.arguments == {"ssn": "***", "password": "pw"}
 
 
 def test_redact_extra_adds_to_defaults_everywhere(caplog: pytest.LogCaptureFixture) -> None:
@@ -222,9 +224,9 @@ def test_redact_extra_adds_to_defaults_everywhere(caplog: pytest.LogCaptureFixtu
     def g(ssn: str, token: str, name: str, other: str) -> None: ...
 
     g("1", "s3cr3t", "bob", "keep")
-    text = repr(records[0])
-    assert "bob" not in text and "s3cr3t" not in text and "'1'" not in text
-    assert "keep" in text
+    record = records[0]
+    assert isinstance(record, AuditRecord)
+    assert record.arguments == {"ssn": "***", "token": "***", "name": "***", "other": "keep"}
 
 
 def test_redact_extra_with_explicit_redact(caplog: pytest.LogCaptureFixture) -> None:
