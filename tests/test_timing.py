@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import cProfile
+import importlib
 import inspect
 import logging
 import pstats
@@ -405,3 +406,34 @@ def test_profile_async(caplog: pytest.LogCaptureFixture) -> None:
     assert inspect.iscoroutinefunction(work)
     assert asyncio.run(work()) == helper_work()
     assert "Profile of" in messages(caplog)[0]
+
+
+def test_timing_skips_formatting_when_level_disabled(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    timing_mod = importlib.import_module("python_wrap.timing")
+
+    caplog.set_level(logging.ERROR, logger="python_wrap")
+    seen: list[float] = []
+
+    def spy(seconds: float) -> str:
+        seen.append(seconds)
+        return "x"
+
+    monkeypatch.setattr(timing_mod, "_format_duration", spy)
+    records: list[object] = []
+
+    @timing_mod.timing(callback=records.append)
+    def ok() -> int:
+        return 1
+
+    @timing_mod.timing(callback=records.append)
+    def bad() -> int:
+        raise ValueError
+
+    ok()
+    with pytest.raises(ValueError):
+        bad()
+    assert seen == []  # nothing formatted, yet the callback ran for both calls
+    assert len(records) == 2
+    assert caplog.records == []

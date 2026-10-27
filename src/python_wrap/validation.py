@@ -27,6 +27,7 @@ understand. A check that cannot be performed never raises.
 
 from __future__ import annotations
 
+import abc
 import collections.abc as cabc
 import functools
 import inspect
@@ -79,6 +80,28 @@ def _wrap(
         return result
 
     return wrapper
+
+
+_MISSING: Any = object()
+
+
+def _plain_layout(sig: inspect.Signature) -> tuple[tuple[str, ...], int, tuple[Any, ...]] | None:
+    """``(names, required count, defaults)`` if every parameter is a plain positional one.
+
+    Calls that pass only positional arguments to such a function (``min <= len(args) <=
+    len(names)``) can be checked without ``Signature.bind``; ``defaults[i]`` is the default
+    of parameter ``i`` (``_MISSING`` when it has none). Returns ``None`` when the
+    signature has keyword-only or variadic parameters.
+    """
+    params = list(sig.parameters.values())
+    plain = (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    if any(p.kind not in plain for p in params):
+        return None
+    defaults = tuple(
+        _MISSING if p.default is inspect.Parameter.empty else p.default for p in params
+    )
+    required = sum(1 for d in defaults if d is _MISSING)
+    return tuple(p.name for p in params), required, defaults
 
 
 def _check_names(
@@ -140,17 +163,37 @@ def validate_args(**validators: Validator) -> Callable[[F], F]:
         sig = inspect.signature(func)
         _check_names(func, sig, normalised, "validate_args")
 
+        layout = _plain_layout(sig)
+        n_params = -1
+        min_args = 0
+        defaults: tuple[Any, ...] = ()
+        plan: list[tuple[int, str, Callable[[Any], object], str | None]] = []
+        if layout is not None:
+            names, min_args, defaults = layout
+            n_params = len(names)
+            plan = [(names.index(k), k, pred, msg) for k, (pred, msg) in normalised.items()]
+
+        def fail(name: str, message: str | None, value: Any) -> typing.NoReturn:
+            raise errors.ValidationError(
+                message or f"parameter {name!r} failed validation (got {_repr(value)})",
+                parameter=name,
+                value=value,
+            )
+
         def before(args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+            nargs = len(args)
+            if not kwargs and min_args <= nargs <= n_params:
+                for idx, name, predicate, message in plan:
+                    value = args[idx] if idx < nargs else defaults[idx]
+                    if not predicate(value):
+                        fail(name, message, value)
+                return
             bound = sig.bind(*args, **kwargs)
             bound.apply_defaults()
             for name, (predicate, message) in normalised.items():
                 value = bound.arguments[name]
                 if not predicate(value):
-                    raise errors.ValidationError(
-                        message or f"parameter {name!r} failed validation (got {_repr(value)})",
-                        parameter=name,
-                        value=value,
-                    )
+                    fail(name, message, value)
 
         return _wrap(func, before)
 
@@ -209,7 +252,24 @@ def check_type(**type_hints: type | tuple[type, ...]) -> Callable[[F], F]:
                     value=value,
                 )
 
+        layout = _plain_layout(sig)
+        n_params = -1
+        min_args = 0
+        plan: list[tuple[int, str, Any]] = []
+        if layout is not None:
+            names, min_args, _ = layout
+            n_params = len(names)
+            plan = [(names.index(k), k, expected) for k, expected in type_hints.items()]
+
         def before(args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+            nargs = len(args)
+            if not kwargs and min_args <= nargs <= n_params:
+                for idx, name, expected in plan:
+                    if idx < nargs:
+                        value = args[idx]
+                        if not isinstance(value, expected):
+                            check(name, value, expected)
+                return
             bound = sig.bind(*args, **kwargs)
             for name, expected in type_hints.items():
                 if name not in bound.arguments:
@@ -421,6 +481,59 @@ def _mismatch(value: Any, hint: Any) -> str | None:
     return None  # Iterable/Iterator/other generics: isinstance only
 
 
+_QUICK_METAS: tuple[type, ...] = (type, abc.ABCMeta)
+
+
+def _quick_class(hint: Any) -> Any:
+    """A ``isinstance`` classinfo that is sufficient (not necessary) for ``hint``, or ``None``.
+
+    If ``isinstance(value, quick)`` holds, `_mismatch` would also accept the value, so the
+    full check (and its error message) is only needed when it does not.
+    """
+    if hint is None or hint is _NoneType:
+        return _NoneType
+    if (
+        type(hint) not in _QUICK_METAS
+        or typing.get_origin(hint) is not None
+        or getattr(hint, "_is_protocol", False)
+        or typing.is_typeddict(hint)
+        or hint is typing.Callable
+        or hint is cabc.Callable
+    ):
+        return None
+    if hint is float:
+        return (float, int)  # bool is an int
+    if hint is complex:
+        return (complex, float, int)
+    return hint
+
+
+def _skippable(hint: Any) -> bool:
+    return hint is Any or hint is object or isinstance(hint, (str, typing.ForwardRef))
+
+
+class _Plan:
+    """Per-function checks compiled from resolved annotations (see `_Checker`)."""
+
+    __slots__ = ("checks", "hints", "min_args", "n_params", "ret_hint", "ret_quick")
+
+    def __init__(self, hints: dict[str, Any], layout: tuple[tuple[str, ...], int] | None) -> None:
+        self.hints = hints
+        self.checks: tuple[tuple[int, str, Any, Any], ...] = ()
+        self.n_params = -1
+        self.min_args = 0
+        if layout is not None:
+            names, self.min_args = layout
+            self.n_params = len(names)
+            self.checks = tuple(
+                (i, n, hints[n], _quick_class(hints[n]))
+                for i, n in enumerate(names)
+                if n in hints and not _skippable(hints[n])
+            )
+        self.ret_hint = hints.get("return", _MISSING)
+        self.ret_quick = None if self.ret_hint is _MISSING else _quick_class(self.ret_hint)
+
+
 class _Checker:
     """Lazily resolves annotations on first call and checks calls against them."""
 
@@ -428,19 +541,24 @@ class _Checker:
         self.func = func
         self.check_return = check_return
         self.sig = inspect.signature(func)
+        layout = _plain_layout(self.sig)
+        self.layout = None if layout is None else (layout[0], layout[1])
         self.hints: dict[str, Any] | None = None
+        self.plan: _Plan | None = None
 
-    def _resolve(self) -> dict[str, Any]:
-        if self.hints is not None:
-            return self.hints
+    def _get_plan(self) -> _Plan:
+        plan = self.plan
+        if plan is not None:
+            return plan
         try:
             hints = typing.get_type_hints(self.func)
         except Exception:
             # Unresolvable forward reference (so far): fall back to raw annotations, where
             # strings are accepted, and try again on the next call.
-            return dict(getattr(self.func, "__annotations__", {}))
+            return _Plan(dict(getattr(self.func, "__annotations__", {})), self.layout)
         self.hints = hints
-        return hints
+        self.plan = plan = _Plan(hints, self.layout)
+        return plan
 
     @staticmethod
     def _fail(label: str, hint: Any, value: Any, problem: str, what: str) -> typing.NoReturn:
@@ -459,7 +577,19 @@ class _Checker:
             self._fail(label, hint, value, problem, "parameter")
 
     def before(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
-        hints = self._resolve()
+        plan = self._get_plan()
+        nargs = len(args)
+        if not kwargs and plan.min_args <= nargs <= plan.n_params:
+            for idx, name, hint, quick in plan.checks:
+                if idx < nargs:
+                    value = args[idx]
+                    if quick is not None and isinstance(value, quick):
+                        continue
+                    problem = _mismatch(value, hint)
+                    if problem is not None:
+                        self._fail(name, hint, value, problem, "parameter")
+            return
+        hints = plan.hints
         if not hints:
             return
         bound = self.sig.bind(*args, **kwargs)
@@ -478,10 +608,13 @@ class _Checker:
                 self._check_one(name, value, hint)
 
     def after(self, result: Any) -> None:
-        hints = self._resolve()
-        if "return" not in hints:
+        plan = self._get_plan()
+        hint = plan.ret_hint
+        if hint is _MISSING:
             return
-        hint = hints["return"]
+        quick = plan.ret_quick
+        if quick is not None and isinstance(result, quick):
+            return
         problem = _mismatch(result, hint)
         if problem is not None:
             self._fail("return", hint, result, problem, "return value")

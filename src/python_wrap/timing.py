@@ -141,17 +141,18 @@ def timing(
 
         def finish(began: float, ok: bool, value: Any) -> None:
             elapsed = _core.perf_counter() - began
-            if not ok:
-                _log(
-                    lg,
-                    level,
-                    "%s raised %s after %s",
-                    name,
-                    type(value).__name__,
-                    _format_duration(elapsed),
-                )
-            elif threshold is None or elapsed > threshold:
-                _log(lg, level, "%s took %s", name, _format_duration(elapsed))
+            if lg.isEnabledFor(level):
+                if not ok:
+                    _log(
+                        lg,
+                        level,
+                        "%s raised %s after %s",
+                        name,
+                        type(value).__name__,
+                        _format_duration(elapsed),
+                    )
+                elif threshold is None or elapsed > threshold:
+                    _log(lg, level, "%s took %s", name, _format_duration(elapsed))
             _safe_callback(lg, callback, TimingRecord(name, elapsed, ok), name)
 
         return _instrument(f, start, finish)

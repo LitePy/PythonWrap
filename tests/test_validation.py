@@ -675,3 +675,295 @@ def test_format_of_forward_ref_and_special_forms() -> None:
     assert _fmt(typing.ForwardRef("Foo")) == "Foo"
     assert _fmt(None) == "None"
     assert _fmt(typing.Optional[typing.Sequence[int]]).startswith(("Optional", "Sequence"))  # noqa: UP045
+
+
+# ------------------------------------------------------------ fast paths (positional calls)
+
+
+def test_validate_args_fast_path_defaults_and_kwargs() -> None:
+    seen: list[tuple[str, object]] = []
+
+    def spy(name: str) -> Callable[[Any], bool]:
+        def check(v: Any) -> bool:
+            seen.append((name, v))
+            return True
+
+        return check
+
+    @validate_args(a=spy("a"), b=spy("b"), c=spy("c"))
+    def f(a: int, b: int = 5, c: int = 6) -> int:
+        return a + b + c
+
+    assert f(1) == 12
+    assert seen == [("a", 1), ("b", 5), ("c", 6)]  # defaults are validated
+    seen.clear()
+    assert f(1, 2) == 9
+    assert seen == [("a", 1), ("b", 2), ("c", 6)]
+    seen.clear()
+    assert f(1, c=3) == 9  # keyword call takes the bind path, same result
+    assert seen == [("a", 1), ("b", 5), ("c", 3)]
+    seen.clear()
+    assert f(a=1, b=2, c=3) == 6
+    assert seen == [("a", 1), ("b", 2), ("c", 3)]
+
+
+def test_validate_args_fast_path_errors_match() -> None:
+    @validate_args(x=lambda x: x > 0, y=(lambda y: y != "", "y must not be empty"))
+    def f(x: int, y: str = "d") -> None: ...
+
+    with pytest.raises(errors.ValidationError) as ei:
+        f(-1)
+    assert ei.value.parameter == "x"
+    assert ei.value.value == -1
+    assert "got -1" in str(ei.value)
+    with pytest.raises(errors.ValidationError, match="y must not be empty"):
+        f(1, "")
+    with pytest.raises(TypeError):
+        f()  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        f(1, "a", 3)  # type: ignore[call-arg]
+
+
+def test_validate_args_positional_only_keyword_only_and_variadic() -> None:
+    @validate_args(a=lambda a: a > 0, b=lambda b: b > 0)
+    def pos_only(a: int, b: int = 1, /) -> None: ...
+
+    pos_only(1)
+    pos_only(1, 2)
+    with pytest.raises(errors.ValidationError):
+        pos_only(1, -2)
+
+    @validate_args(k=lambda k: k > 0)
+    def kw_only(a: int, *, k: int = 1) -> None: ...
+
+    kw_only(0)
+    kw_only(0, k=3)
+    with pytest.raises(errors.ValidationError):
+        kw_only(0, k=-3)
+
+    @validate_args(rest=lambda r: len(r) == 2, extra=lambda e: "z" in e)
+    def variadic(a: int, *rest: int, **extra: int) -> None: ...
+
+    variadic(1, 2, 3, z=1)
+    with pytest.raises(errors.ValidationError):
+        variadic(1, 2)
+
+
+def test_validate_args_methods() -> None:
+    class C:
+        @validate_args(x=lambda x: x > 0)
+        def m(self, x: int, y: int = 0) -> int:
+            return x + y
+
+        @classmethod
+        @validate_args(x=lambda x: x > 0)
+        def c(cls, x: int) -> int:
+            return x
+
+        @staticmethod
+        @validate_args(x=lambda x: x > 0)
+        def s(x: int) -> int:
+            return x
+
+    assert C().m(1) == 1
+    assert C().m(1, 2) == 3
+    assert C.c(2) == 2
+    assert C.s(3) == 3
+    for call in (lambda: C().m(0), lambda: C.c(0), lambda: C.s(0)):
+        with pytest.raises(errors.ValidationError):
+            call()
+
+
+def test_validate_args_mutable_default_is_the_real_default() -> None:
+    got: list[object] = []
+
+    def keep(v: Any) -> bool:
+        got.append(v)
+        return True
+
+    @validate_args(items=keep)
+    def f(items: list[int] = []) -> None: ...  # noqa: B006
+
+    f()
+    assert got[0] is f.__wrapped__.__defaults__[0]  # type: ignore[attr-defined]
+
+
+def test_check_type_fast_path_variants() -> None:
+    @check_type(a=int, c=(str, bytes))
+    def f(a: int, b: object = None, c: str = "x") -> None: ...
+
+    f(1)
+    f(1, 2)
+    f(1, 2, b"x")
+    f(1, c="s")
+    f(a=1, b=0)
+    with pytest.raises(errors.ArgumentTypeError) as ei:
+        f("no")  # type: ignore[arg-type]
+    assert ei.value.parameter == "a"
+    assert "expected int, got str" in str(ei.value)
+    with pytest.raises(errors.ArgumentTypeError, match="c"):
+        f(1, 2, 3)  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        f()  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        f(1, 2, "c", 4)  # type: ignore[call-arg]
+
+
+def test_check_type_positional_only_methods_and_kwonly() -> None:
+    @check_type(a=int)
+    def pos_only(a: int, /, b: int = 0) -> None: ...
+
+    pos_only(1)
+    pos_only(1, "free")  # type: ignore[arg-type]
+    with pytest.raises(errors.ArgumentTypeError):
+        pos_only("x")  # type: ignore[arg-type]
+
+    class C:
+        @check_type(x=int)
+        def m(self, x: int) -> int:
+            return x
+
+    assert C().m(1) == 1
+    with pytest.raises(errors.ArgumentTypeError):
+        C().m("1")  # type: ignore[arg-type]
+
+    @check_type(k=int)
+    def kw(a: int, *, k: int = 0) -> None: ...
+
+    kw(1, k=2)
+    with pytest.raises(errors.ArgumentTypeError):
+        kw(1, k="2")  # type: ignore[arg-type]
+
+
+def test_enforce_types_fast_path_numeric_tower_and_messages() -> None:
+    @enforce_types
+    def f(a: int, b: float = 1.0, c: complex = 0j, d: str | None = None) -> bool:
+        return True
+
+    assert f(1)
+    assert f(True, 2, 3, None)  # bool is an int; int is a float and a complex
+    assert f(1, 2.5, 1.5, "s")
+    with pytest.raises(errors.ArgumentTypeError, match=r"parameter 'a' expected int, got str"):
+        f("x")  # type: ignore[arg-type]
+    with pytest.raises(errors.ArgumentTypeError, match=r"parameter 'b' expected float, got str"):
+        f(1, "x")  # type: ignore[arg-type]
+    with pytest.raises(errors.ArgumentTypeError, match=r"parameter 'd' expected str \| None"):
+        f(1, 1.0, 0j, 5)  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        f()  # type: ignore[call-arg]
+
+
+def test_enforce_types_kwargs_defaults_varargs_keyword_only_positional_only() -> None:
+    @enforce_types
+    def f(a: int, /, b: int = 0, *args: int, k: str = "k", **kw: float) -> int:
+        return a
+
+    assert f(1) == 1
+    assert f(1, 2, 3, 4, k="z", x=1.5) == 1
+    with pytest.raises(errors.ArgumentTypeError, match=r"args\[1\]"):
+        f(1, 2, 3, "bad")  # type: ignore[arg-type]
+    with pytest.raises(errors.ArgumentTypeError, match="parameter 'k'"):
+        f(1, k=1)  # type: ignore[arg-type]
+    with pytest.raises(errors.ArgumentTypeError, match=r"kw\['x'\]"):
+        f(1, x="s")  # type: ignore[arg-type]
+
+    @enforce_types
+    def g(a: int, b: int = 0) -> int:
+        return a
+
+    assert g(1, b=2) == 1
+    with pytest.raises(errors.ArgumentTypeError, match="parameter 'b'"):
+        g(1, b="x")  # type: ignore[arg-type]
+    with pytest.raises(errors.ArgumentTypeError, match="parameter 'a'"):
+        g(a="x")  # type: ignore[arg-type]
+
+
+def test_enforce_types_methods_and_return() -> None:
+    class C:
+        @enforce_types
+        def m(self, x: int) -> str:
+            return str(x)
+
+        @classmethod
+        @enforce_types
+        def c(cls, x: int) -> int:
+            return x
+
+        @staticmethod
+        @enforce_types
+        def s(x: int) -> int:
+            return "no"  # type: ignore[return-value]
+
+    assert C().m(1) == "1"
+    assert C.c(2) == 2
+    with pytest.raises(errors.ArgumentTypeError, match="parameter 'x'"):
+        C().m("1")  # type: ignore[arg-type]
+    with pytest.raises(errors.ArgumentTypeError, match=r"return value expected int, got str"):
+        C.s(1)
+
+
+def test_enforce_types_return_quick_path_and_check_return_false() -> None:
+    @enforce_types
+    def f(x: int) -> float:
+        return x  # an int is a valid float
+
+    assert f(1) == 1
+
+    @enforce_types
+    def none_ret(x: int) -> None:
+        return x  # type: ignore[return-value]
+
+    with pytest.raises(errors.ArgumentTypeError, match="return value expected None, got int"):
+        none_ret(1)
+
+    @enforce_types(check_return=False)
+    def unchecked(x: int) -> str:
+        return x  # type: ignore[return-value]
+
+    assert unchecked(1) == 1
+
+
+def test_enforce_types_forward_refs_resolved_lazily_on_fast_path() -> None:
+    @enforce_types
+    def f(a: "Later", b: int = 0) -> "Later":
+        return a
+
+    # `Later` is defined only after decoration; the first call resolves it.
+    globals()["Later"] = int
+    try:
+        assert f(1) == 1
+        assert f(2, 3) == 2
+        with pytest.raises(errors.ArgumentTypeError, match="parameter 'a' expected int"):
+            f("x")  # type: ignore[arg-type]
+    finally:
+        del globals()["Later"]
+
+
+def test_enforce_types_unresolved_forward_ref_retried_each_call() -> None:
+    @enforce_types
+    def f(a: "Missing", b: int = 0) -> int:  # noqa: F821
+        return b
+
+    assert f("anything") == 0  # unresolved: accepted, other params still checked
+    with pytest.raises(errors.ArgumentTypeError, match="parameter 'b'"):
+        f("anything", "x")  # type: ignore[arg-type]
+    globals()["Missing"] = int
+    try:
+        assert f(1) == 0  # resolved on a later call
+        with pytest.raises(errors.ArgumentTypeError, match="parameter 'a'"):
+            f("anything")
+    finally:
+        del globals()["Missing"]
+
+
+def test_enforce_types_complex_hints_still_checked_after_quick_miss() -> None:
+    @enforce_types
+    def f(
+        a: list[int], b: dict[str, int], c: type[int] = int, d: Callable[..., Any] = print
+    ) -> None: ...
+
+    f([1], {"a": 1})
+    with pytest.raises(errors.ArgumentTypeError, match="list containing str at index 1"):
+        f([1, "x"], {})  # type: ignore[list-item]
+    with pytest.raises(errors.ArgumentTypeError, match="parameter 'd'"):
+        f([1], {}, int, 3)  # type: ignore[arg-type]

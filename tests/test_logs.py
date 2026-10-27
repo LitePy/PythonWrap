@@ -509,3 +509,188 @@ def test_log_context_unprintable_value(caplog: pytest.LogCaptureFixture) -> None
     with log_context(bad=Bad()):
         f()
     assert "<unprintable Bad>" in messages(caplog)[-1]
+
+
+# --------------------------------------------------------- fast paths (positional calls)
+
+
+def _calls(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [m.split("Calling ", 1)[1].split(".")[-1] for m in messages(caplog)]
+
+
+def test_log_args_fast_path_matches_bind_for_every_signature_shape(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="python_wrap")
+
+    @log_args
+    def plain(a: int, b: int = 2, password: str = "x") -> None: ...
+
+    @log_args
+    def pos_only(a: int, token: str, /, c: int = 3) -> None: ...
+
+    @log_args
+    def kw_only(a: int, *, secret: str = "s", n: int = 1) -> None: ...
+
+    @log_args
+    def variadic(a: int, *rest: int, api_key: str = "k", **extra: int) -> None: ...
+
+    plain(1)
+    plain(1, 5, "pw")
+    plain(1, b=9)
+    pos_only(1, "tok")
+    pos_only(1, "tok", c=7)
+    kw_only(1)
+    kw_only(1, secret="zz", n=4)
+    variadic(1, 2, 3, x=4)
+    variadic(1, api_key="q", y=5)
+
+    assert _calls(caplog) == [
+        "plain(a=1)",
+        "plain(a=1, b=5, password='***')",
+        "plain(a=1, b=9)",
+        "pos_only(a=1, token='***')",
+        "pos_only(a=1, token='***', c=7)",
+        "kw_only(a=1)",
+        "kw_only(a=1, secret='***', n=4)",
+        "variadic(a=1, rest=(2, 3), x=4)",
+        "variadic(a=1, api_key='***', y=5)",
+    ]
+    assert "pw" not in caplog.text.replace("password", "")
+
+
+def test_log_args_redacts_var_kwargs_names_not_in_signature(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="python_wrap")
+
+    @log_args
+    def f(**extra: str) -> None: ...
+
+    f(my_token="abc", plain="ok")
+    assert "abc" not in caplog.text
+    assert "my_token='***'" in caplog.text
+    assert "plain='ok'" in caplog.text
+
+
+def test_log_args_too_many_positionals_falls_back(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.DEBUG, logger="python_wrap")
+
+    @log_args
+    def f(a: int) -> int:
+        return a
+
+    with pytest.raises(TypeError):
+        f(1, 2)  # type: ignore[call-arg]
+    assert "f(arg0=1, arg1=2)" in caplog.text
+
+
+def test_log_args_methods_name_self_and_redact(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.DEBUG, logger="python_wrap")
+
+    class Svc:
+        @log_args
+        def login(self, user: str, password: str) -> None: ...
+
+        @classmethod
+        @log_args
+        def make(cls, name: str, token: str) -> None: ...
+
+        @staticmethod
+        @log_args
+        def util(x: int, auth: str) -> None: ...
+
+    Svc().login("u", "pw1")
+    Svc.make("n", "tk1")
+    Svc.util(1, "au1")
+    for secret in ("pw1", "tk1", "au1"):
+        assert secret not in caplog.text
+    assert "user='u', password='***'" in caplog.text
+    assert "name='n', token='***'" in caplog.text
+    assert "x=1, auth='***'" in caplog.text
+
+
+def test_audit_records_arguments_on_fast_and_slow_paths() -> None:
+    records: list[AuditRecord] = []
+
+    @audit(sink=records.append)
+    def f(a: int, password: str = "d", *, token: str = "t", n: int = 0) -> None: ...
+
+    f(1)
+    f(1, "pw")
+    f(1, n=2)
+    f(a=3, token="x")
+    assert [r.arguments for r in records] == [
+        {"a": 1},
+        {"a": 1, "password": "***"},
+        {"a": 1, "n": 2},
+        {"a": 3, "token": "***"},
+    ]
+
+
+def test_audit_caller_location_stays_exact_with_cache() -> None:
+    records: list[AuditRecord] = []
+
+    @audit(sink=records.append)
+    def f(x: int) -> int:
+        return x
+
+    for _ in range(3):  # later calls hit the filename cache
+        frame = inspect.currentframe()
+        assert frame is not None
+        line = frame.f_lineno + 1
+        f(1)
+        assert records[-1].caller == f"{__file__}:{line}"
+
+
+def test_audit_with_sink_but_level_disabled_still_builds_record(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.ERROR, logger="python_wrap")
+    records: list[AuditRecord] = []
+
+    @audit(sink=records.append, level=logging.INFO, include_result=True)
+    def f(a: int, secret: str) -> int:
+        return a
+
+    assert f(1, "s3") == 1
+    assert len(records) == 1
+    assert records[0].arguments == {"a": 1, "secret": "***"}
+    assert records[0].result == 1
+    assert records[0].caller.startswith(__file__)
+    assert caplog.records == []
+
+
+def test_audit_without_sink_and_level_disabled_skips_record(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from python_wrap import logs
+
+    caplog.set_level(logging.ERROR, logger="python_wrap")
+    built: list[object] = []
+    monkeypatch.setattr(logs, "AuditRecord", lambda **kw: built.append(kw))
+
+    @audit
+    def f(a: int) -> int:
+        return a
+
+    @audit
+    def boom() -> None:
+        raise ZeroDivisionError
+
+    assert f(1) == 1
+    with pytest.raises(ZeroDivisionError):
+        boom()
+    assert built == []
+    assert caplog.records == []
+
+
+def test_audit_async_with_sink_and_level_disabled() -> None:
+    records: list[AuditRecord] = []
+
+    @audit(sink=records.append, logger="pw.off", level=logging.DEBUG)
+    async def f(a: int, token: str) -> int:
+        return a
+
+    assert asyncio.run(f(2, "t")) == 2
+    assert records[0].arguments == {"a": 2, "token": "***"}
