@@ -6,6 +6,7 @@ and support plain functions, ``async def`` functions and methods.
 
 from __future__ import annotations
 
+import contextvars
 import functools
 import inspect
 import logging
@@ -14,9 +15,9 @@ import reprlib
 import sys
 import traceback
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from types import FrameType
+from types import FrameType, MappingProxyType, TracebackType
 from typing import Any, TypeVar, cast, overload
 
 from python_wrap import _core
@@ -26,7 +27,9 @@ __all__ = [
     "DEFAULT_REDACT",
     "AuditRecord",
     "audit",
+    "current_log_context",
     "log_args",
+    "log_context",
     "log_return",
     "trace",
 ]
@@ -191,6 +194,132 @@ def _caller_location() -> str:
     return f"{frame.f_code.co_filename}:{frame.f_lineno}"
 
 
+# ----------------------------------------------------------------------- log context
+
+_log_fields: contextvars.ContextVar[Mapping[str, Any]] = contextvars.ContextVar(
+    "python_wrap_log_fields", default=MappingProxyType({})
+)
+
+
+def current_log_context() -> dict[str, Any]:
+    """Return a copy of the fields bound by the enclosing `log_context` blocks.
+
+    Returns:
+        A new dict (empty when no `log_context` is active); changing it has no effect.
+
+    Example:
+        >>> with log_context(request_id="r1"):
+        ...     current_log_context()
+        {'request_id': 'r1'}
+    """
+    return dict(_log_fields.get())
+
+
+def _safe_str(value: object) -> str:
+    try:
+        return str(value)
+    except BaseException:
+        return f"<unprintable {type(value).__name__}>"
+
+
+def _log(
+    lg: logging.Logger,
+    level: int,
+    msg: str,
+    *args: Any,
+    context: Mapping[str, Any] | None = None,
+    suffix: bool = True,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    """``lg.log`` plus the bound context: ``extra["context"]`` and a ``[k=v]`` suffix."""
+    fields = _log_fields.get() if context is None else context
+    if fields:
+        extra = {**(extra or {}), "context": dict(fields)}
+        if suffix:
+            text = " ".join(f"{k}={_safe_str(v)}" for k, v in fields.items())
+            msg = f"{msg} [{text.replace('%', '%%')}]"
+    lg.log(level, msg, *args, extra=extra)
+
+
+class _LogContext:
+    """Context manager (sync and async) and decorator returned by `log_context`."""
+
+    def __init__(self, fields: dict[str, Any]) -> None:
+        self._fields = fields
+        self._tokens: list[contextvars.Token[Mapping[str, Any]]] = []
+
+    def __enter__(self) -> dict[str, Any]:
+        merged = {**_log_fields.get(), **self._fields}
+        self._tokens.append(_log_fields.set(merged))
+        return dict(merged)
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        _log_fields.reset(self._tokens.pop())
+
+    async def __aenter__(self) -> dict[str, Any]:
+        return self.__enter__()
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        self.__exit__(exc_type, exc, tb)
+
+    def __call__(self, func: F) -> F:
+        fields = self._fields
+        if _core.is_async(func):
+
+            @functools.wraps(func)
+            async def awrapper(*args: Any, **kwargs: Any) -> Any:
+                async with _LogContext(fields):
+                    return await func(*args, **kwargs)
+
+            return cast("F", awrapper)
+
+        @functools.wraps(func)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            with _LogContext(fields):
+                return func(*args, **kwargs)
+
+        return cast("F", wrapper)
+
+
+def log_context(**fields: Any) -> _LogContext:
+    """Bind extra fields to every python-wrap log line made inside a block or call.
+
+    Works as a context manager (``with`` and ``async with``) and as a decorator for plain
+    and ``async def`` functions. Blocks nest: inner fields add to, and override, outer ones.
+    The fields live in a `contextvars.ContextVar`, so each thread and asyncio task sees its
+    own; a new thread starts empty unless you run it in a copied context
+    (``contextvars.copy_context().run(...)``; `run_in_thread` does this for you).
+
+    `log_args`, `log_return`, `audit`, `trace` and `timing` append `` [key=value ...]`` to
+    their message and attach the dict as ``LogRecord.context``; `AuditRecord.context`
+    holds it too.
+
+    Args:
+        **fields: The fields to bind, e.g. ``request_id="abc"``.
+
+    Returns:
+        An object usable as ``with log_context(...) as fields``, ``async with`` or ``@``.
+        The ``as`` target is the merged dict of fields.
+
+    Example:
+        >>> @log_return(logger="app")
+        ... def handle(): ...
+        >>> with log_context(request_id="r1"):
+        ...     handle()
+    """
+    return _LogContext(dict(fields))
+
+
 # ---------------------------------------------------------------------------- log_args
 
 
@@ -246,7 +375,7 @@ def log_args(
         def start(args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
             if lg.isEnabledFor(level):
                 bound = _bind_arguments(sig, args, kwargs, secret)
-                lg.log(level, "Calling %s", _format_call(name, bound, max_length))
+                _log(lg, level, "Calling %s", _format_call(name, bound, max_length))
 
         return _instrument(f, start, lambda state, ok, value: None)
 
@@ -303,9 +432,9 @@ def log_return(
             if not lg.isEnabledFor(level):
                 return
             if ok:
-                lg.log(level, "%s returned %s", name, _short(value, max_length))
+                _log(lg, level, "%s returned %s", name, _short(value, max_length))
             else:
-                lg.log(level, "%s raised %s", name, type(value).__name__)
+                _log(lg, level, "%s raised %s", name, type(value).__name__)
 
         return _instrument(f, lambda args, kwargs: None, finish)
 
@@ -328,6 +457,7 @@ class AuditRecord:
         error: ``repr`` of the exception, or ``None``.
         duration: Seconds the call took.
         result: The return value, only when ``include_result=True`` (else ``None``).
+        context: Fields bound by `log_context` when the call started (empty if none).
     """
 
     function: str
@@ -338,6 +468,7 @@ class AuditRecord:
     error: str | None
     duration: float
     result: Any = None
+    context: dict[str, Any] = field(default_factory=dict)
 
 
 @overload
@@ -396,18 +527,19 @@ def audit(
 
         def start(
             args: tuple[Any, ...], kwargs: dict[str, Any]
-        ) -> tuple[datetime, str, dict[str, Any], float]:
+        ) -> tuple[datetime, str, dict[str, Any], float, dict[str, Any]]:
             return (
                 datetime.now(timezone.utc),
                 _caller_location(),
                 _bind_arguments(sig, args, kwargs, secret),
                 _core.perf_counter(),
+                current_log_context(),
             )
 
         def finish(
-            state: tuple[datetime, str, dict[str, Any], float], ok: bool, value: Any
+            state: tuple[datetime, str, dict[str, Any], float, dict[str, Any]], ok: bool, value: Any
         ) -> None:
-            timestamp, caller, arguments, began = state
+            timestamp, caller, arguments, began, context = state
             record = AuditRecord(
                 function=name,
                 timestamp=timestamp,
@@ -417,8 +549,10 @@ def audit(
                 error=None if ok else _safe_repr(value),
                 duration=_core.perf_counter() - began,
                 result=value if (ok and include_result) else None,
+                context=context,
             )
-            lg.log(
+            _log(
+                lg,
                 level,
                 "audit %s called from %s: %s%s (%.3f s)",
                 _format_call(name, arguments, 200),
@@ -426,6 +560,7 @@ def audit(
                 record.status,
                 f" {record.error}" if record.error else "",
                 record.duration,
+                context=context,
                 extra={"audit": record},
             )
             if sink is not None:
@@ -487,20 +622,20 @@ def trace(
         def start(args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
             if not lg.isEnabledFor(level):
                 return
-            lg.log(level, "Entering %s", name)
+            _log(lg, level, "Entering %s", name)
             frame = _external_frame()
             if frame is not None:
                 entries: list[traceback.FrameSummary] = list(traceback.extract_stack(frame))
                 if limit is not None:
                     entries = entries[-limit:] if limit > 0 else []
                 text = "".join(traceback.format_list(entries)).rstrip()
-                lg.log(level, "Call stack for %s:\n%s", name, text)
+                _log(lg, level, "Call stack for %s:\n%s", name, text, suffix=False)
 
         def finish(state: None, ok: bool, value: Any) -> None:
             if not lg.isEnabledFor(level):
                 return
             suffix = "" if ok else f" (raised {type(value).__name__})"
-            lg.log(level, "Exiting %s%s", name, suffix)
+            _log(lg, level, "Exiting %s%s", name, suffix)
 
         return _instrument(f, start, finish)
 

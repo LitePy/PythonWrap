@@ -16,7 +16,7 @@ from typing import Any, overload
 
 from python_wrap import _core
 from python_wrap._core import F, LoggerLike, P, R
-from python_wrap.logs import _instrument
+from python_wrap.logs import _instrument, _log
 
 __all__ = [
     "BenchmarkResult",
@@ -142,7 +142,8 @@ def timing(
         def finish(began: float, ok: bool, value: Any) -> None:
             elapsed = _core.perf_counter() - began
             if not ok:
-                lg.log(
+                _log(
+                    lg,
                     level,
                     "%s raised %s after %s",
                     name,
@@ -150,7 +151,7 @@ def timing(
                     _format_duration(elapsed),
                 )
             elif threshold is None or elapsed > threshold:
-                lg.log(level, "%s took %s", name, _format_duration(elapsed))
+                _log(lg, level, "%s took %s", name, _format_duration(elapsed))
             _safe_callback(lg, callback, TimingRecord(name, elapsed, ok), name)
 
         return _instrument(f, start, finish)
