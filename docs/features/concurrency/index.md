@@ -1,4 +1,4 @@
-# Concurrency
+# Concurrency and limits
 
 Control how often a function runs, how many calls run at once, and how you run many awaitables or blocking calls without hand-writing the plumbing. Everything here is built for both threads and `asyncio`.
 
