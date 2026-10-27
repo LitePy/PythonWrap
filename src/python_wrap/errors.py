@@ -35,6 +35,15 @@ class CircuitOpenError(PythonWrapError):
         self.retry_after = retry_after
 
 
+class BulkheadFull(PythonWrapError):
+    """A bulkhead is at capacity: its wait queue is full, or waiting for a slot timed out."""
+
+    def __init__(self, message: str, *, name: str | None, max_concurrent: int) -> None:
+        super().__init__(message)
+        self.name = name
+        self.max_concurrent = max_concurrent
+
+
 class ValidationError(PythonWrapError, ValueError):
     """An argument failed a validator."""
 
@@ -56,6 +65,7 @@ class ArgumentTypeError(PythonWrapError, TypeError):
 
 __all__ = [
     "ArgumentTypeError",
+    "BulkheadFull",
     "CircuitOpenError",
     "PythonWrapError",
     "RateLimitExceeded",
