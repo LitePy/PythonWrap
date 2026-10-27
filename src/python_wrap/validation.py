@@ -400,7 +400,8 @@ def _mismatch(value: Any, hint: Any) -> str | None:
         is_union = typing.get_origin(target) in (Union, _UnionType)
         targets = typing.get_args(target) if is_union else (target,)
         for t in targets:
-            if not isinstance(t, type):
+            # On 3.10 ``isinstance(list[int], type)`` is True, so rule out generic aliases too.
+            if not isinstance(t, type) or typing.get_origin(t) is not None:
                 return None
             if issubclass(value, t):
                 return None
