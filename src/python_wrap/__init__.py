@@ -2,12 +2,48 @@
 
 Every decorator works on plain functions, ``async def`` functions and methods, keeps
 the wrapped signature for type checkers, and never configures logging for you.
+
+Testing helpers live in ``python_wrap.testing`` and the event catalogue in
+``python_wrap.events``; they are not re-exported here.
 """
 
 import logging
 
-from .caching import CacheInfo, cache, memoize, once
-from .circuit import CircuitBreaker, CircuitState, circuit_breaker
+from .aio import (
+    RaceFailed,
+    amap_iter,
+    gather_limit,
+    map_async,
+    race,
+    run_sync,
+)
+from .batching import (
+    AsyncBatched,
+    Batched,
+    batch_calls,
+)
+from .bulkhead import (
+    Bulkhead,
+    Limited,
+    limit_concurrency,
+)
+from .caching import (
+    CachedProperty,
+    CacheInfo,
+    Memoized,
+    Once,
+    cache,
+    cached_property,
+    invalidate,
+    memoize,
+    once,
+)
+from .circuit import (
+    CircuitBreaker,
+    CircuitProtected,
+    CircuitState,
+    circuit_breaker,
+)
 from .concurrency import (
     AsyncDebounced,
     Debounced,
@@ -18,18 +54,68 @@ from .concurrency import (
     throttle,
     timeout,
 )
-from .devtools import compose, deprecate, mock_data, no_debug
+from .devtools import (
+    compose,
+    deprecate,
+    mock_data,
+    no_debug,
+    wrap_methods,
+)
 from .errors import (
     ArgumentTypeError,
+    BatchError,
+    BulkheadFull,
     CircuitOpenError,
     PythonWrapError,
     RateLimitExceeded,
     TimeoutExpired,
     ValidationError,
 )
-from .logs import DEFAULT_REDACT, AuditRecord, audit, log_args, log_return, trace
-from .retry import RetryState, fallback, retry, retry_on_exception, suppress
-from .state import Transaction, current_transaction, revert_on_failure, transactional
+from .events import (
+    listening,
+    subscribe,
+)
+from .hedging import (
+    hedge,
+)
+from .logs import (
+    DEFAULT_REDACT,
+    AuditRecord,
+    audit,
+    current_log_context,
+    log_args,
+    log_context,
+    log_return,
+    trace,
+)
+from .metrics import (
+    CallStats,
+    Counted,
+    count_calls,
+)
+from .policy import (
+    Policy,
+    policy,
+)
+from .retry import (
+    Attempt,
+    Retrying,
+    RetryState,
+    RetryStats,
+    fallback,
+    retry,
+    retry_after_header,
+    retry_on_exception,
+    retry_stats,
+    retrying,
+    suppress,
+)
+from .state import (
+    Transaction,
+    current_transaction,
+    revert_on_failure,
+    transactional,
+)
 from .timing import (
     BenchmarkResult,
     MemoryRecord,
@@ -40,7 +126,11 @@ from .timing import (
     profile,
     timing,
 )
-from .validation import check_type, enforce_types, validate_args
+from .validation import (
+    check_type,
+    enforce_types,
+    validate_args,
+)
 
 __version__ = "0.2.0"
 
@@ -50,49 +140,85 @@ logging.getLogger("python_wrap").addHandler(logging.NullHandler())
 __all__ = [
     "DEFAULT_REDACT",
     "ArgumentTypeError",
+    "AsyncBatched",
     "AsyncDebounced",
+    "Attempt",
     "AuditRecord",
+    "BatchError",
+    "Batched",
     "BenchmarkResult",
+    "Bulkhead",
+    "BulkheadFull",
     "CacheInfo",
+    "CachedProperty",
+    "CallStats",
     "CircuitBreaker",
     "CircuitOpenError",
+    "CircuitProtected",
     "CircuitState",
+    "Counted",
     "Debounced",
+    "Limited",
+    "Memoized",
     "MemoryRecord",
+    "Once",
+    "Policy",
     "PythonWrapError",
+    "RaceFailed",
     "RateLimitExceeded",
     "RetryState",
+    "RetryStats",
+    "Retrying",
     "TimeoutExpired",
     "TimingRecord",
     "Transaction",
     "ValidationError",
     "__version__",
+    "amap_iter",
     "audit",
+    "batch_calls",
     "benchmark",
     "benchmark_async",
     "cache",
+    "cached_property",
     "check_type",
     "circuit_breaker",
     "compose",
+    "count_calls",
+    "current_log_context",
     "current_transaction",
     "debounce",
     "deprecate",
     "enforce_types",
     "fallback",
+    "gather_limit",
+    "hedge",
+    "invalidate",
+    "limit_concurrency",
+    "listening",
     "log_args",
+    "log_context",
     "log_return",
+    "map_async",
     "measure_memory",
     "memoize",
     "mock_data",
     "no_debug",
     "once",
+    "policy",
     "profile",
+    "race",
     "rate_limit",
     "retry",
+    "retry_after_header",
     "retry_on_exception",
+    "retry_stats",
+    "retrying",
     "revert_on_failure",
     "run_in_thread",
+    "run_sync",
     "singleflight",
+    "subscribe",
     "suppress",
     "throttle",
     "timeout",
@@ -100,4 +226,5 @@ __all__ = [
     "trace",
     "transactional",
     "validate_args",
+    "wrap_methods",
 ]
