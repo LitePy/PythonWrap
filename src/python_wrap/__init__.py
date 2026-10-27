@@ -124,8 +124,10 @@ from .retry import (
     suppress,
 )
 from .state import (
+    INJECTED,
     Transaction,
     current_transaction,
+    require_transaction,
     revert_on_failure,
     transactional,
 )
@@ -152,6 +154,7 @@ logging.getLogger("python_wrap").addHandler(logging.NullHandler())
 
 __all__ = [
     "DEFAULT_REDACT",
+    "INJECTED",
     "ArgumentTypeError",
     "AsyncBatched",
     "AsyncDebounced",
@@ -230,6 +233,7 @@ __all__ = [
     "profile",
     "race",
     "rate_limit",
+    "require_transaction",
     "reset_config",
     "retry",
     "retry_after_header",
