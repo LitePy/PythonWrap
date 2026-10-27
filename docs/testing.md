@@ -2,9 +2,180 @@
 
 Decorators that wait or remember make tests slow or order-dependent. python-wrap is built so you can fix both without touching production code.
 
-## Do not sleep: patch the clock
+python-wrap ships its own testing helpers in `python_wrap.testing` (standard library only; pytest is optional). They cover the common jobs: skip the waiting, cap retries, switch off rate limits and caches, control time, observe calls and wait for background work.
 
-Every time-based decorator reads time and waits through `python_wrap._core`, always as module attributes:
+## Fast mode: instant waits, retries still run
+
+`fast_mode()` makes every wait inside python-wrap instant (`no_sleep`). Retries still run the configured number of times and limiters still count; nothing actually sleeps. Use it as a context manager or a decorator on sync and async tests:
+
+```python
+import time
+from python_wrap import retry
+from python_wrap.testing import fast_mode
+
+calls = []
+
+@retry(max_attempts=4, delay=30, backoff=2, on=ConnectionError)
+def flaky() -> str:
+    calls.append(1)
+    if len(calls) < 4:
+        raise ConnectionError
+    return "ok"
+
+start = time.monotonic()
+with fast_mode():
+    assert flaky() == "ok"          # would take 30 + 60 + 120 seconds
+assert time.monotonic() - start < 5
+```
+
+The other switches work the same way:
+
+| Helper | Effect |
+| --- | --- |
+| `fast_mode()` | `_core.sleep` / `_core.async_sleep` return immediately |
+| `disable_retries()` | `retry` makes a single attempt |
+| `disable_rate_limits()` | `rate_limit` / `throttle` let every call through |
+| `disable_caching()` | `memoize` / `cache` always call the wrapped function |
+| `overrides(no_sleep=..., max_attempts=..., ...)` | Any combination, in one scope |
+
+```python
+import asyncio
+from python_wrap import _core
+from python_wrap.testing import disable_retries, fast_mode, overrides
+
+with overrides(no_sleep=True, max_attempts=3):
+    with disable_retries():
+        assert _core.overrides.max_attempts == 1
+    assert _core.overrides.max_attempts == 3      # restored on exit
+assert _core.overrides.max_attempts is None
+
+@fast_mode()
+async def test_something() -> None:
+    assert _core.overrides.no_sleep
+
+asyncio.run(test_something())
+```
+
+!!! note "Nesting and threads"
+    The overrides are one process-wide state, not context variables, so worker threads started by your test see them. Each scope restores exactly the fields it changed, to the values they had on entry, so scopes nest. They must exit in reverse order of entry (`with` blocks and decorators always do). Overlapping scopes from different threads that touch the same field are not isolated from each other; enter them from the test, not from concurrent workers.
+
+## Fake clock
+
+`fake_clock()` replaces `_core.monotonic`, `_core.perf_counter`, `_core.sleep` and `_core.async_sleep`. Sleeping advances the clock and records the duration, so you can assert the exact backoff schedule. The async sleep yields to the event loop, so other tasks still run.
+
+```python
+from python_wrap import retry
+from python_wrap.testing import fake_clock
+
+calls = []
+
+@retry(max_attempts=4, delay=1.0, backoff=2, on=ConnectionError)
+def flaky() -> str:
+    calls.append(1)
+    if len(calls) < 4:
+        raise ConnectionError
+    return "ok"
+
+with fake_clock() as clock:
+    assert flaky() == "ok"            # returns at once; no real waiting
+
+assert clock.sleeps == [1.0, 2.0, 4.0]      # the backoff schedule you configured
+assert clock.now == 1000.0 + 7.0            # FakeClock(start=1000.0) by default
+```
+
+`FakeClock(start=...)` has `.now`, `.advance(seconds)`, `.sleeps` and `.total_slept`; pass your own instance with `fake_clock(clock)`.
+
+The actual deadlines of `timeout` (signal timer, worker thread, `asyncio.wait_for`) and `debounce` (`threading.Timer`, event-loop tasks) use real timers and are not affected by the fake clock. Test them with tiny real durations, or call `debounce`'s `.flush()`.
+
+## pytest fixtures
+
+Enable the plugin in your top-level `conftest.py`:
+
+<!-- skip -->
+```python
+# conftest.py
+pytest_plugins = ["python_wrap.testing"]
+```
+
+You get two fixtures:
+
+- `pw_fake_clock`: installs a `FakeClock` for the test and yields it.
+- `pw_fast_mode`: runs the test under `fast_mode()`.
+
+<!-- skip -->
+```python
+def test_backoff(pw_fake_clock):
+    assert flaky() == "ok"
+    assert pw_fake_clock.sleeps == [1.0, 2.0, 4.0]
+
+def test_quick(pw_fast_mode):
+    ...
+```
+
+`python_wrap.testing` imports without pytest installed; the fixtures only exist when it is.
+
+## Spies
+
+`spy(func)` records every call without changing behaviour, for sync and async functions. `spy_on(obj, name)` patches a module, class or instance attribute for a block and restores it.
+
+```python
+import math
+from python_wrap.testing import spy, spy_on
+
+@spy
+def add(a: int, b: int) -> int:
+    return a + b
+
+add(1, b=2)
+assert add.call_count == 1 and add.called
+add.assert_called_with(1, b=2)
+call = add.calls[0]
+assert (call.args, call.kwargs, call.result, call.exception) == ((1,), {"b": 2}, 3, None)
+add.reset()
+assert add.call_count == 0
+
+with spy_on(math, "floor") as floor:
+    math.floor(2.5)
+assert floor.call_count == 1       # and math.floor is the original again
+```
+
+Each `Call` holds `args`, `kwargs`, `result`, `exception` and `duration`. On a class, a spy records `self` as the first argument.
+
+## Waiting for background work
+
+`eventually` (async) and `eventually_sync` retry an assertion until it passes or `timeout` runs out, then raise the last `AssertionError` annotated with how long it waited. They use real time unless a fake clock is installed.
+
+```python
+import asyncio
+import threading
+from python_wrap.testing import eventually, eventually_sync
+
+done = threading.Event()
+threading.Timer(0.02, done.set).start()
+
+def finished() -> None:
+    assert done.is_set()
+
+eventually_sync(finished, timeout=2.0, interval=0.005)
+
+async def main() -> None:
+    state = {"ready": False}
+    asyncio.get_running_loop().call_later(0.02, state.update, {"ready": True})
+
+    async def check() -> None:        # sync or async assertions both work
+        assert state["ready"]
+
+    await eventually(check, timeout=2.0, interval=0.005)
+
+asyncio.run(main())
+```
+
+!!! tip "Under `fast_mode()`"
+    `eventually` waits through `_core`, so inside `fast_mode()` its polling interval is zero and it spins until `timeout`. Leave it outside fast mode when you wait on real threads.
+
+## Patching the clock by hand
+
+Everything above is built on four module attributes of `python_wrap._core`, always read as attributes so they can be patched:
 
 | Attribute | Used for |
 | --- | --- |
@@ -13,9 +184,7 @@ Every time-based decorator reads time and waits through `python_wrap._core`, alw
 | `_core.sleep(seconds)` | Waiting in sync `retry` and `rate_limit(block=True)` |
 | `_core.async_sleep(seconds)` | The same, for `async def` functions |
 
-Patch those four and tests run instantly and deterministically. `_core` is internal plumbing, but these four names are the testing hook its module docstring documents.
-
-The actual deadlines of `timeout` (signal timer, worker thread, `asyncio.wait_for`) and `debounce` (`threading.Timer`, event-loop tasks) use real timers and are not affected by the patch. Test them with tiny real durations, or call `debounce`'s `.flush()`.
+If you prefer `unittest.mock`, patch them directly:
 
 ```python
 from unittest import mock
@@ -32,51 +201,9 @@ def flaky() -> str:
     return "ok"
 
 with mock.patch.object(_core, "sleep", sleeps.append):
-    assert flaky() == "ok"            # returns at once; no real waiting
+    assert flaky() == "ok"
 
-assert sleeps == [1.0, 2.0, 4.0]      # the backoff schedule you configured
-```
-
-### A reusable fake clock
-
-A fixture that advances time instead of waiting (this is the one python-wrap's own tests use):
-
-<!-- skip -->
-```python
-# conftest.py
-from dataclasses import dataclass, field
-
-import pytest
-from python_wrap import _core
-
-
-@dataclass
-class FakeClock:
-    now: float = 1000.0
-    sleeps: list[float] = field(default_factory=list)
-
-    def time(self) -> float:
-        return self.now
-
-    def advance(self, seconds: float) -> None:
-        self.now += seconds
-
-    def sleep(self, seconds: float) -> None:
-        self.sleeps.append(seconds)
-        self.now += max(seconds, 0.0)
-
-    async def async_sleep(self, seconds: float) -> None:
-        self.sleep(seconds)
-
-
-@pytest.fixture
-def fake_clock(monkeypatch: pytest.MonkeyPatch) -> FakeClock:
-    clock = FakeClock()
-    monkeypatch.setattr(_core, "monotonic", clock.time)
-    monkeypatch.setattr(_core, "perf_counter", clock.time)
-    monkeypatch.setattr(_core, "sleep", clock.sleep)
-    monkeypatch.setattr(_core, "async_sleep", clock.async_sleep)
-    return clock
+assert sleeps == [1.0, 2.0, 4.0]
 ```
 
 With it, you can test expiry and recovery without waiting:
@@ -130,7 +257,7 @@ with mock.patch.object(_core, "monotonic", lambda: now[0]):
 ```
 
 !!! tip "Async"
-    Patch `_core.async_sleep` with an `async def` that records and returns (as `FakeClock.async_sleep` does) so `async def` retries do not wait either.
+    With `mock`, patch `_core.async_sleep` with an `async def` that records and returns (as `FakeClock.async_sleep` does) so `async def` retries do not wait either.
 
 ## Reset state between tests
 

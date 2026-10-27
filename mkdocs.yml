@@ -117,4 +117,5 @@ nav:
       - Validation: api/validation.md
       - State: api/state.md
       - Developer tools: api/devtools.md
+      - Testing helpers: api/testing.md
   - Changelog: changelog.md

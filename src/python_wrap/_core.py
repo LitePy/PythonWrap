@@ -9,6 +9,27 @@ Rules every module follows:
 * Read time through ``_core.monotonic()`` / ``_core.perf_counter()`` and wait through
   ``_core.sleep()`` / ``_core.async_sleep()`` — always as module attributes, never
   imported by name — so tests can patch one place to get a fake clock.
+* Honour the process-wide test overrides (see below).
+
+Test overrides contract
+-----------------------
+``_core.overrides`` is a single process-wide :class:`Overrides` instance, mutated in
+place (never replaced), so it may be read as ``_core.overrides.<field>`` at any time.
+Reads are plain attribute reads (thread-safe under the GIL); changing it is a test-time
+operation done through :func:`set_overrides` (which holds ``overrides_lock``) or the
+public helpers in :mod:`python_wrap.testing`. Modules must read the field **at call
+time**, not at decoration time, so a test can flip it after import:
+
+* ``no_sleep``: :func:`sleep` / :func:`async_sleep` return immediately (the async one
+  still yields to the event loop once). Handled here; other modules need do nothing as
+  long as they wait only through ``_core``. A fake clock installed by ``fake_clock()``
+  replaces the sleeps and so still advances time.
+* ``max_attempts``: when not ``None``, ``retry`` uses
+  ``min(configured_max_attempts, _core.overrides.max_attempts)`` attempts.
+* ``disable_rate_limits``: when true, ``rate_limit`` / ``throttle`` (and any other
+  limiter that delays or rejects calls) let every call through immediately.
+* ``disable_caching``: when true, ``memoize`` / ``cache`` / ``once``-style caches
+  neither read nor write their stores and always call the wrapped function.
 """
 
 from __future__ import annotations
@@ -17,8 +38,10 @@ import asyncio
 import functools
 import inspect
 import logging
+import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass, fields
 from typing import Any, ParamSpec, TypeVar
 
 P = ParamSpec("P")
@@ -32,12 +55,56 @@ LoggerLike = logging.Logger | str | None
 # Time sources, patched by tests. Call them as ``_core.monotonic()``.
 monotonic: Callable[[], float] = time.monotonic
 perf_counter: Callable[[], float] = time.perf_counter
-sleep: Callable[[float], None] = time.sleep
+
+
+@dataclass
+class Overrides:
+    """Process-wide switches for tests. See the module docstring for the contract."""
+
+    no_sleep: bool = False
+    max_attempts: int | None = None
+    disable_rate_limits: bool = False
+    disable_caching: bool = False
+
+
+overrides = Overrides()
+overrides_lock = threading.RLock()
+
+
+def set_overrides(**values: Any) -> dict[str, Any]:
+    """Set override fields atomically and return their previous values.
+
+    Raises:
+        TypeError: If a name is not a field of :class:`Overrides`.
+        ValueError: If ``max_attempts`` is not ``None`` or a positive integer.
+    """
+    names = {f.name for f in fields(Overrides)}
+    unknown = set(values) - names
+    if unknown:
+        raise TypeError(f"unknown override(s): {', '.join(sorted(unknown))}")
+    attempts = values.get("max_attempts")
+    if attempts is not None and (not isinstance(attempts, int) or attempts < 1):
+        raise ValueError("max_attempts override must be None or an integer >= 1")
+    with overrides_lock:
+        previous = {name: getattr(overrides, name) for name in values}
+        for name, value in values.items():
+            setattr(overrides, name, value)
+    return previous
+
+
+def sleep(seconds: float) -> None:
+    """Blocking sleep; a no-op while ``overrides.no_sleep`` is set."""
+    if overrides.no_sleep:
+        return
+    time.sleep(seconds)
 
 
 async def async_sleep(seconds: float) -> None:
-    """Indirection over :func:`asyncio.sleep` so tests can patch it."""
-    await asyncio.sleep(seconds)
+    """Indirection over :func:`asyncio.sleep` so tests can patch it.
+
+    While ``overrides.no_sleep`` is set it only yields to the event loop once.
+    """
+    await asyncio.sleep(0 if overrides.no_sleep else seconds)
 
 
 def get_logger(logger: LoggerLike = None) -> logging.Logger:
@@ -59,7 +126,7 @@ def is_async(func: Callable[..., Any]) -> bool:
         func = func.func
     if inspect.iscoroutinefunction(func):
         return True
-    if inspect.isclass(func) or inspect.isroutine(func):
+    if inspect.isclass(func) or inspect.isfunction(func) or inspect.ismethod(func):
         return False
     # Look the method up on the type, as the call itself does.
     call = inspect.getattr_static(type(func), "__call__", None)
