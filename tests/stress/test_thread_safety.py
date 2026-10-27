@@ -258,7 +258,6 @@ def _run_in_daemon(fn: Callable[[], Any], timeout: float = 2.0) -> Any:
 
 
 @needs_eager
-@pytest.mark.xfail(strict=True, reason="race: memoize(async) self-deadlocks under eager tasks")
 def test_memoize_async_with_eager_task_factory() -> None:
     @memoize
     async def double(k: int) -> int:
@@ -304,7 +303,6 @@ def test_once_sync_reset_between_rounds() -> None:
     assert runs.total == 30
 
 
-@pytest.mark.xfail(strict=True, reason="race: once(async) runs once per event loop, not once")
 def test_once_async_across_event_loops_runs_once() -> None:
     runs = AtomicCounter()
 

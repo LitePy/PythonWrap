@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import datetime
 import functools
 import inspect
 import threading
 import weakref
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable, Hashable
+from collections.abc import Awaitable, Callable, Coroutine, Hashable
 from typing import Any, Concatenate, Generic, NamedTuple, ParamSpec, Protocol, TypeVar, overload
 
 from python_wrap import _core
@@ -270,6 +271,55 @@ async def _await_shared(task: asyncio.Future[Any]) -> Any:
 
     task.add_done_callback(forward)
     return await outer
+
+
+def _shared_future() -> asyncio.Future[Any]:
+    """A future of the running loop that in-flight callers share (created under a lock)."""
+    fut: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
+    fut.add_done_callback(_retrieve)
+    return fut
+
+
+def _copy_outcome(source: asyncio.Future[Any], dest: asyncio.Future[Any]) -> None:
+    if dest.done():
+        _retrieve(source)
+    elif source.cancelled():
+        dest.cancel()
+    elif (exc := source.exception()) is not None:
+        dest.set_exception(exc)
+    else:
+        dest.set_result(source.result())
+
+
+def _start(
+    coro: Coroutine[Any, Any, Any],
+    shared: asyncio.Future[Any],
+    on_done: Callable[[asyncio.Future[Any] | None], None],
+) -> None:
+    """Run ``coro`` as a task and copy its outcome into ``shared``.
+
+    Call it WITHOUT holding a lock: under an eager task factory (Python 3.12+) the
+    coroutine may run to completion inside ``ensure_future``. The caller registers
+    ``shared`` in its in-flight bookkeeping (under its lock) before calling this, so the
+    bookkeeping is correct whether the task starts lazily or eagerly. ``on_done`` gets
+    the finished task (or None if no task could be created) and must drop that entry.
+    """
+    try:
+        task = asyncio.ensure_future(coro)
+    except BaseException as exc:
+        coro.close()
+        on_done(None)
+        if not shared.done():
+            shared.set_exception(exc)
+        raise
+
+    def finish(t: asyncio.Future[Any]) -> None:
+        try:
+            on_done(t)
+        finally:
+            _copy_outcome(t, shared)
+
+    task.add_done_callback(finish)
 
 
 def _ttl_seconds(ttl: float | datetime.timedelta | None) -> float | None:
@@ -580,37 +630,37 @@ def memoize(
                 with lock:
                     loop = asyncio.get_running_loop()
                     loop_inflight = inflight.setdefault(loop, {})
-                    task = loop_inflight.get(k)
-                    if task is None:
+                    shared_fut = loop_inflight.get(k)
+                    if shared_fut is None:
                         misses += 1
                         g = gen
                         shared = False
-
-                        async def run() -> Any:
-                            try:
-                                try:
-                                    result = await f(*args, **kwargs)
-                                except exc_types as exc:
-                                    if not isinstance(exc, asyncio.CancelledError):
-                                        save(k, exc, g, True)
-                                    raise
-                                save(k, result, g)
-                                return result
-                            finally:
-                                with lock:
-                                    if loop_inflight.get(k) is asyncio.current_task():
-                                        del loop_inflight[k]
-
-                        task = asyncio.ensure_future(run())
-                        task.add_done_callback(_retrieve)
-                        loop_inflight[k] = task
+                        shared_fut = loop_inflight[k] = _shared_future()
                     else:
                         hits += 1
                         shared = True
+                if not shared:
+
+                    async def run() -> Any:
+                        try:
+                            result = await f(*args, **kwargs)
+                        except exc_types as exc:
+                            if not isinstance(exc, asyncio.CancelledError):
+                                save(k, exc, g, True)
+                            raise
+                        save(k, result, g)
+                        return result
+
+                    def done(_t: asyncio.Future[Any] | None, k: Hashable = k) -> None:
+                        with lock:
+                            if loop_inflight.get(k) is shared_fut:
+                                del loop_inflight[k]
+
+                    _start(run(), shared_fut, done)
                 if _core.listeners:
                     _core.emit("cache.hit" if shared else "cache.miss", name)
                 # one cancelled caller must not cancel the shared computation
-                return await _await_shared(task)
+                return await _await_shared(shared_fut)
 
             wrapper: Any = awrapper
         else:
@@ -705,6 +755,39 @@ def cache(
 
 # --------------------------------------------------------------------------- once
 
+_RETRY: Any = _Tag("retry")
+
+
+class _Flight:
+    """An async `once` run in progress, shared by every thread and event loop.
+
+    ``shared`` belongs to the owning loop (callers on that loop await it, so they see
+    the task's own outcome, cancellation included); ``done`` is a thread-level future
+    that callers on other loops await through `asyncio.wrap_future`. A cancelled run
+    resolves ``done`` with ``_RETRY`` so those callers start a new run themselves.
+    """
+
+    __slots__ = ("done", "loop", "shared")
+
+    def __init__(self, loop: asyncio.AbstractEventLoop, shared: asyncio.Future[Any]) -> None:
+        self.loop = loop
+        self.shared = shared
+        self.done: concurrent.futures.Future[Any] = concurrent.futures.Future()
+
+    def publish(self, task: asyncio.Future[Any] | None) -> None:
+        if self.done.done():
+            return
+        if task is None or task.cancelled():
+            self.abandon()
+        elif (exc := task.exception()) is not None:
+            self.done.set_exception(exc)
+        else:
+            self.done.set_result(task.result())
+
+    def abandon(self) -> None:
+        if not self.done.done():
+            self.done.set_result(_RETRY)
+
 
 @overload
 def once(func: Callable[P, R], /) -> Once[P, R]: ...
@@ -714,7 +797,8 @@ def once(func: Callable[..., Any] | None = None, /) -> Any:
     """Run the function a single time; later calls return the first result.
 
     Arguments of later calls are ignored. Thread-safe (double-checked lock) and
-    async-safe: concurrent first awaits share one task. If the first call raises, the
+    async-safe: concurrent first awaits share one run, even across threads that each
+    run their own event loop (it runs once per process). If the first call raises, the
     function is not marked done and the next call tries again. The wrapper has
     ``.reset()`` and a ``.called`` flag. While ``python_wrap.testing.disable_caching()``
     is active it runs the function on every call and stores nothing.
@@ -735,44 +819,53 @@ def once(func: Callable[..., Any] | None = None, /) -> Any:
 
     def decorate(f: Callable[..., Any]) -> Any:
         lock = threading.RLock()
-        state: dict[str, Any] = {"done": False, "result": None, "gen": 0}
-        # In-flight task per event loop (a task cannot be awaited from another loop).
-        tasks: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Future[Any]] = (
-            weakref.WeakKeyDictionary()
-        )
+        # "flight" is the run in progress (shared by every thread and event loop).
+        state: dict[str, Any] = {"done": False, "result": None, "gen": 0, "flight": None}
 
         if _core.is_async(f):
+
+            def finish(flight: _Flight, task: asyncio.Future[Any] | None) -> None:
+                with lock:
+                    if state["flight"] is flight:
+                        state["flight"] = None
+                    flight.publish(task)  # under the lock: abandon() may race from a thread
 
             @functools.wraps(f)
             async def awrapper(*args: Any, **kwargs: Any) -> Any:
                 if _core.overrides.disable_caching:
                     return await f(*args, **kwargs)
-                if state["done"]:
-                    return state["result"]
-                with lock:
+                while True:
                     if state["done"]:
                         return state["result"]
-                    loop = asyncio.get_running_loop()
-                    task = tasks.get(loop)
-                    if task is None:
-                        gen = state["gen"]
+                    with lock:
+                        if state["done"]:
+                            return state["result"]
+                        loop = asyncio.get_running_loop()
+                        flight: _Flight | None = state["flight"]
+                        if flight is not None and flight.loop.is_closed():
+                            flight.abandon()  # its loop died: waiters elsewhere retry
+                            flight = None
+                        owner = flight is None
+                        if flight is None:
+                            flight = state["flight"] = _Flight(loop, _shared_future())
+                            gen = state["gen"]
+                    if owner:
 
-                        async def run() -> Any:
-                            try:
-                                result = await f(*args, **kwargs)
-                                with lock:
-                                    if gen == state["gen"]:  # reset() did not run meanwhile
-                                        state.update(done=True, result=result)
-                                        wrapper.called = True
-                                return result
-                            finally:
-                                with lock:
-                                    if tasks.get(loop) is asyncio.current_task():
-                                        del tasks[loop]
+                        async def run(gen: int = gen) -> Any:
+                            result = await f(*args, **kwargs)
+                            with lock:
+                                if gen == state["gen"]:  # reset() did not run meanwhile
+                                    state.update(done=True, result=result)
+                                    wrapper.called = True
+                            return result
 
-                        task = tasks[loop] = asyncio.ensure_future(run())
-                        task.add_done_callback(_retrieve)
-                return await _await_shared(task)
+                        _start(run(), flight.shared, functools.partial(finish, flight))
+                    if flight.loop is loop:
+                        return await _await_shared(flight.shared)
+                    # Another event loop runs it: wait on the thread-level future.
+                    result = await _await_shared(asyncio.wrap_future(flight.done))
+                    if result is not _RETRY:
+                        return result
 
             wrapper: Any = awrapper
         else:
@@ -794,8 +887,7 @@ def once(func: Callable[..., Any] | None = None, /) -> Any:
 
         def reset() -> None:
             with lock:
-                state.update(done=False, result=None, gen=state["gen"] + 1)
-                tasks.clear()
+                state.update(done=False, result=None, gen=state["gen"] + 1, flight=None)
                 wrapper.called = False
 
         wrapper.reset = reset
@@ -930,25 +1022,27 @@ class CachedProperty(Generic[T]):
             if entry is not None and (entry[1] is None or _core.monotonic() < entry[1]):
                 return entry[0]
             per_loop = state.tasks.setdefault(asyncio.get_running_loop(), {})
-            task = per_loop.get(name)
-            if task is None:
+            shared = per_loop.get(name)
+            owner = shared is None
+            if shared is None:
+                shared = per_loop[name] = _shared_future()
                 gen = state.gens.get(name, 0)
+        if owner:
 
-                async def run() -> Any:
-                    try:
-                        value = await self.func(instance)
-                        with lock:
-                            if state.gens.get(name, 0) == gen:  # not invalidated meanwhile
-                                self._store(state, value)
-                        return value
-                    finally:
-                        with lock:
-                            if per_loop.get(name) is asyncio.current_task():
-                                del per_loop[name]
+            async def run() -> Any:
+                value = await self.func(instance)
+                with lock:
+                    if state.gens.get(name, 0) == gen:  # not invalidated meanwhile
+                        self._store(state, value)
+                return value
 
-                task = per_loop[name] = asyncio.ensure_future(run())
-                task.add_done_callback(_retrieve)
-        return await _await_shared(task)
+            def done(_t: asyncio.Future[Any] | None) -> None:
+                with lock:
+                    if per_loop.get(name) is shared:
+                        del per_loop[name]
+
+            _start(run(), shared, done)
+        return await _await_shared(shared)
 
     def __delete__(self, instance: object) -> None:
         state = _state_of(instance, create=False)
