@@ -108,6 +108,7 @@ nav:
       - Stacking decorators: stacking.md
       - Testing: testing.md
       - Limitations: limitations.md
+      - Performance: performance.md
   - Migrating to 0.2: migration.md
   - API reference:
       - api/index.md
