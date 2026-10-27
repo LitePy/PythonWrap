@@ -1107,3 +1107,279 @@ def test_async_cached_property_disable_caching() -> None:
         assert len(calls) == 2
 
     asyncio.run(main())
+
+
+# ------------------------------------------------- eager task factory / multiple loops
+
+needs_eager = pytest.mark.skipif(
+    not hasattr(asyncio, "eager_task_factory"), reason="needs asyncio.eager_task_factory (3.12+)"
+)
+
+
+def _run_eager(main: Callable[[], Awaitable[Any]]) -> Any:
+    """``asyncio.run(main())`` with the eager task factory, failing fast instead of hanging."""
+
+    async def eager_main() -> Any:
+        asyncio.get_running_loop().set_task_factory(asyncio.eager_task_factory)  # type: ignore[attr-defined]
+        return await main()
+
+    out: list[Any] = []
+    t = threading.Thread(target=lambda: out.append(asyncio.run(eager_main())), daemon=True)
+    t.start()
+    t.join(5)
+    assert not t.is_alive(), "deadlocked under eager_task_factory"
+    return out[0]
+
+
+@needs_eager
+def test_eager_memoize_no_deadlock_and_no_stale_inflight() -> None:
+    calls: list[int] = []
+
+    @memoize(cache_exceptions=KeyError)
+    async def f(x: int) -> int:
+        calls.append(x)
+        if x < 0:
+            raise ValueError("no")
+        return x * 2
+
+    async def main() -> list[Any]:
+        out: list[Any] = [await f(1), await f(1)]
+        for _ in range(2):  # a failure is not cached and leaves no finished task behind
+            with pytest.raises(ValueError):
+                await f(-1)
+        f.cache_clear()
+        out.append(await f(1))
+        out += await asyncio.gather(f(2), f(2))  # suspending-free runs still share/cache
+        return out
+
+    assert _run_eager(main) == [2, 2, 2, 4, 4]
+    assert calls == [1, -1, -1, 1, 2]
+
+
+@needs_eager
+def test_eager_memoize_suspending_run_is_shared() -> None:
+    calls = 0
+
+    @memoize
+    async def f() -> int:
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.01)
+        return calls
+
+    async def main() -> list[int]:
+        return list(await asyncio.gather(f(), f(), f()))
+
+    assert _run_eager(main) == [1, 1, 1]
+    assert calls == 1
+
+
+@needs_eager
+def test_eager_once_failure_retries_and_success_sticks() -> None:
+    calls = 0
+
+    @once
+    async def init() -> int:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ValueError("first fails")
+        return calls
+
+    async def main() -> list[int]:
+        with pytest.raises(ValueError):
+            await init()
+        return [await init(), await init()]
+
+    assert _run_eager(main) == [2, 2]
+    assert calls == 2
+
+
+@needs_eager
+def test_eager_cached_property_failure_retries_and_caches() -> None:
+    calls = 0
+
+    class C:
+        @cached_property
+        async def v(self) -> int:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise ValueError("first fails")
+            return calls
+
+    async def main() -> list[int]:
+        c = C()
+        with pytest.raises(ValueError):
+            await c.v
+        return [await c.v, await c.v]
+
+    assert _run_eager(main) == [2, 2]
+    assert calls == 2
+
+
+def _in_loops(n: int, main: Callable[[], Awaitable[Any]]) -> list[Any]:
+    """Run ``asyncio.run(main())`` in ``n`` threads that start together."""
+    barrier = threading.Barrier(n)
+    out: list[Any] = []
+    errors: list[BaseException] = []
+
+    def worker() -> None:
+        barrier.wait()
+        try:
+            out.append(asyncio.run(main()))  # type: ignore[arg-type]
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(5)
+    return out + errors
+
+
+def test_async_once_runs_once_across_event_loops() -> None:
+    runs = 0
+    runs_lock = threading.Lock()
+
+    @once
+    async def setup() -> str:
+        nonlocal runs
+        with runs_lock:
+            runs += 1
+        await asyncio.sleep(0.03)
+        return "ready"
+
+    async def main() -> list[str]:
+        return list(await asyncio.gather(setup(), setup()))
+
+    assert _in_loops(4, main) == [["ready", "ready"]] * 4
+    assert runs == 1 and setup.called
+
+
+def test_async_once_failure_shared_across_loops_then_retries() -> None:
+    runs = 0
+    runs_lock = threading.Lock()
+
+    @once
+    async def setup() -> int:
+        nonlocal runs
+        with runs_lock:
+            runs += 1
+            n = runs
+        await asyncio.sleep(0.03)
+        if n == 1:
+            raise ValueError("first fails")
+        return n
+
+    results = _in_loops(3, setup)
+    assert runs == 1
+    assert len(results) == 3 and all(isinstance(r, ValueError) for r in results)
+    assert not setup.called
+    assert asyncio.run(setup()) == 2
+
+
+def test_async_once_cancelled_owner_lets_other_loop_take_over() -> None:
+    runs = 0
+    started = threading.Event()
+    owner_cancelled = threading.Event()
+
+    @once
+    async def setup() -> int:
+        nonlocal runs
+        runs += 1
+        n = runs
+        started.set()
+        await asyncio.sleep(0.03)
+        return n
+
+    async def owner() -> None:
+        t = asyncio.ensure_future(setup())
+        await asyncio.sleep(0.005)
+        t.cancel()  # cancels only the caller; the run itself keeps going ...
+        await asyncio.sleep(0)
+        for task in asyncio.all_tasks():  # ... so cancel the run task too
+            if task is not asyncio.current_task():
+                task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await t
+        owner_cancelled.set()
+
+    def other() -> int:
+        started.wait(1)
+        return asyncio.run(setup())
+
+    out: list[int] = []
+    th = threading.Thread(target=lambda: out.append(other()))
+    th.start()
+    asyncio.run(owner())
+    th.join(5)
+    assert owner_cancelled.is_set()
+    assert out == [2] and runs == 2
+    assert asyncio.run(setup()) == 2
+
+
+def test_async_once_takes_over_from_a_closed_loop() -> None:
+    calls = 0
+
+    @once
+    async def setup() -> int:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            await asyncio.sleep(10)  # stranded: its loop is closed while it waits
+        return calls
+
+    dead = asyncio.new_event_loop()
+    dead.set_exception_handler(lambda _l, _c: None)  # silence 'Task was destroyed'
+    stranded = dead.create_task(setup())
+    dead.run_until_complete(asyncio.sleep(0.005))  # the run is now in flight on `dead`
+    dead.close()
+    assert not stranded.done()
+    # The stale flight must not block other loops forever: a new loop runs it again.
+    assert asyncio.run(asyncio.wait_for(setup(), 1)) == 2
+    assert asyncio.run(setup()) == 2 and calls == 2
+
+
+def test_async_once_reset_while_in_flight_on_another_loop() -> None:
+    gate = threading.Event()
+
+    @once
+    async def setup() -> int:
+        await asyncio.sleep(0.03)
+        return 1
+
+    out: list[int] = []
+    th = threading.Thread(target=lambda: (out.append(asyncio.run(setup())), gate.set()))
+    th.start()
+    asyncio.run(asyncio.sleep(0.01))
+    setup.reset()  # the in-flight result is discarded for later callers
+    gate.wait(1)
+    th.join(5)
+    assert out == [1]
+    assert not setup.called
+
+
+@needs_eager
+def test_eager_memoize_task_creation_failure_cleans_up(monkeypatch: pytest.MonkeyPatch) -> None:
+    @memoize
+    async def f() -> int:
+        return 1
+
+    real = asyncio.ensure_future
+    fail = [True]
+
+    def flaky(coro: Any, **kw: Any) -> Any:
+        if fail.pop() if fail else False:
+            raise RuntimeError("cannot schedule")
+        return real(coro, **kw)
+
+    monkeypatch.setattr(asyncio, "ensure_future", flaky)
+
+    async def main() -> int:
+        with pytest.raises(RuntimeError, match="cannot schedule"):
+            await f()
+        return await f()  # nothing stale is left in flight
+
+    assert _run_eager(main) == 1
