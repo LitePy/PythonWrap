@@ -134,30 +134,59 @@ def _short(value: object, max_length: int) -> str:
     return text
 
 
-def _bind_arguments(
-    sig: inspect.Signature | None,
-    args: tuple[Any, ...],
-    kwargs: dict[str, Any],
-    is_secret: Callable[[str], bool],
-) -> dict[str, Any]:
-    """Map every passed argument to its parameter name, masking sensitive ones."""
-    named: dict[str, Any] = {}
-    bound = None
-    if sig is not None:
-        try:
-            bound = sig.bind(*args, **kwargs)
-        except TypeError:
-            bound = None
-    if sig is None or bound is None:  # the call is invalid anyway; show what we were given
-        named = {f"arg{i}": v for i, v in enumerate(args)}
-        named.update(kwargs)
-    else:
-        for name, value in bound.arguments.items():
-            if sig.parameters[name].kind is inspect.Parameter.VAR_KEYWORD:
-                named.update(value)
-            else:
-                named[name] = value
-    return {k: (_MASK if is_secret(k) else v) for k, v in named.items()}
+class _ArgBinder:
+    """Maps a call's arguments to parameter names, masking sensitive ones.
+
+    The signature is analysed once. A call that passes plain positional parameters only
+    (no keywords, no ``*args`` / ``**kwargs`` in the signature, no excess arguments) is
+    named straight from a precomputed name tuple; everything else goes through
+    ``Signature.bind``. Redaction is decided once per parameter name.
+    """
+
+    def __init__(self, sig: inspect.Signature | None, is_secret: Callable[[str], bool]) -> None:
+        self.sig = sig
+        self.is_secret = is_secret
+        self.names: tuple[str, ...] = ()
+        self.flags: tuple[bool, ...] = ()
+        self.secret_names: dict[str, bool] = {}
+        self.fast_max = -1
+        if sig is not None:
+            params = list(sig.parameters.values())
+            self.secret_names = {p.name: is_secret(p.name) for p in params}
+            plain = (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+            if all(p.kind in plain for p in params):
+                self.names = tuple(p.name for p in params)
+                self.flags = tuple(self.secret_names[n] for n in self.names)
+                self.fast_max = len(params)
+
+    def _secret(self, name: str) -> bool:
+        known = self.secret_names.get(name)
+        return self.is_secret(name) if known is None else known
+
+    def __call__(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, Any]:
+        if not kwargs and len(args) <= self.fast_max:
+            return {
+                n: (_MASK if secret else v)
+                for n, secret, v in zip(self.names, self.flags, args, strict=False)
+            }
+        sig = self.sig
+        bound = None
+        if sig is not None:
+            try:
+                bound = sig.bind(*args, **kwargs)
+            except TypeError:
+                bound = None
+        named: dict[str, Any] = {}
+        if sig is None or bound is None:  # the call is invalid anyway; show what we were given
+            named = {f"arg{i}": v for i, v in enumerate(args)}
+            named.update(kwargs)
+        else:
+            for name, value in bound.arguments.items():
+                if sig.parameters[name].kind is inspect.Parameter.VAR_KEYWORD:
+                    named.update(value)
+                else:
+                    named[name] = value
+        return {k: (_MASK if self._secret(k) else v) for k, v in named.items()}
 
 
 def _signature(func: Callable[..., Any]) -> inspect.Signature | None:
@@ -175,8 +204,17 @@ def _format_call(name: str, arguments: Mapping[str, Any], max_length: int) -> st
     return f"{name}({', '.join(parts)})"
 
 
+_internal_files: dict[str, bool] = {}
+
+
 def _is_internal(filename: str) -> bool:
-    return os.path.dirname(os.path.abspath(filename)) == _PACKAGE_DIR
+    try:
+        return _internal_files[filename]
+    except KeyError:
+        result = os.path.dirname(os.path.abspath(filename)) == _PACKAGE_DIR
+        if len(_internal_files) < 4096:  # co_filename values are few; stay bounded anyway
+            _internal_files[filename] = result
+        return result
 
 
 def _external_frame() -> FrameType | None:
@@ -370,11 +408,11 @@ def log_args(
     def decorate(f: Callable[P, R]) -> Callable[P, R]:
         lg = _core.get_logger(logger)
         name = _core.qualname(f)
-        sig = _signature(f)
+        binder = _ArgBinder(_signature(f), secret)
 
         def start(args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
             if lg.isEnabledFor(level):
-                bound = _bind_arguments(sig, args, kwargs, secret)
+                bound = binder(args, kwargs)
                 _log(lg, level, "Calling %s", _format_call(name, bound, max_length))
 
         return _instrument(f, start, lambda state, ok, value: None)
@@ -523,22 +561,28 @@ def audit(
     def decorate(f: Callable[P, R]) -> Callable[P, R]:
         lg = _core.get_logger(logger)
         name = _core.qualname(f)
-        sig = _signature(f)
+        binder = _ArgBinder(_signature(f), secret)
 
         def start(
             args: tuple[Any, ...], kwargs: dict[str, Any]
-        ) -> tuple[datetime, str, dict[str, Any], float, dict[str, Any]]:
+        ) -> tuple[datetime, str, dict[str, Any], float, dict[str, Any]] | None:
+            if sink is None and not lg.isEnabledFor(level):
+                return None  # nobody would see the record: skip building it
             return (
                 datetime.now(timezone.utc),
                 _caller_location(),
-                _bind_arguments(sig, args, kwargs, secret),
+                binder(args, kwargs),
                 _core.perf_counter(),
                 current_log_context(),
             )
 
         def finish(
-            state: tuple[datetime, str, dict[str, Any], float, dict[str, Any]], ok: bool, value: Any
+            state: tuple[datetime, str, dict[str, Any], float, dict[str, Any]] | None,
+            ok: bool,
+            value: Any,
         ) -> None:
+            if state is None:
+                return
             timestamp, caller, arguments, began, context = state
             record = AuditRecord(
                 function=name,
