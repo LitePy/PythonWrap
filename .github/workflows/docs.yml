@@ -41,3 +41,10 @@ jobs:
 
       - name: Build the site
         run: uv run --no-sync mkdocs build --strict
+        env:
+          NO_MKDOCS_2_WARNING: "1"
+
+      # Every ```python block in docs/ is executed, so an example that drifts from the
+      # real API fails review instead of misleading a reader.
+      - name: Run the documentation examples
+        run: uv run --no-sync python scripts/check_docs_examples.py
