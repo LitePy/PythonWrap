@@ -7,9 +7,10 @@ import datetime
 import functools
 import inspect
 import threading
+import weakref
 from collections import OrderedDict
 from collections.abc import Callable, Hashable
-from typing import Any, NamedTuple, ParamSpec, Protocol, TypeVar, overload
+from typing import Any, Concatenate, NamedTuple, ParamSpec, Protocol, TypeVar, overload
 
 from python_wrap import _core
 
@@ -18,6 +19,7 @@ __all__ = ["CacheInfo", "cache", "memoize", "once"]
 P = ParamSpec("P")
 R = TypeVar("R")
 R_co = TypeVar("R_co", covariant=True)
+P2 = ParamSpec("P2")
 
 _MISSING: Any = object()
 
@@ -36,7 +38,12 @@ class Memoized(Protocol[P, R_co]):
 
     def __call__(self, *args: P.args, **kwargs: P.kwargs) -> R_co: ...
 
-    def __get__(self, instance: object, owner: type | None = None) -> Memoized[..., R_co]: ...
+    @overload
+    def __get__(self, instance: None, owner: type | None = None) -> Memoized[P, R_co]: ...
+    @overload
+    def __get__(
+        self: Memoized[Concatenate[Any, P2], R_co], instance: object, owner: type | None = None
+    ) -> Memoized[P2, R_co]: ...
 
     def cache_clear(self) -> None:
         """Drop every cached entry and reset the statistics."""
@@ -55,7 +62,12 @@ class Once(Protocol[P, R_co]):
 
     def __call__(self, *args: P.args, **kwargs: P.kwargs) -> R_co: ...
 
-    def __get__(self, instance: object, owner: type | None = None) -> Once[..., R_co]: ...
+    @overload
+    def __get__(self, instance: None, owner: type | None = None) -> Once[P, R_co]: ...
+    @overload
+    def __get__(
+        self: Once[Concatenate[Any, P2], R_co], instance: object, owner: type | None = None
+    ) -> Once[P2, R_co]: ...
 
     def reset(self) -> None:
         """Forget the stored result so the next call runs the function again."""
@@ -95,10 +107,26 @@ def _freeze(value: Any) -> Hashable:
         return (_DICT, frozenset((_freeze(k), _freeze(v)) for k, v in value.items()))
     if isinstance(value, (set, frozenset)):
         return (_SET, frozenset(_freeze(v) for v in value))
-    raise TypeError(
-        f"memoize: argument of type {type(value).__name__!r} is not hashable; "
-        "pass key=<callable> to build the cache key yourself"
-    )
+    raise _Unhashable(type(value).__name__)
+
+
+class _Unhashable(TypeError):
+    """Raised by :func:`_freeze`; carries the offending type name."""
+
+    def __init__(self, type_name: str) -> None:
+        super().__init__(type_name)
+        self.type_name = type_name
+
+
+def _freeze_arg(name: str, value: Any) -> Hashable:
+    try:
+        return _freeze(value)
+    except _Unhashable as exc:
+        raise TypeError(
+            f"memoize: argument {name!r} (of type {exc.type_name!r}) is not hashable; "
+            "pass key=<callable> to build the cache key yourself (for methods, a key "
+            "that ignores or replaces `self`), or use functools.cached_property"
+        ) from None
 
 
 def _make_key_builder(
@@ -121,10 +149,12 @@ def _make_key_builder(
         if sig is not None:
             bound = sig.bind(*args, **kwargs)
             bound.apply_defaults()
-            values = list(bound.arguments.values())
+            named = list(bound.arguments.items())
         else:
-            values = [*args, *sorted(kwargs.items())]
-        frozen = tuple(_freeze(v) for v in values)
+            named = [(f"#{i}", v) for i, v in enumerate(args)]
+            named += [(n, v) for n, v in sorted(kwargs.items())]
+        values = [v for _, v in named]
+        frozen = tuple(_freeze_arg(n, v) for n, v in named)
         if typed:
             return (frozen, tuple(type(v) for v in values))
         return frozen
@@ -133,6 +163,35 @@ def _make_key_builder(
 
 
 # ------------------------------------------------------------------------ memoize
+
+
+def _retrieve(task: asyncio.Future[Any]) -> None:
+    """Mark a shared task's exception as retrieved (all callers may have been cancelled)."""
+    if not task.cancelled():
+        task.exception()
+
+
+async def _await_shared(task: asyncio.Future[Any]) -> Any:
+    """Await a shared task without letting one caller's cancellation cancel it.
+
+    Unlike ``asyncio.shield`` this never logs "exception in shielded future" when every
+    caller was cancelled before a failing task finished.
+    """
+    outer: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
+
+    def forward(t: asyncio.Future[Any]) -> None:
+        if outer.done():
+            if not t.cancelled():
+                t.exception()
+        elif t.cancelled():
+            outer.cancel()
+        elif (exc := t.exception()) is not None:
+            outer.set_exception(exc)
+        else:
+            outer.set_result(t.result())
+
+    task.add_done_callback(forward)
+    return await outer
 
 
 def _ttl_seconds(ttl: float | datetime.timedelta | None) -> float | None:
@@ -178,6 +237,11 @@ def memoize(
     ``async def`` functions the awaited result is cached and concurrent awaits of the
     same missing key share a single in-flight task, so it runs once.
 
+    A method of a class whose instances are unhashable (for example an ``eq=True``
+    dataclass) fails with a ``TypeError`` naming ``self``: ``id(self)`` is deliberately not
+    used as a fallback because ids are reused after garbage collection. Pass ``key=`` or
+    use :func:`functools.cached_property` instead.
+
     Methods: ``self`` is part of the key, so results are per instance. The cache holds a
     strong reference to every instance it has seen, keeping it alive; use ``maxsize`` or
     ``ttl`` (or ``key=`` ignoring ``self``) on methods of many short-lived objects.
@@ -215,9 +279,18 @@ def memoize(
     def decorate(f: Callable[..., Any]) -> Any:
         build_key = _make_key_builder(f, typed, key)
         store: OrderedDict[Hashable, tuple[Any, float | None]] = OrderedDict()
-        inflight: dict[Hashable, asyncio.Future[Any]] = {}
+        # In-flight tasks are per event loop: a task cannot be awaited from another loop.
+        inflight: weakref.WeakKeyDictionary[
+            asyncio.AbstractEventLoop, dict[Hashable, asyncio.Future[Any]]
+        ] = weakref.WeakKeyDictionary()
         lock = threading.Lock()
-        stats = {"hits": 0, "misses": 0, "gen": 0}
+        stats = {"hits": 0, "misses": 0, "gen": 0, "inserts": 0, "live": 0}
+
+        def sweep() -> None:
+            # Caller holds the lock. Drop every expired entry.
+            now = _core.monotonic()
+            for k in [k for k, (_, exp) in store.items() if exp is not None and now >= exp]:
+                del store[k]
 
         def lookup(k: Hashable) -> Any:
             # Caller holds the lock.
@@ -238,6 +311,13 @@ def memoize(
                 expires = None if ttl_s is None else _core.monotonic() + ttl_s
                 store[k] = (value, expires)
                 store.move_to_end(k)
+                if ttl_s is not None:
+                    # Amortised O(1): a full sweep only after at least
+                    # max(64, entries left by the previous sweep) inserts.
+                    stats["inserts"] += 1
+                    if stats["inserts"] >= max(64, stats["live"]):
+                        sweep()
+                        stats.update(inserts=0, live=len(store))
                 if maxsize is not None:
                     while len(store) > maxsize:
                         store.popitem(last=False)
@@ -246,13 +326,11 @@ def memoize(
             with lock:
                 store.clear()
                 inflight.clear()
-                stats.update(hits=0, misses=0, gen=stats["gen"] + 1)
+                stats.update(hits=0, misses=0, inserts=0, live=0, gen=stats["gen"] + 1)
 
         def cache_info() -> CacheInfo:
             with lock:
-                now = _core.monotonic()
-                for k in [k for k, (_, exp) in store.items() if exp is not None and now >= exp]:
-                    del store[k]
+                sweep()
                 return CacheInfo(stats["hits"], stats["misses"], maxsize, len(store))
 
         def cache_delete(*args: Any, **kwargs: Any) -> bool:
@@ -270,7 +348,9 @@ def memoize(
                     if value is not _MISSING:
                         stats["hits"] += 1
                         return value
-                    task = inflight.get(k)
+                    loop = asyncio.get_running_loop()
+                    loop_inflight = inflight.setdefault(loop, {})
+                    task = loop_inflight.get(k)
                     if task is None:
                         stats["misses"] += 1
                         gen = stats["gen"]
@@ -282,15 +362,16 @@ def memoize(
                                 return result
                             finally:
                                 with lock:
-                                    if inflight.get(k) is asyncio.current_task():
-                                        del inflight[k]
+                                    if loop_inflight.get(k) is asyncio.current_task():
+                                        del loop_inflight[k]
 
                         task = asyncio.ensure_future(run())
-                        inflight[k] = task
+                        task.add_done_callback(_retrieve)
+                        loop_inflight[k] = task
                     else:
                         stats["hits"] += 1
-                # shield: one cancelled caller must not cancel the shared computation
-                return await asyncio.shield(task)
+                # one cancelled caller must not cancel the shared computation
+                return await _await_shared(task)
 
             wrapper: Any = awrapper
         else:
@@ -375,7 +456,11 @@ def once(func: Callable[..., Any] | None = None, /) -> Any:
 
     def decorate(f: Callable[..., Any]) -> Any:
         lock = threading.RLock()
-        state: dict[str, Any] = {"done": False, "result": None, "task": None}
+        state: dict[str, Any] = {"done": False, "result": None, "gen": 0}
+        # In-flight task per event loop (a task cannot be awaited from another loop).
+        tasks: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Future[Any]] = (
+            weakref.WeakKeyDictionary()
+        )
 
         if _core.is_async(f):
 
@@ -386,22 +471,27 @@ def once(func: Callable[..., Any] | None = None, /) -> Any:
                 with lock:
                     if state["done"]:
                         return state["result"]
-                    task = state["task"]
+                    loop = asyncio.get_running_loop()
+                    task = tasks.get(loop)
                     if task is None:
+                        gen = state["gen"]
 
                         async def run() -> Any:
                             try:
                                 result = await f(*args, **kwargs)
                                 with lock:
-                                    state.update(done=True, result=result)
-                                    wrapper.called = True
+                                    if gen == state["gen"]:  # reset() did not run meanwhile
+                                        state.update(done=True, result=result)
+                                        wrapper.called = True
                                 return result
                             finally:
                                 with lock:
-                                    state["task"] = None
+                                    if tasks.get(loop) is asyncio.current_task():
+                                        del tasks[loop]
 
-                        task = state["task"] = asyncio.ensure_future(run())
-                return await asyncio.shield(task)
+                        task = tasks[loop] = asyncio.ensure_future(run())
+                        task.add_done_callback(_retrieve)
+                return await _await_shared(task)
 
             wrapper: Any = awrapper
         else:
@@ -421,7 +511,8 @@ def once(func: Callable[..., Any] | None = None, /) -> Any:
 
         def reset() -> None:
             with lock:
-                state.update(done=False, result=None, task=None)
+                state.update(done=False, result=None, gen=state["gen"] + 1)
+                tasks.clear()
                 wrapper.called = False
 
         wrapper.reset = reset

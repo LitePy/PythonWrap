@@ -428,3 +428,137 @@ async def test_once_async_failure_retries() -> None:
         await f()
     assert f.called is False
     assert await f() == 2
+
+
+# ------------------------------------------------------------- review regressions
+
+
+def _run_in_threads(make_coro: Any, count: int = 2) -> list[Any]:
+    out: list[Any] = []
+
+    def worker() -> None:
+        try:
+            out.append(asyncio.run(make_coro()))
+        except Exception as exc:  # pragma: no cover - only on regression
+            out.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(count)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return out
+
+
+def test_async_memoize_concurrent_across_event_loops() -> None:
+    @memoize
+    async def slow(x: int) -> int:
+        await asyncio.sleep(0.03)
+        return x
+
+    assert _run_in_threads(lambda: slow(1)) == [1, 1]
+
+
+def test_async_once_concurrent_across_event_loops() -> None:
+    @once
+    async def init() -> int:
+        await asyncio.sleep(0.03)
+        return 7
+
+    assert _run_in_threads(init) == [7, 7]
+
+
+def test_memoize_ttl_without_maxsize_sweeps_expired_entries(fake_clock: FakeClock) -> None:
+    @memoize(ttl=1)
+    def f(x: int) -> int:
+        return x
+
+    for i in range(1000):
+        f(i)
+        fake_clock.advance(2)
+    sweep = next(
+        c.cell_contents
+        for c in f.cache_info.__closure__  # type: ignore[attr-defined]
+        if getattr(c.cell_contents, "__name__", "") == "sweep"
+    )
+    store = next(
+        c.cell_contents for c in sweep.__closure__ if hasattr(c.cell_contents, "move_to_end")
+    )
+    assert len(store) <= 130
+
+
+def test_memoized_bound_method_keeps_parameter_types() -> None:
+    class C:
+        @memoize
+        def m(self, x: int) -> int:
+            return x
+
+    assert C().m(2) == 2
+    # mypy (warn_unused_ignores) fails if bound methods lose their parameter types
+    assert C().m("wrong") == "wrong"  # type: ignore[arg-type]
+
+
+def test_async_memoize_failure_after_all_callers_cancelled_is_retrieved(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import gc
+
+    @memoize
+    async def boom() -> None:
+        await asyncio.sleep(0.02)
+        raise ValueError("down")
+
+    handler_calls: list[dict[str, Any]] = []
+
+    async def main() -> None:
+        asyncio.get_running_loop().set_exception_handler(lambda _l, ctx: handler_calls.append(ctx))
+        t = asyncio.create_task(boom())
+        await asyncio.sleep(0.005)
+        t.cancel()
+        await asyncio.sleep(0.05)
+        gc.collect()
+
+    asyncio.run(main())
+    assert handler_calls == []
+
+
+def test_memoize_dataclass_method_error_names_self() -> None:
+    from dataclasses import dataclass
+
+    @dataclass
+    class Repo:
+        name: str
+
+        @memoize
+        def size(self) -> int:
+            return len(self.name)
+
+    with pytest.raises(TypeError, match=r"argument 'self'.*key=.*cached_property"):
+        Repo("x").size()
+
+
+def test_async_once_reset_in_flight_does_not_run_twice() -> None:
+    calls = 0
+
+    @once
+    async def init() -> int:
+        nonlocal calls
+        calls += 1
+        n = calls
+        await asyncio.sleep(0.02)
+        if n == 1:
+            raise ValueError("old run fails")
+        return n
+
+    async def main() -> list[int]:
+        first = asyncio.create_task(init())
+        await asyncio.sleep(0.005)
+        init.reset()
+        second = asyncio.create_task(init())
+        with pytest.raises(ValueError):
+            await first  # old run ends first and must not clear the new run's task
+        third = asyncio.create_task(init())
+        return [await second, await third]
+
+    assert asyncio.run(main()) == [2, 2]
+    assert calls == 2
