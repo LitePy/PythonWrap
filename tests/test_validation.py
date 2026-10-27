@@ -847,7 +847,9 @@ def test_enforce_types_fast_path_numeric_tower_and_messages() -> None:
         f("x")  # type: ignore[arg-type]
     with pytest.raises(errors.ArgumentTypeError, match=r"parameter 'b' expected float, got str"):
         f(1, "x")  # type: ignore[arg-type]
-    with pytest.raises(errors.ArgumentTypeError, match=r"parameter 'd' expected str \| None"):
+    # 3.10 spells the hint Optional[str]; later versions print str | None.
+    optional_str = r"parameter 'd' expected (str \| None|Optional\[str\])"
+    with pytest.raises(errors.ArgumentTypeError, match=optional_str):
         f(1, 1.0, 0j, 5)  # type: ignore[arg-type]
     with pytest.raises(TypeError):
         f()  # type: ignore[call-arg]
