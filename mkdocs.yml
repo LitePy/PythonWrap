@@ -98,6 +98,7 @@ nav:
       - Async toolkit and bulkheads: guides/async-toolkit.md
       - Batching and hedging: guides/batching.md
       - Observability: guides/observability.md
+      - Metrics and events: guides/metrics.md
       - Validation: guides/validation.md
       - State safety: guides/state.md
       - Developer tools: guides/devtools.md
@@ -120,6 +121,8 @@ nav:
       - Hedging: api/hedging.md
       - Timing and profiling: api/timing.md
       - Logging and audit: api/logs.md
+      - Metrics: api/metrics.md
+      - Events: api/events.md
       - Validation: api/validation.md
       - State: api/state.md
       - Developer tools: api/devtools.md

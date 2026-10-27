@@ -385,3 +385,127 @@ def test_failing_finish_hook_never_replaces_result_or_exception(
             bad()
         assert asyncio.run(aok()) == 6
     assert sum("hook failed" in r.getMessage() for r in caplog.records) == 3
+
+
+# ------------------------------------------------------------------------- log_context
+
+
+def test_log_context_adds_fields_to_every_decorator(caplog: pytest.LogCaptureFixture) -> None:
+    from python_wrap import timing
+    from python_wrap.logs import current_log_context, log_context
+
+    caplog.set_level(logging.DEBUG, logger="python_wrap")
+    records: list[AuditRecord] = []
+
+    @log_args
+    @log_return
+    @audit(sink=records.append)
+    @trace(limit=1)
+    @timing
+    def f(x: int) -> int:
+        return x
+
+    assert current_log_context() == {}
+    f(1)
+    assert not any("request_id" in m for m in messages(caplog))
+    assert records[0].context == {}
+    caplog.clear()
+    with log_context(request_id="r%1") as fields:
+        assert fields == {"request_id": "r%1"}
+        with log_context(user="ana"):
+            assert current_log_context() == {"request_id": "r%1", "user": "ana"}
+            f(2)
+        assert current_log_context() == {"request_id": "r%1"}
+    assert current_log_context() == {}
+    assert records[1].context == {"request_id": "r%1", "user": "ana"}
+    assert caplog.records
+    for r in caplog.records:
+        assert r.context == {"request_id": "r%1", "user": "ana"}  # type: ignore[attr-defined]
+    suffix = "[request_id=r%1 user=ana]"
+    assert next(m for m in messages(caplog) if m.startswith("Calling")).endswith(suffix)
+    assert any(".f took" in m and m.endswith(suffix) for m in messages(caplog))
+
+
+def test_log_context_decorator_and_async(caplog: pytest.LogCaptureFixture) -> None:
+    from python_wrap.logs import current_log_context, log_context
+
+    caplog.set_level(logging.DEBUG, logger="python_wrap")
+
+    @log_context(job="nightly")
+    def sync() -> dict[str, object]:
+        return current_log_context()
+
+    @log_context(job="async")
+    async def coro() -> dict[str, object]:
+        await asyncio.sleep(0)
+        return current_log_context()
+
+    assert inspect.iscoroutinefunction(coro)
+    assert sync() == {"job": "nightly"}
+    assert asyncio.run(coro()) == {"job": "async"}
+    assert current_log_context() == {}
+
+    @log_return
+    async def work() -> int:
+        return 1
+
+    async def main() -> None:
+        async with log_context(tenant="t1"):
+            await work()
+
+    asyncio.run(main())
+    assert messages(caplog)[-1].endswith("work returned 1 [tenant=t1]")
+
+
+def test_log_context_is_isolated_per_task_and_thread() -> None:
+    import contextvars
+    import threading
+
+    from python_wrap.logs import current_log_context, log_context
+
+    async def worker(n: int) -> dict[str, object]:
+        with log_context(n=n):
+            await asyncio.sleep(0)
+            return current_log_context()
+
+    async def main() -> list[dict[str, object]]:
+        return list(await asyncio.gather(*(worker(i) for i in range(3))))
+
+    assert asyncio.run(main()) == [{"n": 0}, {"n": 1}, {"n": 2}]
+
+    seen: dict[str, dict[str, object]] = {}
+    with log_context(a=1):
+        t = threading.Thread(target=lambda: seen.update(plain=current_log_context()))
+        t.start()
+        t.join()
+        ctx = contextvars.copy_context()
+        t = threading.Thread(target=lambda: seen.update(copied=ctx.run(current_log_context)))
+        t.start()
+        t.join()
+    assert seen == {"plain": {}, "copied": {"a": 1}}
+
+
+def test_log_context_restores_on_error() -> None:
+    from python_wrap.logs import current_log_context, log_context
+
+    with pytest.raises(RuntimeError), log_context(a=1):
+        raise RuntimeError
+    assert current_log_context() == {}
+
+
+def test_log_context_unprintable_value(caplog: pytest.LogCaptureFixture) -> None:
+    from python_wrap.logs import log_context
+
+    class Bad:
+        def __str__(self) -> str:
+            raise RuntimeError
+
+    caplog.set_level(logging.DEBUG, logger="python_wrap")
+
+    @log_return
+    def f() -> int:
+        return 1
+
+    with log_context(bad=Bad()):
+        f()
+    assert "<unprintable Bad>" in messages(caplog)[-1]

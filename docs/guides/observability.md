@@ -297,3 +297,56 @@ assert handler() == 1
 ```
 
 Use it to answer "who is calling this?" while debugging. It defaults to `DEBUG`, so it is silent unless you enable that level.
+
+## `log_context`
+
+Bind fields such as a request id once, and have every python-wrap log line made underneath carry them. It works as a context manager (`with` and `async with`) and as a decorator, and blocks nest.
+
+```python
+import logging
+from python_wrap import log_args
+from python_wrap.logs import current_log_context, log_context
+
+class ListHandler(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__(logging.DEBUG)
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+log = logging.getLogger("context-demo")
+log.setLevel(logging.DEBUG)
+handler = ListHandler()
+log.addHandler(handler)
+
+@log_args(logger=log)
+def charge(amount: int) -> None: ...
+
+with log_context(request_id="r-42"):
+    with log_context(user="ana"):
+        assert current_log_context() == {"request_id": "r-42", "user": "ana"}
+        charge(5)
+
+record = handler.records[0]
+assert record.getMessage() == "Calling charge(amount=5) [request_id=r-42 user=ana]"
+assert record.context == {"request_id": "r-42", "user": "ana"}   # type: ignore[attr-defined]
+assert current_log_context() == {}
+```
+
+`log_args`, `log_return`, `audit`, `trace` and `timing` append ` [key=value ...]` to their message and attach the dict as `LogRecord.context`, so a JSON formatter can emit the fields as proper keys. `AuditRecord.context` holds the fields bound when the call started (an empty dict when none).
+
+As a decorator, the fields are bound for each call:
+
+```python
+import asyncio
+from python_wrap.logs import current_log_context, log_context
+
+@log_context(job="nightly")
+async def run() -> dict[str, object]:
+    return current_log_context()
+
+assert asyncio.run(run()) == {"job": "nightly"}
+```
+
+The fields live in a `contextvars.ContextVar`: every asyncio task and thread sees its own. A new thread starts **empty**; to carry the fields over, start it in a copied context with `contextvars.copy_context().run(...)` (`run_in_thread` and `asyncio.to_thread` already do this).
