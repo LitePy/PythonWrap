@@ -410,8 +410,9 @@ def transactional(func: Callable[..., Any] | None = None, /, *, logger: LoggerLi
     cleanest) so callers type-check without passing it; passing ``tx`` yourself raises
     ``TypeError``. Otherwise use `require_transaction` / `current_transaction` (a
     ``ContextVar``, correct across threads and asyncio tasks). Returning normally
-    commits, raising rolls back and re-raises. Nested ``@transactional`` calls each get their own transaction. Works for
-    sync and ``async def`` functions (async callbacks are awaited).
+    commits, raising rolls back and re-raises. Nested ``@transactional`` calls each get
+    their own transaction. Works for sync and ``async def`` functions (async callbacks
+    are awaited).
 
     v0.1's ``transactional`` was a no-op.
 
