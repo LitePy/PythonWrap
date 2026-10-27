@@ -82,13 +82,17 @@ class Memoized(Protocol[P, R_co]):
     def cache_info(self) -> CacheInfo:
         """Return hits, misses, maxsize and the current number of live entries."""
 
+    # The three lookups below take the full argument list of the decorated function.
+    # On a method that includes the instance (``obj.method.cache_get(obj, x)``):
+    # ``obj.method`` is a plain bound method, so its attributes are not bound.
+
     def cache_delete(self, *args: Any, **kwargs: Any) -> bool:
         """Drop the entry for these arguments. Returns True if one existed."""
 
-    def cache_contains(self, *args: P.args, **kwargs: P.kwargs) -> bool:
+    def cache_contains(self, *args: Any, **kwargs: Any) -> bool:
         """True if a live entry exists for these arguments (nothing is computed or counted)."""
 
-    def cache_get(self, *args: P.args, **kwargs: P.kwargs) -> Any:
+    def cache_get(self, *args: Any, **kwargs: Any) -> Any:
         """Return the cached result for these arguments without computing it.
 
         Raises ``KeyError`` when there is no live entry. A cached exception is raised.
@@ -418,7 +422,8 @@ def memoize(
     ``cache_delete(*args, **kwargs)``, ``cache_contains(*args, **kwargs)``,
     ``cache_get(*args, **kwargs)`` and ``cache_parameters()``. ``cache_contains`` and
     ``cache_get`` look an entry up without computing, counting a hit or miss, or
-    refreshing its LRU position.
+    refreshing its LRU position. All three take the decorated function's full argument
+    list, so on a method pass the instance too: ``obj.method.cache_get(obj, x)``.
 
     While ``python_wrap.testing.disable_caching()`` is active the cache is neither read
     nor written. Listeners registered with `python_wrap.events` receive ``cache.hit``,

@@ -1383,3 +1383,18 @@ def test_eager_memoize_task_creation_failure_cleans_up(monkeypatch: pytest.Monke
         return await f()  # nothing stale is left in flight
 
     assert _run_eager(main) == 1
+
+
+def test_cache_lookups_on_a_method_take_the_instance() -> None:
+    class Repo:
+        @memoize
+        def load(self, k: str) -> str:
+            return k.upper()
+
+    repo = Repo()
+    assert repo.load("a") == "A"
+    assert repo.load.cache_contains(repo, "a")
+    assert repo.load.cache_get(repo, "a") == "A"
+    assert Repo.load.cache_get(repo, "a") == "A"
+    assert repo.load.cache_delete(repo, "a")
+    assert not repo.load.cache_contains(repo, "a")

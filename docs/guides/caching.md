@@ -170,6 +170,8 @@ assert triple.cache_get(2) == 6              # raises KeyError when absent
 assert triple.cache_parameters()["maxsize"] == 8
 ```
 
+On a method, `cache_delete`, `cache_contains` and `cache_get` take the instance as the first argument, because `obj.method` is an ordinary bound method and its attributes are not bound: `repo.load.cache_get(repo, 42)`.
+
 `cache_get` is typed `Any` because for `async def` functions it returns the awaited result, not a coroutine. Pass `python_wrap.testing.disable_caching()` to bypass every cache in tests.
 
 ### Events

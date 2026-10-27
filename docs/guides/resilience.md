@@ -153,7 +153,7 @@ except ConnectionError:
 assert len(calls) >= 2
 ```
 
-`retry` also honours an enclosing [`deadline`](../api/deadline.md): it never sleeps past `deadline.remaining()`. If the next wait would outlast the deadline, or none is left, the last exception is re-raised at once (the same rule as `max_time`).
+`retry` also honours an enclosing [`deadline`](../api/deadline.md): it never sleeps past `remaining()` (from `python_wrap.deadline`). If the next wait would outlast the deadline, or none is left, the last exception is re-raised at once (the same rule as `max_time`).
 
 ```python
 from python_wrap import retry
@@ -543,6 +543,7 @@ A `timeout` limits one call. A **deadline** limits everything inside a block —
 A deadline does not interrupt anything by itself. Instead:
 
 * `timeout` (decorator or block) clamps its limit to the time the deadline has left. If the deadline has already passed, the call is not started and `TimeoutExpired` is raised at once.
+* Import the helpers from the module: `from python_wrap.deadline import check, deadline, remaining`. The package attribute `python_wrap.deadline` is the `deadline` function itself (the same is true of `retry` and `policy`), so `import python_wrap.deadline as m` does not give you the module.
 * `remaining()` returns the seconds left (or `None` outside any deadline). Pass it on, for example as an HTTP client's timeout, or use it to cap your own retry loop.
 * `check()` raises `TimeoutExpired` once the deadline has passed. Call it between steps of a long job.
 
