@@ -367,6 +367,9 @@ class CircuitBreaker:
         """
         if _core.is_async(func):
             return self._acall(func, args, kwargs)
+        return self._call_sync(func, args, kwargs)
+
+    def _call_sync(self, func: Callable[..., Any], args: Any, kwargs: Any) -> Any:
         generation, trial = self._acquire()
         try:
             result = func(*args, **kwargs)
@@ -403,7 +406,8 @@ class CircuitBreaker:
 
         @functools.wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
-            return self.call(func, *args, **kwargs)
+            # Sync vs async was decided above, once: no per-call detection.
+            return self._call_sync(func, args, kwargs)
 
         return cast(F, wrapper)
 

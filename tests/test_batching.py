@@ -509,3 +509,85 @@ def test_sync_call_needs_exactly_one_item():
         load(item=1)
     with pytest.raises(TypeError, match="not hashable"):
         load([1])
+
+
+# --------------------------------------------------------------------------- 0.2 perf
+
+
+async def test_async_max_size_one_runs_in_the_calling_task():
+    seen = []
+
+    @batch_calls(max_size=1, max_wait=10)
+    async def load(items):
+        seen.append((items, asyncio.current_task()))
+        return [i * 2 for i in items]
+
+    assert await load(3) == 6
+    assert seen == [([3], asyncio.current_task())]  # no extra task, no timer
+    assert only_current_task()
+    assert load.pending == 0
+
+
+async def test_async_inline_batch_errors_and_contract():
+    @batch_calls(max_size=1)
+    async def boom(items):
+        raise KeyError("x")
+
+    with pytest.raises(KeyError):
+        await boom(1)
+
+    @batch_calls(max_size=1)
+    async def wrong(items):
+        return []
+
+    with pytest.raises(BatchError):
+        await wrong(1)
+
+
+async def test_async_inline_batch_caller_cancel_and_aflush():
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    @batch_calls(max_size=1)
+    async def load(items):
+        started.set()
+        await release.wait()
+        return items
+
+    caller = asyncio.create_task(load(1))
+    await started.wait()
+    flusher = asyncio.create_task(load.aflush())
+    await asyncio.sleep(0)
+    assert not flusher.done()  # aflush waits for the batch run in the caller's task
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+    await asyncio.wait_for(flusher, 1)
+    release.set()
+    assert await load(2) == 2
+
+
+async def test_async_max_size_reached_by_follower_still_shares_one_task(fake_clock):
+    calls = []
+
+    @batch_calls(max_size=2, max_wait=10)
+    async def load(items):
+        calls.append(items)
+        return items
+
+    assert await asyncio.gather(load(1), load(2), load(1)) == [1, 2, 1]
+    assert calls == [[1, 2], [1]]  # the full batch closed; the late duplicate opens a new one
+
+
+async def test_sync_loader_in_event_loop_warns_once():
+    @batch_calls(max_size=1)
+    def load(items):
+        return items
+
+    with pytest.warns(RuntimeWarning, match="blocks the loop"):
+        assert load(1) == 1
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert load(2) == 2  # only once per loader

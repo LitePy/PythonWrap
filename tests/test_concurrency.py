@@ -1358,3 +1358,319 @@ def test_throttle_skipped_event(fake_clock, events):
     f()
     assert [e.name for e in events] == ["throttle.skipped"] * 2
     assert events[0].function.endswith("f")
+
+
+# --------------------------------------------------------------------------------------
+# 0.2 performance: pooled timeout workers, cheaper singleflight, limiter access
+# --------------------------------------------------------------------------------------
+
+
+def _worker_thread(**opts):
+    @timeout(1, use_signals=False, **opts)
+    def which():
+        return threading.current_thread()
+
+    return which
+
+
+def test_timeout_fallback_reuses_idle_worker_and_copies_context():
+    import contextvars
+
+    var = contextvars.ContextVar("var", default="unset")
+
+    @timeout(1, use_signals=False)
+    def probe():
+        return threading.current_thread(), var.get()
+
+    var.set("first")
+    t1, v1 = probe()
+    var.set("second")
+    t2, v2 = probe()
+    assert t1 is t2  # the idle worker was reused, not a new thread per call
+    assert t1.name.startswith("timeout-") and t1.daemon
+    assert (v1, v2) == ("first", "second")  # contextvars copied per call
+
+
+def test_timeout_fallback_abandons_worker_of_timed_out_call():
+    release = threading.Event()
+    stuck = []
+
+    @timeout(0.02, use_signals=False)
+    def slow():
+        stuck.append(threading.current_thread())
+        release.wait(2)
+
+    with pytest.raises(TimeoutExpired):
+        slow()
+    try:
+        # The stuck worker is never handed out again while it is busy.
+        assert _worker_thread()() is not stuck[0]
+        assert all(t is not stuck[0] for t in (_worker_thread()() for _ in range(3)))
+    finally:
+        release.set()
+    stuck[0].join(2)
+    assert not stuck[0].is_alive()  # abandoned: it exits instead of rejoining the pool
+
+
+def test_timeout_fallback_workers_exit_when_idle(monkeypatch):
+    monkeypatch.setattr(concurrency, "_WORKER_IDLE_SECONDS", 0.02)
+    first = _worker_thread()()
+    second = _worker_thread()()  # the same worker is reused while it is idle
+    assert first is second
+    first.join(2)  # then it exits after being idle for _WORKER_IDLE_SECONDS
+    assert not first.is_alive()
+    assert _worker_thread()() is not first  # a new worker is started on demand
+
+
+def test_timeout_fallback_keeps_a_bounded_idle_pool(monkeypatch):
+    monkeypatch.setattr(concurrency, "_MAX_IDLE_WORKERS", 2)
+    n = 6
+    barrier = threading.Barrier(n)
+
+    @timeout(2, use_signals=False)
+    def wait_for_all():
+        barrier.wait(2)
+        return threading.current_thread()
+
+    futures = [run_in_thread(wait_for_all)() for _ in range(n)]
+    workers = {f.result(timeout=3) for f in futures}
+    assert len(workers) == n
+    with concurrency._workers.lock:
+        assert len(concurrency._workers.idle) <= 2
+    deadline = time.monotonic() + 2
+    while sum(w.is_alive() for w in workers) > 2:  # the extra ones exit once done
+        assert time.monotonic() < deadline
+        time.sleep(0.001)
+
+
+def test_timeout_fallback_propagates_exception_from_pooled_worker():
+    @timeout(1, use_signals=False)
+    def boom():
+        raise LookupError("nope")
+
+    with pytest.raises(LookupError, match="nope"):
+        boom()
+    with pytest.raises(LookupError):
+        boom()  # the worker survived the exception and is reused
+
+
+def test_timeout_worker_claimed_while_giving_up_still_runs_the_job():
+    import queue as queue_mod
+
+    pool = concurrency._WorkerPool()
+    job = concurrency._Job(lambda: "ran", (), {})
+
+    class Inbox:
+        """The idle wait times out just as a caller claims the worker and sends a job."""
+
+        def __init__(self):
+            self.real = queue_mod.SimpleQueue()
+            self.gets = 0
+
+        def get(self, timeout):
+            self.gets += 1
+            if self.gets == 1:
+                with pool.lock:
+                    assert pool.idle.pop() is self
+                self.real.put(job)
+                raise queue_mod.Empty
+            return self.real.get(timeout=timeout)
+
+    inbox = Inbox()
+    pool.idle.append(inbox)  # type: ignore[arg-type]
+    job.abandoned = True  # so the worker exits once the job is done
+    thread = threading.Thread(target=pool._work, args=(inbox,), daemon=True)
+    thread.start()
+    assert job.done.acquire(timeout=2)  # it kept waiting and ran the job
+    assert job.result == "ran"
+    thread.join(2)
+    assert not thread.is_alive()
+
+
+def test_timeout_worker_pool_reset_after_fork():
+    pool = concurrency._WorkerPool()
+    pool.idle.append(object())  # type: ignore[arg-type]
+    pool.reset()
+    assert pool.idle == []
+
+
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="eager tasks need Python 3.12+")
+def test_singleflight_async_with_eager_task_factory():
+    calls = []
+
+    @singleflight
+    async def load(k):
+        calls.append(k)
+        return len(calls)  # finishes without suspending
+
+    async def main():
+        asyncio.get_running_loop().set_task_factory(asyncio.eager_task_factory)
+        first = [await load(1) for _ in range(3)]
+        release = asyncio.Event()
+
+        @singleflight
+        async def slow(k):
+            calls.append(k)
+            await release.wait()
+            return k
+
+        tasks = [asyncio.create_task(slow("s")) for _ in range(3)]
+        release.set()
+        return first, await asyncio.gather(*tasks)
+
+    assert asyncio.run(main()) == ([1, 2, 3], ["s", "s", "s"])
+    assert calls == [1, 1, 1, "s"]
+
+
+async def test_singleflight_async_uncontended_needs_few_loop_iterations():
+    @singleflight
+    async def load(k):
+        return k
+
+    ticks = 0
+    stop = False
+
+    async def ticker():
+        nonlocal ticks
+        while not stop:
+            ticks += 1
+            await asyncio.sleep(0)
+
+    t = asyncio.create_task(ticker())
+    await asyncio.sleep(0)
+    before = ticks
+    assert await load(1) == 1
+    spent = ticks - before
+    stop = True
+    await t
+    # 3.12+: the run starts eagerly and finishes before the caller waits at all.
+    # Before: the run's step, then the caller's wake-up (it was 3 with a relay).
+    assert spent <= (0 if sys.version_info >= (3, 12) else 2)
+
+
+async def test_singleflight_async_only_caller_cancelled_run_carries_on():
+    release = asyncio.Event()
+    finished = []
+
+    @singleflight
+    async def load():
+        await release.wait()
+        finished.append(1)
+        return 1
+
+    caller = asyncio.create_task(load())
+    await asyncio.sleep(0)
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+    follower = asyncio.create_task(load())  # joins the still-running flight
+    await asyncio.sleep(0)
+    release.set()
+    assert await follower == 1
+    assert finished == [1]
+
+
+async def test_singleflight_async_shared_run_cancelled_cancels_callers():
+    started = asyncio.Event()
+    runs = []
+
+    @singleflight
+    async def load():
+        runs.append(1)
+        started.set()
+        if len(runs) == 1:
+            await asyncio.sleep(10)
+        return len(runs)
+
+    callers = [asyncio.create_task(load()) for _ in range(2)]
+    await started.wait()
+    me = asyncio.current_task()
+    (run_task,) = [t for t in asyncio.all_tasks() if t not in callers and t is not me]
+    run_task.cancel()
+    for c in callers:
+        with pytest.raises(asyncio.CancelledError):
+            await c
+    assert await load() == 2  # the cancelled flight was cleaned up
+
+
+def test_rate_limiter_reset_and_limiter_of(fake_clock):
+    @rate_limit(1, 60.0)
+    def ping():
+        return "pong"
+
+    assert ping() == "pong"
+    with pytest.raises(RateLimitExceeded):
+        ping()
+    limiter = concurrency.limiter_of(ping)
+    assert isinstance(limiter, RateLimiter)
+    limiter.reset()
+    assert ping() == "pong"
+
+    shared = RateLimiter(1, 60.0)
+
+    @shared
+    async def aping():
+        return "apong"
+
+    assert concurrency.limiter_of(aping) is shared
+    assert asyncio.run(aping()) == "apong"
+    assert not shared.try_acquire()
+    shared.reset()
+    assert shared.try_acquire()
+
+    class Client:
+        @rate_limit(1, 60.0)
+        def get(self):
+            return 1
+
+    assert concurrency.limiter_of(Client().get) is concurrency.limiter_of(Client.get)
+    assert concurrency.limiter_of(lambda: None) is None
+
+
+def test_circuit_breaker_wrapper_does_not_redetect_async(monkeypatch):
+    from python_wrap.circuit import CircuitBreaker
+
+    breaker = CircuitBreaker()
+
+    @breaker
+    def f():
+        return 1
+
+    def fail(_func):
+        raise AssertionError("is_async called per call")
+
+    monkeypatch.setattr(_core, "is_async", fail)
+    assert f() == 1
+
+
+async def test_singleflight_async_flight_outcome_races():
+    loop = asyncio.get_running_loop()
+    flight = concurrency._AsyncFlight()
+    done = loop.create_future()
+    done.cancel()
+    pending = loop.create_future()
+    flight.waiters += [done, pending]
+    flight.deliver(5)  # skips the waiter that is already done
+    assert pending.result() == 5 and flight.waiters == []
+
+    # The outcome arrives in the same loop step as the caller's cancellation.
+    waiter = loop.create_future()
+    flight.waiters.append(waiter)
+    caller = asyncio.create_task(concurrency._await_flight(flight, waiter))
+    await asyncio.sleep(0)
+    flight.deliver(exc=ValueError("late"))
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+    assert waiter.exception() is not None  # retrieved, so never logged
+
+
+def test_timeout_fallback_result_arriving_after_the_limit_is_a_timeout(fake_clock, events):
+    @timeout(1, use_signals=False)
+    def late():
+        fake_clock.advance(2)  # finishes, but only after its limit
+        return "late"
+
+    with pytest.raises(TimeoutExpired):
+        late()
+    assert [e.name for e in events] == ["timeout.expired"]

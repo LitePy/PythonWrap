@@ -465,6 +465,8 @@ How the deadline is enforced depends on the function and the platform:
 !!! warning "The thread fallback cannot stop the work"
     When signals are unavailable, the function keeps running in the background after the timeout, and its result is discarded. Do not rely on it to cancel side effects. See [Limitations](../limitations.md#timeout).
 
+The worker threads are pooled: a finished worker waits (as an idle daemon thread) for the next call instead of a new thread being started per call. At most 8 idle workers are kept, an idle worker exits after about 5 seconds without work, and a worker still running a call that timed out is abandoned: it exits when that call returns and is never reused. The caller's `contextvars` are copied into the worker on every call.
+
 Nested timeouts work: the previous `SIGALRM` handler and any already-armed timer are restored afterwards. `use_signals=True` forces signals (and raises `RuntimeError` where unavailable); `use_signals=False` forces the thread strategy.
 
 Every expiry emits the `timeout.expired` (`seconds`) [event](observability.md).

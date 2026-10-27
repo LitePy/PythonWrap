@@ -181,6 +181,22 @@ asyncio.run(main())
 
 `python_wrap.testing.disable_rate_limits()` (or `fast_mode()`) makes `rate_limit`, `RateLimiter` and `throttle` let every call through. The switch is read at call time, so it also works on functions decorated at import. See [Testing](../testing.md).
 
+To keep limits on in a test but start each test with a fresh budget, call `RateLimiter.reset()`: it forgets every recorded call, for every key. Use a shared `RateLimiter` you can reach from the test, or get the limiter of a `rate_limit`-decorated function with `limiter_of(func)` (it returns `None` for a function without one; `throttle` has no reset):
+
+```python
+from python_wrap.concurrency import limiter_of, rate_limit
+
+@rate_limit(1, 60)
+def send() -> str:
+    return "sent"
+
+assert send() == "sent"
+limiter = limiter_of(send)
+assert limiter is not None
+limiter.reset()                    # e.g. in a fixture, between tests
+assert send() == "sent"
+```
+
 Rate limits emit `rate_limit.rejected` (`retry_after`) when a call is refused and `rate_limit.waited` (`seconds`) after a call had to wait; `throttle` emits `throttle.skipped` for each skipped call. See [Observability](observability.md).
 
 ## `throttle`

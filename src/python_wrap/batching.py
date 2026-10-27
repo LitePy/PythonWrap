@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import contextlib
 import functools
 import threading
+import warnings
 import weakref
 from collections.abc import Awaitable, Callable, Coroutine, Hashable, Mapping, Sequence
 from typing import Any, Concatenate, ParamSpec, Protocol, TypeGuard, TypeVar, cast, overload
@@ -198,6 +200,21 @@ def _batch_sync(
     lock = threading.Lock()
     open_batches: dict[_GroupKey, _SyncBatch] = {}
     counter = _Counter()
+    warned = False
+
+    def warn_if_in_event_loop() -> None:
+        nonlocal warned
+        if asyncio._get_running_loop() is None:
+            return
+        warned = True
+        warnings.warn(
+            f"{name} is a sync batch_calls loader called from a running event loop: it "
+            "blocks the loop while it waits for its batch (up to max_wait) and returns a "
+            "plain value, not a coroutine, so it cannot be awaited or passed to "
+            "asyncio.create_task(); decorate an `async def` batch function instead",
+            RuntimeWarning,
+            stacklevel=3,
+        )
 
     def detach(batch: _SyncBatch) -> bool:
         """Close ``batch`` to new items. Call with ``lock`` held. False if already closed."""
@@ -227,6 +244,8 @@ def _batch_sync(
 
     @functools.wraps(func)
     def wrapper(*args: Any) -> Any:
+        if not warned:
+            warn_if_in_event_loop()
         prefix, item = _split_args(name, args)
         k = key_of(item)
         group = tuple(map(id, prefix))
@@ -296,7 +315,7 @@ class _LoopState:
 
     def __init__(self) -> None:
         self.open: dict[_GroupKey, _AsyncBatch] = {}
-        self.running: set[asyncio.Task[None]] = set()
+        self.running: set[asyncio.Future[None]] = set()
 
 
 def _consume(task: asyncio.Task[Any]) -> None:
@@ -355,6 +374,21 @@ def _batch_async(
         task.add_done_callback(state.running.discard)
         task.add_done_callback(_consume)
 
+    async def run_inline(state: _LoopState, batch: _AsyncBatch, entry: _AsyncEntry) -> Any:
+        """Close ``batch`` and run it in the calling task; return ``entry``'s result."""
+        del state.open[batch.group]
+        counter.add(-len(batch.entries))
+        # Stands in for a batch task, so `aflush()` waits for this run too.
+        running = asyncio.get_running_loop().create_future()
+        state.running.add(running)
+        try:
+            with contextlib.suppress(Exception):  # delivered through entry.future
+                await run(batch)
+        finally:
+            state.running.discard(running)
+            running.set_result(None)
+        return entry.future.result()
+
     async def wait_then_start(state: _LoopState, batch: _AsyncBatch) -> None:
         await _core.async_sleep(max_wait)
         start(state, batch)
@@ -369,16 +403,23 @@ def _batch_async(
         if state is None:
             state = loops[loop] = _LoopState()
         batch = state.open.get(group)
+        fresh = batch is None
         if batch is None:
             batch = state.open[group] = _AsyncBatch(group, prefix)
-            batch.timer = loop.create_task(wait_then_start(state, batch))
         entry = batch.entries.get(k)
         if entry is None:
             entry = batch.entries[k] = _AsyncEntry(item, loop)
             counter.add(1)
         entry.waiters += 1
         if len(batch.entries) >= max_size:
+            if len(batch.entries) == 1 and entry.waiters == 1:
+                # This caller is the batch's only waiter (e.g. max_size=1): run it right
+                # here, in the calling task, with no extra task and no loop hops.
+                # Cancelling this caller cancels only its own batch.
+                return await run_inline(state, batch, entry)
             start(state, batch)
+        elif fresh:
+            batch.timer = loop.create_task(wait_then_start(state, batch))
         try:
             return await asyncio.shield(entry.future)
         except asyncio.CancelledError:
@@ -451,6 +492,14 @@ def batch_calls(
       then runs the batch in its own thread; no timer thread is started. If a caller
       fills the batch to `max_size`, it runs the batch at once. Calling a sync loader
       sequentially from one thread therefore costs up to `max_wait` per call.
+      A sync loader is **not** awaitable: `await loader(1)` or
+      `asyncio.create_task(loader(1))` fails (the call returns a plain value, after
+      blocking the event loop while it waits). Called from a running event loop, it
+      emits a one-time `RuntimeWarning`; in async code decorate an `async def` batch
+      function instead.
+    * When a call fills an async batch to `max_size` and its caller is the batch's only
+      waiter (always the case with `max_size=1`), the batch runs right in the calling
+      task, without an extra task or event-loop round trip.
 
     On a method, the batch function is called as `func(self, items)`, and calls on
     different instances (or classes, for a class method) go to separate batches.

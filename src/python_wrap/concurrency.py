@@ -21,6 +21,8 @@ import concurrent.futures
 import contextlib
 import contextvars
 import functools
+import os
+import queue
 import signal
 import sys
 import threading
@@ -42,6 +44,7 @@ __all__ = [
     "RateLimiter",
     "Timeout",
     "debounce",
+    "limiter_of",
     "rate_limit",
     "run_in_thread",
     "singleflight",
@@ -80,33 +83,46 @@ class _Alarm:
 
     Enter it in the main thread only. The previous handler and any armed timer are
     restored on exit; an enclosing timer whose deadline comes first still fires.
+    Entering costs two system calls (install the handler, arm the timer — arming also
+    reports the enclosing timer, so no separate ``getitimer``) and so does exiting.
     """
 
     def __init__(self, label: str, seconds: float) -> None:
         self.label = label
         self.seconds = seconds
-        self.error = TimeoutExpired(_timeout_message(label, seconds), seconds=seconds)
+        self.error: TimeoutExpired | None = None  # built only when the alarm fires
         self._outer_fired = False
+        # The enclosing timer's delay; None until known (our timer is not armed yet).
+        self._previous_delay: float | None = None
+        self._previous_interval = 0.0
 
     def __enter__(self) -> None:
         self._start = _core.monotonic()
         deadline = self._start + self.seconds
         self._previous_handler = previous_handler = signal.getsignal(signal.SIGALRM)
-        self._previous_delay, self._previous_interval = signal.getitimer(signal.ITIMER_REAL)
-        previous_delay = self._previous_delay
 
         def handler(signum: int, frame: FrameType | None) -> None:
-            if _core.monotonic() >= deadline - 1e-3 or not previous_delay:
+            previous_delay = self._previous_delay
+            if previous_delay is not None and (
+                not previous_delay or _core.monotonic() >= deadline - 1e-3
+            ):
+                self.error = TimeoutExpired(
+                    _timeout_message(self.label, self.seconds), seconds=self.seconds
+                )
                 raise self.error
-            # The alarm belongs to an enclosing timeout whose deadline comes first.
+            # The alarm belongs to an enclosing timeout whose deadline comes first (or
+            # fired before ours was even armed).
             self._outer_fired = True
             signal.signal(signal.SIGALRM, previous_handler)
             if callable(previous_handler):
                 previous_handler(signum, frame)
 
         signal.signal(signal.SIGALRM, handler)
-        delay = self.seconds if not previous_delay else min(self.seconds, previous_delay)
-        signal.setitimer(signal.ITIMER_REAL, delay)
+        previous_delay, self._previous_interval = signal.setitimer(signal.ITIMER_REAL, self.seconds)
+        if previous_delay and previous_delay < self.seconds:
+            # An enclosing timer is due first: keep its deadline.
+            signal.setitimer(signal.ITIMER_REAL, previous_delay)
+        self._previous_delay = previous_delay
 
     def __exit__(
         self,
@@ -121,29 +137,135 @@ class _Alarm:
                 remaining = self._previous_delay - (_core.monotonic() - self._start)
                 # Re-arm the enclosing timer; if its deadline already passed, fire ASAP.
                 signal.setitimer(signal.ITIMER_REAL, max(remaining, 1e-6), self._previous_interval)
-        if exc is self.error:
+        if exc is not None and exc is self.error:
             _core.emit("timeout.expired", self.label, seconds=self.seconds)
+
+
+# -- thread fallback: a small pool of idle daemon workers ---------------------------------
+
+_WORKER_IDLE_SECONDS = 5.0  # an idle worker exits after this long (real time)
+_MAX_IDLE_WORKERS = 8  # idle workers kept for reuse; extra ones exit when done
+
+
+class _Job:
+    """One call handed to a worker; ``done`` is released when it has finished."""
+
+    __slots__ = (
+        "abandoned",
+        "args",
+        "context",
+        "done",
+        "error",
+        "finished",
+        "func",
+        "kwargs",
+        "result",
+    )
+
+    def __init__(self, func: Callable[..., Any], args: Any, kwargs: Any) -> None:
+        self.func = func
+        self.args = args
+        self.kwargs = kwargs
+        self.context = contextvars.copy_context()  # per call, as with a fresh thread
+        self.done = threading.Lock()
+        self.done.acquire()
+        self.result: Any = None
+        self.error: BaseException | None = None
+        self.abandoned = False  # the caller timed out and stopped waiting
+        self.finished = 0.0  # `_core.monotonic()` when the call returned
+
+    def run(self) -> None:
+        try:
+            self.result = self.context.run(self.func, *self.args, **self.kwargs)
+        except BaseException as exc:
+            self.error = exc
+        self.func = self.args = self.kwargs = None  # type: ignore[assignment]
+        self.finished = _core.monotonic()
+        self.done.release()
+
+
+class _WorkerPool:
+    """Reusable daemon threads for the `timeout` thread fallback.
+
+    A finished worker goes back to the idle list (up to ``_MAX_IDLE_WORKERS``); a worker
+    whose call timed out is abandoned — it exits when that call eventually returns and
+    is never reused. An idle worker exits after ``_WORKER_IDLE_SECONDS`` without work.
+    """
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.idle: list[queue.SimpleQueue[_Job]] = []  # inboxes of idle workers (LIFO)
+        self.count = 0
+
+    def submit(self, job: _Job) -> None:
+        with self.lock:
+            inbox = self.idle.pop() if self.idle else None
+            if inbox is None:
+                self.count += 1
+                number = self.count
+        if inbox is not None:
+            inbox.put(job)
+            return
+        inbox = queue.SimpleQueue()
+        inbox.put(job)
+        threading.Thread(
+            target=self._work, args=(inbox,), name=f"timeout-worker-{number}", daemon=True
+        ).start()
+
+    def _work(self, inbox: queue.SimpleQueue[_Job]) -> None:
+        while True:
+            try:
+                job = inbox.get(timeout=_WORKER_IDLE_SECONDS)
+            except queue.Empty:
+                with self.lock:
+                    if inbox in self.idle:
+                        self.idle.remove(inbox)
+                        return
+                continue  # claimed just as we gave up waiting: the job is on its way
+            job.run()
+            with self.lock:
+                if job.abandoned or len(self.idle) >= _MAX_IDLE_WORKERS:
+                    return
+                self.idle.append(inbox)
+            del job
+
+    def abandon(self, job: _Job) -> None:
+        with self.lock:
+            job.abandoned = True
+
+    def reset(self) -> None:
+        """After `os.fork`: the parent's workers do not exist in the child."""
+        self.lock = threading.Lock()
+        self.idle = []
+
+
+_workers = _WorkerPool()
+if hasattr(os, "register_at_fork"):  # pragma: no branch - absent on Windows only
+    os.register_at_fork(after_in_child=_workers.reset)
 
 
 def _call_in_worker(
     func: Callable[P, R], label: str, seconds: float, *args: P.args, **kwargs: P.kwargs
 ) -> R:
-    """Run ``func`` in a daemon thread and stop waiting for it after ``seconds``."""
-    future: concurrent.futures.Future[R] = concurrent.futures.Future()
-    context = contextvars.copy_context()
-
-    def runner() -> None:
-        try:
-            future.set_result(context.run(func, *args, **kwargs))
-        except BaseException as exc:
-            future.set_exception(exc)
-
-    worker = threading.Thread(target=runner, name=f"timeout-{label}", daemon=True)
-    worker.start()
-    try:
-        return future.result(timeout=seconds)
-    except concurrent.futures.TimeoutError:
+    """Run ``func`` in a pooled daemon thread and stop waiting for it after ``seconds``."""
+    job = _Job(func, args, kwargs)
+    start = _core.monotonic()
+    _workers.submit(job)
+    if not job.done.acquire(timeout=seconds):
+        _workers.abandon(job)
         raise _expired(label, seconds) from None
+    if job.finished - start > seconds:
+        # The wait overslept (seen with free-threaded builds) and the call finished
+        # late: it still ran over its limit.
+        raise _expired(label, seconds) from None
+    error = job.error
+    if error is not None:
+        job.error = None
+        try:
+            raise error
+        finally:
+            del error
+    return cast(R, job.result)
 
 
 if sys.version_info >= (3, 11):
@@ -348,6 +470,10 @@ def timeout(seconds: float, *, use_signals: bool | None = None) -> Timeout:
       ``use_signals=False``): the call runs in a daemon worker thread and the caller stops
       waiting at the deadline. **This fallback cannot stop the work** — the function keeps
       running in the background until it returns on its own, and its result is discarded.
+      Workers are pooled daemon threads: an idle one is reused for the next call (at most
+      8 are kept idle, each exits after about 5 s without work), a worker whose call timed
+      out is abandoned and never reused, and the caller's ``contextvars`` are copied into
+      the worker on every call.
 
     Inside a `python_wrap.deadline.deadline` block the limit is clamped to the time the
     deadline has left; if the deadline has already passed, the call (or block) is not
@@ -463,8 +589,10 @@ class _SlidingWindow:
 
         A call is recorded only if *every* limit allows it.
         """
-        now = _core.monotonic()
         with self._lock:
+            # Read the clock under the lock: a call that queued for the lock must be
+            # recorded at the time it is admitted, not the time it arrived.
+            now = _core.monotonic()
             self._since_sweep += 1
             if self._since_sweep >= _SWEEP_EVERY:
                 self._sweep(now)
@@ -483,6 +611,11 @@ class _SlidingWindow:
             for bucket in buckets:
                 bucket.append(now)
             return 0.0
+
+    def clear(self) -> None:
+        with self._lock:
+            self._buckets.clear()
+            self._since_sweep = 0
 
     def _sweep(self, now: float) -> None:
         self._since_sweep = 0
@@ -641,6 +774,15 @@ class RateLimiter:
 
     # -- explicit API -------------------------------------------------------------------
 
+    def reset(self) -> None:
+        """Forget every recorded call (for every key), as if the limiter were new.
+
+        Meant for tests: share one `RateLimiter` (or reach a `rate_limit` limiter with
+        `limiter_of`) and reset it between tests. Thread-safe; calls waiting for a slot
+        re-check and may then go through.
+        """
+        self._window.clear()
+
     def try_acquire(self) -> bool:
         """Take a slot if one is free right now.
 
@@ -719,6 +861,7 @@ class RateLimiter:
                 await self._atake(k, label, block=block, timeout=None, strict=True)
                 return await func(*args, **kwargs)
 
+            async_wrapper.__rate_limiter__ = self  # type: ignore[attr-defined]
             return cast(F, async_wrapper)
 
         @functools.wraps(func)
@@ -727,7 +870,40 @@ class RateLimiter:
             self._take(k, label, block=block, timeout=None, strict=True)
             return func(*args, **kwargs)
 
+        wrapper.__rate_limiter__ = self  # type: ignore[attr-defined]
         return cast(F, wrapper)
+
+
+def limiter_of(func: Callable[..., Any], /) -> RateLimiter | None:
+    """The `RateLimiter` behind a function decorated with `rate_limit` (or a limiter).
+
+    `rate_limit` keeps the decorated function's exact type, so its limiter is reached
+    through this function rather than an attribute. Decorators applied on top with
+    `functools.wraps` keep it reachable; bound methods work too.
+
+    Args:
+        func: A function decorated with `rate_limit` or with a `RateLimiter`.
+
+    Returns:
+        Its limiter (the outermost one, if several), or `None` if it has none.
+
+    Example:
+        ```python
+        from python_wrap.concurrency import limiter_of, rate_limit
+
+        @rate_limit(1, 60.0)
+        def ping() -> str:
+            return "pong"
+
+        assert ping() == "pong"
+        limiter = limiter_of(ping)
+        assert limiter is not None and not limiter.try_acquire()
+        limiter.reset()  # e.g. between tests
+        assert ping() == "pong"
+        ```
+    """
+    limiter = getattr(func, "__rate_limiter__", None)
+    return limiter if isinstance(limiter, RateLimiter) else None
 
 
 def rate_limit(
@@ -746,8 +922,9 @@ def rate_limit(
     counted. The limiter is thread-safe and is shared by every caller of the decorated
     function — including every instance, for methods — unless ``key`` splits it.
 
-    Each decorated function gets its own `RateLimiter`. To share one budget between
-    several functions, create a `RateLimiter` and use it as the decorator. Pass
+    Each decorated function gets its own `RateLimiter`, reachable with
+    ``limiter_of(func)`` (e.g. to ``.reset()`` it between tests). To share one budget
+    between several functions, create a `RateLimiter` and use it as the decorator. Pass
     ``limits=[(5, 1.0), (600, 900.0)]`` to enforce several limits at once (all must
     allow a call). While ``python_wrap.testing`` disables rate limits, every call goes
     through. Emits ``rate_limit.rejected`` and ``rate_limit.waited``.
@@ -1127,11 +1304,15 @@ def _debounce_async(func: Callable[..., Awaitable[Any]], wait: float) -> Callabl
     bursts: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, _AsyncBurst] = (
         weakref.WeakKeyDictionary()
     )
+    # Several loops (in several threads) share `bursts`; each burst itself is only ever
+    # touched from its own loop's thread.
+    bursts_lock = threading.Lock()
 
     async def run(burst: _AsyncBurst) -> Any:
         loop = asyncio.get_running_loop()
-        if bursts.get(loop) is burst:
-            del bursts[loop]
+        with bursts_lock:
+            if bursts.get(loop) is burst:
+                del bursts[loop]
         call = burst.call
         if call is None or burst.outcome.done():
             return None
@@ -1158,31 +1339,47 @@ def _debounce_async(func: Callable[..., Awaitable[Any]], wait: float) -> Callabl
     @functools.wraps(func)
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
         loop = asyncio.get_running_loop()
-        burst = bursts.get(loop)
-        if burst is None:
-            burst = bursts[loop] = _AsyncBurst(loop)
-        elif burst.timer is not None:
+        with bursts_lock:
+            burst = bursts.get(loop)
+            if burst is None:
+                burst = bursts[loop] = _AsyncBurst(loop)
+        if burst.timer is not None:
             burst.timer.cancel()
         burst.call = (args, kwargs)
         burst.timer = loop.create_task(sleep_then_run(burst))
         return await asyncio.shield(burst.outcome)
 
+    def cancel_burst(burst: _AsyncBurst) -> None:
+        if burst.timer is not None:
+            burst.timer.cancel()
+        burst.outcome.cancel()
+
     def cancel() -> None:
         try:
-            loop = asyncio.get_running_loop()
+            running: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
         except RuntimeError:
-            loops = list(bursts)
-        else:
-            loops = [loop]
-        for lp in loops:
-            burst = bursts.pop(lp, None)
-            if burst is not None:
-                if burst.timer is not None:
-                    burst.timer.cancel()
-                burst.outcome.cancel()
+            running = None
+        with bursts_lock:
+            if running is not None:
+                taken = [(running, bursts.pop(running, None))]
+            else:
+                taken = [(lp, bursts.pop(lp)) for lp in list(bursts)]
+        for lp, burst in taken:
+            if burst is None:
+                continue
+            if lp.is_closed():
+                continue
+            if lp is running or not lp.is_running():
+                cancel_burst(burst)
+            else:
+                # Another thread's loop: futures are not thread-safe, so hand the
+                # cancellation to that loop (which also wakes it up).
+                with contextlib.suppress(RuntimeError):  # closed meanwhile
+                    lp.call_soon_threadsafe(cancel_burst, burst)
 
     async def flush() -> Any:
-        burst = bursts.get(asyncio.get_running_loop())
+        with bursts_lock:
+            burst = bursts.get(asyncio.get_running_loop())
         if burst is None:
             return None
         if burst.timer is not None:
@@ -1213,6 +1410,9 @@ def debounce(wait: float) -> _DebounceDecorator:
     The wrapper also has:
 
     * ``.cancel()`` — drop the pending call (async awaiters get ``CancelledError``).
+      Thread-safe. For ``async def`` functions, inside a running loop it cancels that
+      loop's pending call; from a thread with no running loop it cancels the pending
+      call of every loop (handing the cancellation to each loop's own thread).
     * ``.flush()`` — run the pending call right now and return its result, or ``None``
       if nothing is pending. For ``async def`` functions it is a coroutine to ``await``.
 
@@ -1261,36 +1461,63 @@ class _Flights(Generic[T]):
         self.inflight: dict[Hashable, tuple[concurrent.futures.Future[T], int]] = {}
 
 
-def _consume_outcome(task: asyncio.Task[Any]) -> None:
-    if not task.cancelled():
-        task.exception()
+class _AsyncFlight:
+    """One in-flight async singleflight run: its task and the callers waiting for it."""
+
+    __slots__ = ("task", "waiters")
+
+    def __init__(self) -> None:
+        self.task: asyncio.Task[None] | None = None
+        self.waiters: list[asyncio.Future[Any]] = []
+
+    def deliver(self, result: Any = None, exc: BaseException | None = None) -> None:
+        """Hand the outcome to every caller still waiting (``exc=None`` means success)."""
+        waiters, self.waiters = self.waiters, []
+        for waiter in waiters:
+            if waiter.done():
+                continue
+            if exc is None:
+                waiter.set_result(result)
+            elif isinstance(exc, asyncio.CancelledError):
+                waiter.cancel()
+            else:
+                waiter.set_exception(exc)
 
 
-async def _await_shared(loop: asyncio.AbstractEventLoop, task: asyncio.Task[T]) -> T:
-    """Wait for a shared task without letting the caller's cancellation cancel it.
+def _start_task(
+    loop: asyncio.AbstractEventLoop, coro: Coroutine[Any, Any, None]
+) -> asyncio.Task[None]:
+    """Start the shared run, eagerly where possible.
 
-    Like `asyncio.shield`, but a cancelled waiter simply detaches: the task's
-    eventual exception is not reported as an unhandled "exception in shielded future".
+    On Python 3.12+ with no custom task factory the task starts eagerly: it runs right
+    away, up to its first suspension, so a run that never suspends (an in-memory hit,
+    say) has finished before the caller would have waited at all. Otherwise (3.10/3.11,
+    or a task factory is installed, which is respected) it starts on the next loop
+    iteration, as `loop.create_task` does.
     """
-    waiter: asyncio.Future[T] = loop.create_future()
+    if _EAGER_TASKS and loop.get_task_factory() is None:
+        return asyncio.Task(coro, loop=loop, eager_start=True)  # type: ignore[call-arg,unused-ignore]
+    return loop.create_task(coro)
 
-    def relay(done: asyncio.Task[T]) -> None:
-        if waiter.done():
-            return
-        if done.cancelled():
-            waiter.cancel()
-        elif (exc := done.exception()) is not None:
-            waiter.set_exception(exc)
-        else:
-            waiter.set_result(done.result())
 
-    task.add_done_callback(relay)
+_EAGER_TASKS = sys.version_info >= (3, 12)
+
+
+async def _await_flight(flight: _AsyncFlight, waiter: asyncio.Future[T]) -> T:
+    """Wait for a flight's outcome; a cancelled caller detaches, the run carries on.
+
+    The run resolves ``waiter`` itself (no done-callback relay), so an uncontended call
+    costs one loop iteration for the run plus the wake-up, and none at all when the
+    task ran eagerly to completion.
+    """
     try:
         return await waiter
     except asyncio.CancelledError:
-        task.remove_done_callback(relay)
         if waiter.done() and not waiter.cancelled():
-            waiter.exception()  # outcome arrived just as we were cancelled
+            waiter.exception()  # outcome arrived just as we were cancelled: retrieved
+        else:
+            with contextlib.suppress(ValueError):
+                flight.waiters.remove(waiter)
         raise
 
 
@@ -1343,34 +1570,52 @@ def singleflight(
     def decorate(f: Callable[P, R]) -> Callable[P, R]:
         if _core.is_async(f):
             async_f = cast(Callable[P, Awaitable[Any]], f)
-            tasks: weakref.WeakKeyDictionary[
-                asyncio.AbstractEventLoop, dict[Hashable, asyncio.Task[Any]]
+            flights_by_loop: weakref.WeakKeyDictionary[
+                asyncio.AbstractEventLoop, dict[Hashable, _AsyncFlight]
             ] = weakref.WeakKeyDictionary()
+            loops_lock = threading.Lock()  # loops in several threads share the mapping
 
             @functools.wraps(f)
             async def async_wrapper(*args: P.args, **kwargs: P.kwargs) -> Any:
                 k = key_func(*args, **kwargs)
                 loop = asyncio.get_running_loop()
-                inflight = tasks.setdefault(loop, {})
-                task = inflight.get(k)
-                if task is not None and task is asyncio.current_task():
+                inflight = flights_by_loop.get(loop)
+                if inflight is None:
+                    with loops_lock:
+                        inflight = flights_by_loop.setdefault(loop, {})
+                flight = inflight.get(k)
+                if flight is not None and flight.task is asyncio.current_task():
                     # Re-entrant call from inside the shared task: waiting for ourselves
                     # would deadlock, so run the function directly.
                     return await async_f(*args, **kwargs)
-                if task is None:
+                waiter: asyncio.Future[Any] = loop.create_future()
+                if flight is not None:
+                    flight.waiters.append(waiter)
+                    return await _await_flight(flight, waiter)
 
-                    async def run() -> Any:
-                        try:
-                            return await async_f(*args, **kwargs)
-                        finally:
-                            if inflight.get(k) is task:
-                                del inflight[k]
+                new = inflight[k] = _AsyncFlight()
+                new.waiters.append(waiter)  # before the task starts: it may run eagerly
 
-                    task = inflight[k] = loop.create_task(run())
-                    # Retrieve the outcome even if every caller was cancelled meanwhile,
-                    # so asyncio never logs "exception was never retrieved".
-                    task.add_done_callback(_consume_outcome)
-                return await _await_shared(loop, task)
+                async def run() -> None:
+                    new.task = asyncio.current_task()
+                    try:
+                        result = await async_f(*args, **kwargs)
+                    except BaseException as exc:
+                        if inflight.get(k) is new:
+                            del inflight[k]
+                        new.deliver(exc=exc)
+                        if not isinstance(exc, Exception):
+                            raise  # CancelledError, KeyboardInterrupt, SystemExit
+                        # Delivered to the callers; the task itself ends quietly, so an
+                        # orphaned failure is never logged as "never retrieved".
+                    else:
+                        if inflight.get(k) is new:
+                            del inflight[k]
+                        new.deliver(result)
+
+                # Keep a strong reference: the event loop only holds tasks weakly.
+                new.task = _start_task(loop, run())
+                return await _await_flight(new, waiter)
 
             return cast(Callable[P, R], async_wrapper)
 

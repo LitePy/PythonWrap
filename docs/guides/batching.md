@@ -123,12 +123,16 @@ asyncio.run(main())
 * The batch runs in its own task. Cancelling one caller does not cancel the batch for the others.
 * A caller cancelled **before** its batch is sent removes its item from the batch, unless another caller is waiting for the same key. If every caller goes away, the batch is never sent.
 * No tasks are left behind once the batch has been delivered.
+* When a call fills the batch to `max_size` and its caller is the batch's only waiter (always the case with `max_size=1`), the batch runs right in the calling task: no extra task, no event-loop round trip.
 
 ### Sync details
 
 * Callers are threads; each blocks until its result is ready.
 * There is no timer thread. The **first caller of a window** keeps time: it waits up to `max_wait` and then runs the batch in its own thread. A caller that fills the batch to `max_size` runs it immediately in its thread. So the batch function always runs in one of the calling threads (or the thread calling `.flush()`).
 * A single thread calling the loader in a loop waits up to `max_wait` per call — batching needs concurrency. Do not call a sync loader from `async` code; it blocks the event loop. Decorate an `async def` instead.
+
+!!! warning "A sync loader is not awaitable"
+    Decorating a plain `def` gives a plain function: `loader(1)` blocks and returns the value itself. So `await loader(1)` and `asyncio.create_task(loader(1))` fail (with `TypeError`, after the loop was already blocked for the batch window). The first time a sync loader is called from a running event loop it emits a `RuntimeWarning` saying so. In async code, decorate an `async def` batch function.
 
 ### Flushing and inspecting
 
