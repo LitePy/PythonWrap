@@ -1,15 +1,14 @@
 """Argument validation and runtime type checking.
 
-* :func:`validate_args` - run a predicate per argument (``x=lambda x: x > 0``).
-* :func:`check_type` - ``isinstance`` check per argument (``x=int``).
-* :func:`enforce_types` - check arguments and the return value against the function's own
+* `validate_args` - run a predicate per argument (``x=lambda x: x > 0``).
+* `check_type` - ``isinstance`` check per argument (``x=int``).
+* `enforce_types` - check arguments and the return value against the function's own
   annotations.
 
 All three work on plain functions, ``async def`` functions and methods, can be stacked, and
 keep the wrapped function's signature.
 
-Supported annotations for :func:`enforce_types`
------------------------------------------------
+**Annotations supported by `enforce_types`.**
 
 Checked: plain classes (``int`` also accepts ``bool``; ``float`` accepts ``int`` and
 ``complex`` accepts ``int``/``float``, following PEP 484), ``Any``, ``None``,
@@ -35,10 +34,10 @@ import reprlib
 import types
 import typing
 from collections.abc import Callable
-from typing import Any, TypeVar, Union, overload
+from typing import Any, TypeVar, Union, cast, overload
 
 from python_wrap import _core, errors
-from python_wrap._core import P, R
+from python_wrap._core import F, P, R
 
 __all__ = ["check_type", "enforce_types", "validate_args"]
 
@@ -98,12 +97,12 @@ def _check_names(
 # --------------------------------------------------------------------------------------
 
 
-def validate_args(**validators: Validator) -> Callable[[Callable[P, R]], Callable[P, R]]:
+def validate_args(**validators: Validator) -> Callable[[F], F]:
     """Validate arguments with predicates.
 
     Each keyword names a parameter and gives a callable that receives the argument value
     (defaults are applied first, so default values are validated too). A falsy result raises
-    :class:`~python_wrap.errors.ValidationError`, which is a ``ValueError``. A validator may
+    `ValidationError`, which is a ``ValueError``. A validator may
     instead raise its own exception, which propagates unchanged. Pass a
     ``(callable, "message")`` tuple for a custom error message. Validators for ``*args`` /
     ``**kwargs`` parameters receive the whole tuple / dict.
@@ -155,7 +154,7 @@ def validate_args(**validators: Validator) -> Callable[[Callable[P, R]], Callabl
 
         return _wrap(func, before)
 
-    return decorate
+    return cast("Callable[[F], F]", decorate)
 
 
 # --------------------------------------------------------------------------------------
@@ -171,7 +170,7 @@ def _type_name(tp: object) -> str:
     return str(tp).replace("typing.", "")
 
 
-def check_type(**type_hints: type | tuple[type, ...]) -> Callable[[Callable[P, R]], Callable[P, R]]:
+def check_type(**type_hints: type | tuple[type, ...]) -> Callable[[F], F]:
     """Check argument types with ``isinstance``.
 
     Each keyword names a parameter and gives a class (or a tuple of classes). Defaults are
@@ -228,7 +227,7 @@ def check_type(**type_hints: type | tuple[type, ...]) -> Callable[[Callable[P, R
 
         return _wrap(func, before)
 
-    return decorate
+    return cast("Callable[[F], F]", decorate)
 
 
 # --------------------------------------------------------------------------------------
@@ -489,21 +488,19 @@ class _Checker:
 
 
 @overload
-def enforce_types(func: Callable[P, R], /) -> Callable[P, R]: ...
+def enforce_types(func: F, /) -> F: ...
 @overload
-def enforce_types(
-    func: None = None, /, *, check_return: bool = True
-) -> Callable[[Callable[P, R]], Callable[P, R]]: ...
-def enforce_types(
-    func: Callable[P, R] | None = None, /, *, check_return: bool = True
-) -> Callable[P, R] | Callable[[Callable[P, R]], Callable[P, R]]:
+def enforce_types(func: None = None, /, *, check_return: bool = True) -> Callable[[F], F]: ...
+def enforce_types(func: Callable[..., Any] | None = None, /, *, check_return: bool = True) -> Any:
     """Check arguments and the return value against the function's own annotations.
 
-    Annotations are resolved lazily on the first call with :func:`typing.get_type_hints`, so
+    Annotations are resolved lazily on the first call with `typing.get_type_hints`, so
     forward references work. Only arguments that are actually passed are checked (defaults
-    are not). For ``async def`` functions the awaited result is checked. See the module
-    documentation for the supported subset of annotations; anything unsupported is accepted
-    rather than rejected.
+    are not). For ``async def`` functions the awaited result is checked. The supported
+    subset of annotations is listed under "Annotations supported by `enforce_types`" in
+    the `python_wrap.validation` module docstring (the top of its API reference page) and
+    in the [validation guide](../guides/validation.md#supported-annotations); anything
+    unsupported is accepted rather than rejected.
 
     Args:
         func: The function (when used as a bare ``@enforce_types``).

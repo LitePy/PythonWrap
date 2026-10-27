@@ -1,6 +1,6 @@
 """Logging decorators: argument/return logging, audit records and call-stack tracing.
 
-All of them log through :func:`python_wrap._core.get_logger`, never configure logging,
+All of them log through `python_wrap._core.get_logger`, never configure logging,
 and support plain functions, ``async def`` functions and methods.
 """
 
@@ -20,7 +20,7 @@ from types import FrameType
 from typing import Any, TypeVar, cast, overload
 
 from python_wrap import _core
-from python_wrap._core import LoggerLike, P, R
+from python_wrap._core import F, LoggerLike, P, R
 
 __all__ = [
     "DEFAULT_REDACT",
@@ -195,7 +195,7 @@ def _caller_location() -> str:
 
 
 @overload
-def log_args(func: Callable[P, R], /) -> Callable[P, R]: ...
+def log_args(func: F, /) -> F: ...
 @overload
 def log_args(
     func: None = None,
@@ -205,16 +205,16 @@ def log_args(
     level: int = logging.DEBUG,
     redact: Iterable[str] = DEFAULT_REDACT,
     max_length: int = 200,
-) -> Callable[[Callable[P, R]], Callable[P, R]]: ...
+) -> Callable[[F], F]: ...
 def log_args(
-    func: Callable[P, R] | None = None,
+    func: Callable[..., Any] | None = None,
     /,
     *,
     logger: LoggerLike = None,
     level: int = logging.DEBUG,
     redact: Iterable[str] = DEFAULT_REDACT,
     max_length: int = 200,
-) -> Callable[P, R] | Callable[[Callable[P, R]], Callable[P, R]]:
+) -> Any:
     """Log each call's arguments, by parameter name, before running it.
 
     The message looks like ``Calling f(x=1, password='***')``. Arguments are bound to the
@@ -226,7 +226,7 @@ def log_args(
         level: Log level. Defaults to ``DEBUG`` (v0.1 logged at ``INFO``).
         redact: Parameter-name fragments whose values are shown as ``'***'``
             (case-insensitive substring match). Replaces the default
-            :data:`DEFAULT_REDACT`; pass ``()`` to disable redaction.
+            `DEFAULT_REDACT`; pass ``()`` to disable redaction.
         max_length: Longest rendering of a single value before it is truncated.
 
     Returns:
@@ -257,7 +257,7 @@ def log_args(
 
 
 @overload
-def log_return(func: Callable[P, R], /) -> Callable[P, R]: ...
+def log_return(func: F, /) -> F: ...
 @overload
 def log_return(
     func: None = None,
@@ -266,15 +266,15 @@ def log_return(
     logger: LoggerLike = None,
     level: int = logging.DEBUG,
     max_length: int = 200,
-) -> Callable[[Callable[P, R]], Callable[P, R]]: ...
+) -> Callable[[F], F]: ...
 def log_return(
-    func: Callable[P, R] | None = None,
+    func: Callable[..., Any] | None = None,
     /,
     *,
     logger: LoggerLike = None,
     level: int = logging.DEBUG,
     max_length: int = 200,
-) -> Callable[P, R] | Callable[[Callable[P, R]], Callable[P, R]]:
+) -> Any:
     """Log the value a function returns, or the exception type it raises.
 
     Logs ``f returned <value>``; if the function raises, logs ``f raised ValueError`` and
@@ -341,7 +341,7 @@ class AuditRecord:
 
 
 @overload
-def audit(func: Callable[P, R], /) -> Callable[P, R]: ...
+def audit(func: F, /) -> F: ...
 @overload
 def audit(
     func: None = None,
@@ -352,9 +352,9 @@ def audit(
     redact: Iterable[str] = DEFAULT_REDACT,
     include_result: bool = False,
     sink: Callable[[AuditRecord], None] | None = None,
-) -> Callable[[Callable[P, R]], Callable[P, R]]: ...
+) -> Callable[[F], F]: ...
 def audit(
-    func: Callable[P, R] | None = None,
+    func: Callable[..., Any] | None = None,
     /,
     *,
     logger: LoggerLike = None,
@@ -362,10 +362,10 @@ def audit(
     redact: Iterable[str] = DEFAULT_REDACT,
     include_result: bool = False,
     sink: Callable[[AuditRecord], None] | None = None,
-) -> Callable[P, R] | Callable[[Callable[P, R]], Callable[P, R]]:
+) -> Any:
     """Record who called a function, with what, and how it ended.
 
-    Every call produces an :class:`AuditRecord`. One log line is emitted with the record
+    Every call produces an `AuditRecord`. One log line is emitted with the record
     attached as ``extra={"audit": record}`` (read it from ``LogRecord.audit``), and
     ``sink(record)`` is called if given. Exceptions are recorded and re-raised. An
     exception raised by ``sink`` is logged and swallowed.
@@ -443,7 +443,7 @@ def audit(
 
 
 @overload
-def trace(func: Callable[P, R], /) -> Callable[P, R]: ...
+def trace(func: F, /) -> F: ...
 @overload
 def trace(
     func: None = None,
@@ -452,15 +452,15 @@ def trace(
     logger: LoggerLike = None,
     level: int = logging.DEBUG,
     limit: int | None = None,
-) -> Callable[[Callable[P, R]], Callable[P, R]]: ...
+) -> Callable[[F], F]: ...
 def trace(
-    func: Callable[P, R] | None = None,
+    func: Callable[..., Any] | None = None,
     /,
     *,
     logger: LoggerLike = None,
     level: int = logging.DEBUG,
     limit: int | None = None,
-) -> Callable[P, R] | Callable[[Callable[P, R]], Callable[P, R]]:
+) -> Any:
     """Log entry, the call stack that led to the call, and exit.
 
     Three messages per call: ``Entering f``, the call stack (python_wrap's own frames are

@@ -1,4 +1,4 @@
-"""State safety: :func:`revert_on_failure` and transactions."""
+"""State safety: `revert_on_failure` and transactions."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from types import TracebackType
 from typing import Any, ParamSpec, TypeVar, overload
 
 from python_wrap import _core
-from python_wrap._core import LoggerLike
+from python_wrap._core import F, LoggerLike
 
 __all__ = ["Transaction", "current_transaction", "revert_on_failure", "transactional"]
 
@@ -110,7 +110,7 @@ def _target_resolver(
 
 
 @overload
-def revert_on_failure(func: Callable[P, R], /) -> Callable[P, R]: ...
+def revert_on_failure(func: F, /) -> F: ...
 @overload
 def revert_on_failure(
     func: None = None,
@@ -119,7 +119,7 @@ def revert_on_failure(
     target: str | int = 0,
     attrs: Iterable[str] | None = None,
     deep: bool = False,
-) -> Callable[[Callable[P, R]], Callable[P, R]]: ...
+) -> Callable[[F], F]: ...
 def revert_on_failure(
     func: Callable[..., Any] | None = None,
     /,
@@ -297,7 +297,7 @@ class Transaction:
                 self._logger.error("rollback callback %s failed", _core.qualname(fn), exc_info=True)
 
     async def acommit(self) -> None:
-        """Like :meth:`commit`, awaiting async callbacks."""
+        """Like `commit`, awaiting async callbacks."""
         self._check_open()
         self._state = "committed"
         for fn, args, kwargs in self._commit:
@@ -306,7 +306,7 @@ class Transaction:
                 await result
 
     async def arollback(self) -> None:
-        """Like :meth:`rollback`, awaiting async callbacks."""
+        """Like `rollback`, awaiting async callbacks."""
         self._check_open()
         self._state = "rolled_back"
         for fn, args, kwargs in reversed(self._rollback):
@@ -351,17 +351,15 @@ class Transaction:
 
 
 @overload
-def transactional(func: Callable[P, R], /) -> Callable[P, R]: ...
+def transactional(func: F, /) -> F: ...
 @overload
-def transactional(
-    func: None = None, /, *, logger: LoggerLike = None
-) -> Callable[[Callable[P, R]], Callable[P, R]]: ...
+def transactional(func: None = None, /, *, logger: LoggerLike = None) -> Callable[[F], F]: ...
 def transactional(func: Callable[..., Any] | None = None, /, *, logger: LoggerLike = None) -> Any:
-    """Run the function inside a fresh :class:`Transaction` per call.
+    """Run the function inside a fresh `Transaction` per call.
 
     If the function has a parameter named ``tx`` it receives the transaction as the
     keyword argument ``tx=`` (so do not also pass it positionally; keyword-only is
-    cleanest); otherwise use :func:`current_transaction` (a ``ContextVar``, correct across
+    cleanest); otherwise use `current_transaction` (a ``ContextVar``, correct across
     threads and asyncio tasks). Returning normally commits, raising rolls back and
     re-raises. Nested ``@transactional`` calls each get their own transaction. Works for
     sync and ``async def`` functions (async callbacks are awaited).

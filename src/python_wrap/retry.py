@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol, TypeVar, cast, overload
 
 from python_wrap import _core
-from python_wrap._core import LoggerLike, P, R
+from python_wrap._core import F, LoggerLike, P, R
 
 T = TypeVar("T")
 T_co = TypeVar("T_co", covariant=True)
@@ -71,7 +71,7 @@ def _compute_delay(
 
 @overload
 def retry(
-    func: Callable[P, R],
+    func: F,
     /,
     *,
     max_attempts: int | None = ...,
@@ -83,7 +83,7 @@ def retry(
     retry_if: Callable[[BaseException], bool] | None = ...,
     on_retry: Callable[[RetryState], None] | None = ...,
     logger: LoggerLike = ...,
-) -> Callable[P, R]: ...
+) -> F: ...
 @overload
 def retry(
     func: None = None,
@@ -98,9 +98,9 @@ def retry(
     retry_if: Callable[[BaseException], bool] | None = ...,
     on_retry: Callable[[RetryState], None] | None = ...,
     logger: LoggerLike = ...,
-) -> Callable[[Callable[P, R]], Callable[P, R]]: ...
+) -> Callable[[F], F]: ...
 def retry(
-    func: Callable[P, R] | None = None,
+    func: Callable[..., Any] | None = None,
     /,
     *,
     max_attempts: int | None = 3,
@@ -112,7 +112,7 @@ def retry(
     retry_if: Callable[[BaseException], bool] | None = None,
     on_retry: Callable[[RetryState], None] | None = None,
     logger: LoggerLike = None,
-) -> Callable[P, R] | Callable[[Callable[P, R]], Callable[P, R]]:
+) -> Any:
     """Retry a function when it raises, optionally with exponential backoff.
 
     Works bare (``@retry``), with options (``@retry(max_attempts=5)``) and as a plain
@@ -133,7 +133,7 @@ def retry(
         jitter: Up to this many random extra seconds are added to each wait.
         on: Exception type(s) that trigger a retry; anything else propagates at once.
         retry_if: Extra predicate; the exception is retried only if it returns True.
-        on_retry: Called with a :class:`RetryState` before each wait.
+        on_retry: Called with a `RetryState` before each wait.
         logger: Logger (or logger name) for the per-retry WARNING message.
 
     Returns:
@@ -215,7 +215,7 @@ def retry_on_exception(
     retry_if: Callable[[BaseException], bool] | None = None,
     on_retry: Callable[[RetryState], None] | None = None,
     logger: LoggerLike = None,
-) -> Callable[[Callable[P, R]], Callable[P, R]]:
+) -> Callable[[F], F]:
     """Deprecated alias for ``retry(on=exceptions or Exception, ...)``.
 
     Args:
@@ -261,7 +261,7 @@ def retry_on_exception(
             logger=logger,
         )
 
-    return decorate
+    return cast("Callable[[F], F]", decorate)
 
 
 class _Decorator(Protocol[T_co]):

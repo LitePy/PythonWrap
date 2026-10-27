@@ -163,9 +163,7 @@ def deprecate(
     return decorate
 
 
-def mock_data(
-    data: Any, *, enabled: bool | Callable[[], bool] = True
-) -> Callable[[Callable[P, R]], Callable[P, R]]:
+def mock_data(data: Any, *, enabled: bool | Callable[[], bool] = True) -> Callable[[F], F]:
     """Replace a function's result with fixed data, for tests and local runs.
 
     When enabled, the wrapped function is not called and ``data`` is returned. If
@@ -207,7 +205,7 @@ def mock_data(
 
         return cast("Callable[P, R]", wrapper)
 
-    return decorate
+    return cast("Callable[[F], F]", decorate)
 
 
 def _is_enabled(enabled: bool | Callable[[], bool]) -> bool:
