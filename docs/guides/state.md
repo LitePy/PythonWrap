@@ -125,17 +125,17 @@ A `Transaction` collects undo steps (`on_rollback`) and follow-up steps (`on_com
 
 ## `transactional`
 
-Wrap a function in a fresh `Transaction` per call. Returning normally commits; raising rolls back and re-raises. Either receive the transaction as a parameter named `tx`, or fetch it with `current_transaction()`.
+Wrap a function in a fresh `Transaction` per call. Returning normally commits; raising rolls back and re-raises. Receive the transaction as a keyword parameter named `tx` declared as `tx: Transaction = INJECTED`; `INJECTED` is a typed placeholder, so type checkers let callers omit `tx` (passing it yourself raises `TypeError`). Or fetch it anywhere in the call tree with `require_transaction()`, which raises `RuntimeError` outside a transaction, or `current_transaction()`, which returns `None` there.
 
 === "Sync"
 
     ```python
-    from python_wrap import transactional
+    from python_wrap.state import INJECTED, Transaction, transactional
 
     steps: list[str] = []
 
     @transactional
-    def transfer(amount: int, *, tx) -> str:
+    def transfer(amount: int, *, tx: Transaction = INJECTED) -> str:
         steps.append("debit")
         tx.on_rollback(steps.append, "undo debit")
         if amount > 100:
@@ -158,12 +158,12 @@ Wrap a function in a fresh `Transaction` per call. Returning normally commits; r
 
     ```python
     import asyncio
-    from python_wrap import transactional
+    from python_wrap.state import INJECTED, Transaction, transactional
 
     steps: list[str] = []
 
     @transactional
-    async def transfer(amount: int, *, tx) -> str:
+    async def transfer(amount: int, *, tx: Transaction = INJECTED) -> str:
         steps.append("debit")
         tx.on_rollback(steps.append, "undo debit")
         if amount > 100:
@@ -180,21 +180,20 @@ Wrap a function in a fresh `Transaction` per call. Returning normally commits; r
     asyncio.run(main())
     ```
 
-!!! warning "Put `tx` last, or make it keyword-only"
-    When the function has a parameter named `tx`, it is passed as the keyword argument `tx=`. Do not also pass it positionally. Declaring it last or keyword-only keeps callers from colliding with it.
+!!! warning "Make `tx` keyword-only"
+    When the function has a parameter named `tx`, it is passed as the keyword argument `tx=`. Callers must not pass it themselves (a `TypeError` says so). Declaring it keyword-only, with the `INJECTED` default, keeps callers from colliding with it.
 
 ### Without a `tx` parameter
 
-`current_transaction()` returns the innermost running transaction (or `None`). It is backed by a `ContextVar`, so it is correct across threads and asyncio tasks, and lets helper functions register undo steps without the transaction being passed through every layer.
+`require_transaction()` returns the innermost running transaction and raises `RuntimeError` outside one; `current_transaction()` returns `None` instead. It is backed by a `ContextVar`, so it is correct across threads and asyncio tasks, and lets helper functions register undo steps without the transaction being passed through every layer.
 
 ```python
-from python_wrap import current_transaction, transactional
+from python_wrap.state import current_transaction, require_transaction, transactional
 
 undone: list[str] = []
 
 def create_resource(name: str) -> None:
-    tx = current_transaction()
-    assert tx is not None
+    tx = require_transaction()
     tx.on_rollback(undone.append, f"delete {name}")
 
 @transactional

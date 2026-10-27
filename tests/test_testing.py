@@ -6,6 +6,7 @@ import subprocess
 import sys
 import textwrap
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -184,7 +185,9 @@ def test_fakeclock_basics() -> None:
     assert clock.now == 10.0
     assert clock.sleeps == [3, -1]
     assert clock.total_slept == 2
-    assert FakeClock().now == 1000.0
+    before = time.monotonic()
+    assert before <= FakeClock().now <= time.monotonic()
+    assert FakeClock(start=1000.0).now == 1000.0
     with pytest.raises(ValueError):
         clock.advance(-1)
 
@@ -192,9 +195,10 @@ def test_fakeclock_basics() -> None:
 def test_fake_clock_patches_and_restores() -> None:
     before = (_core.monotonic, _core.perf_counter, _core.sleep, _core.async_sleep)
     with fake_clock() as clock:
-        assert _core.monotonic() == 1000.0
+        t0 = clock.now
+        assert _core.monotonic() == t0
         _core.sleep(2)
-        assert _core.perf_counter() == 1002.0
+        assert _core.perf_counter() == t0 + 2
         assert clock.sleeps == [2]
     assert (_core.monotonic, _core.perf_counter, _core.sleep, _core.async_sleep) == before
 
@@ -203,7 +207,7 @@ def test_fake_clock_nesting_and_custom_clock() -> None:
     outer_clock = FakeClock(start=1)
     with fake_clock(outer_clock):
         with fake_clock() as inner:
-            assert _core.monotonic() == 1000.0
+            assert _core.monotonic() == inner.now
             assert inner is not outer_clock
         assert _core.monotonic() == 1
 

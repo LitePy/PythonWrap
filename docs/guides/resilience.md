@@ -493,6 +493,7 @@ The object `timeout(...)` returns is also a context manager, so you can limit a 
 
 === "Sync"
 
+    <!-- unix-only -->
     ```python
     import time
     from python_wrap import TimeoutExpired, timeout

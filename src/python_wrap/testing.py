@@ -200,7 +200,10 @@ class FakeClock:
     """A controllable clock. Sleeping advances it instead of waiting.
 
     Attributes:
-        start: The initial reading.
+        start: The initial reading. Defaults to the real `time.monotonic()` at creation, so
+            entries stamped before the fake clock was installed (a cache filled at import
+            time, say) are in the fake clock's past and still expire as expected. Pass
+            `start=` for a fixed reading.
         now: The current reading (starts at `start`).
         sleeps: Every duration passed to `sleep` / `async_sleep`, in order.
 
@@ -216,7 +219,7 @@ class FakeClock:
         ```
     """
 
-    start: float = 1000.0
+    start: float = field(default_factory=time.monotonic)
     now: float = field(init=False)
     sleeps: list[float] = field(default_factory=list)
     _lock: threading.Lock = field(

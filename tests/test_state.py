@@ -430,3 +430,46 @@ def test_restore_failure_is_logged_and_original_exception_propagates(
     with caplog.at_level(logging.WARNING), pytest.raises(ValueError, match="orig"):
         f(g)
     assert any("could not" in r.getMessage() for r in caplog.records)
+
+
+def test_injected_tx_typed_default_and_explicit_tx_rejected() -> None:
+    from python_wrap.state import INJECTED, require_transaction
+
+    seen: list[Transaction] = []
+
+    @transactional
+    def charge(amount: int, *, tx: Transaction = INJECTED) -> int:
+        seen.append(tx)
+        assert require_transaction() is tx
+        return amount
+
+    assert charge(5) == 5
+    assert isinstance(seen[0], Transaction) and seen[0].state == "committed"
+    with pytest.raises(TypeError, match="do not pass tx"):
+        charge(5, tx=Transaction())
+    with pytest.raises(TypeError, match="do not pass tx"):
+
+        @transactional
+        def positional(tx: Transaction = INJECTED) -> None: ...
+
+        positional(Transaction())
+    assert repr(INJECTED) == "INJECTED"
+
+
+async def test_injected_tx_async_and_explicit_rejected() -> None:
+    from python_wrap.state import INJECTED
+
+    @transactional
+    async def charge(*, tx: Transaction = INJECTED) -> Transaction:
+        return tx
+
+    assert (await charge()).state == "committed"
+    with pytest.raises(TypeError):
+        await charge(tx=Transaction())
+
+
+def test_require_transaction_outside_raises() -> None:
+    from python_wrap.state import require_transaction
+
+    with pytest.raises(RuntimeError, match="no active transaction"):
+        require_transaction()
