@@ -1,0 +1,26 @@
+# Keeps the pinned GitHub Actions and the lockfile moving, in as few pull requests as
+# possible. Grouped, weekly: they are reviewed together and it keeps the queue readable.
+version: 2
+
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"
+
+  # Refreshes uv.lock, which pins the dev and docs tooling (the package itself has no
+  # runtime dependencies).
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      dev-tooling:
+        patterns: ["*"]
+    commit-message:
+      prefix: "deps"

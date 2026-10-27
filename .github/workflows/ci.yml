@@ -1,0 +1,147 @@
+# Continuous integration.
+#
+# Four jobs: lint (seconds), the test matrix, mypy, and a packaging check.
+#
+# python-wrap is pure Python with no dependencies, so the matrix is wide rather than
+# deep: every interpreter the classifiers name, on all three operating systems. Time and
+# threading behave differently on Windows (coarser clocks) and macOS (spawn, not fork),
+# and a decorator library that schedules, throttles and times things is exactly where
+# that shows up.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A force-push should not leave the previous run burning minutes on a dead commit.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  FORCE_COLOR: "1"
+
+jobs:
+  lint:
+    name: ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.2
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          python-version: "3.13"
+
+      - run: uv sync --group dev --frozen
+
+      - name: ruff check
+        run: uv run --no-sync ruff check src tests
+
+      - name: ruff format
+        run: uv run --no-sync ruff format --check --diff src tests
+
+  test:
+    name: py${{ matrix.python-version }} · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One red cell should not hide the other fourteen.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.2
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          python-version: ${{ matrix.python-version }}
+
+      - run: uv sync --group dev --frozen
+
+      - name: pytest
+        run: uv run --no-sync pytest --cov --cov-report=term-missing --cov-report=xml
+
+      # One coverage report is enough; it is the same code on every cell. Keeping it as an
+      # artifact (rather than a third-party upload) needs no token and cannot fail the
+      # build for a reason unrelated to the code.
+      - name: Upload the coverage report
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage
+          path: coverage.xml
+          if-no-files-found: warn
+
+  typecheck:
+    name: mypy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.2
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          python-version: "3.13"
+
+      - run: uv sync --group dev --frozen
+
+      # Strict mode, configured in pyproject.toml; `files` already points at src/.
+      - name: mypy
+        run: uv run --no-sync mypy
+
+  build:
+    name: build & wheel contents
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.2
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          python-version: "3.13"
+
+      - name: Build the sdist and wheel
+        run: uv build
+
+      - name: twine check
+        run: uvx twine check --strict dist/*
+
+      # The package ships `py.typed` so that type checkers use its annotations. A wheel
+      # that drops it still imports and still passes twine, and silently turns every
+      # downstream user's types into `Any`.
+      - name: The wheel ships py.typed
+        run: |
+          python3 -m zipfile -l dist/*.whl | tee wheel-listing.txt
+          grep -q 'python_wrap/py.typed' wheel-listing.txt
+
+      # Install the built wheel, not the source tree, into an empty venv and run from a
+      # scratch directory so `src/` cannot stand in for anything the wheel left out.
+      - name: Install the wheel into a clean environment
+        run: |
+          uv venv "$RUNNER_TEMP/smoke" --python 3.13
+          uv pip install --python "$RUNNER_TEMP/smoke" dist/*.whl
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/smoke/bin/python" -c "import python_wrap; print(python_wrap.__version__)"
+
+      - name: Upload the distributions
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error

@@ -1,0 +1,43 @@
+# Build check for the documentation site.
+#
+# Read the Docs does the hosting (see .readthedocs.yaml). This workflow only catches
+# breakage before it gets there: `--strict` turns a broken link, a page missing from the
+# nav or a docstring mkdocstrings cannot render into a failed check on the pull request.
+name: Docs
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  FORCE_COLOR: "1"
+
+jobs:
+  build:
+    name: mkdocs build --strict
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.2
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          python-version: "3.13"
+
+      # The package itself is installed too, because mkdocstrings reads the docstrings
+      # from it. The dev group is left out.
+      - run: uv sync --frozen --no-default-groups --group docs
+
+      - name: Build the site
+        run: uv run --no-sync mkdocs build --strict
