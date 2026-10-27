@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import datetime
 import inspect
+import pickle
 import threading
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import pytest
 
 from conftest import FakeClock
-from python_wrap.caching import CacheInfo, cache, memoize, once
+from python_wrap import _core
+from python_wrap.caching import CacheInfo, cache, cached_property, invalidate, memoize, once
+from python_wrap.testing import overrides
 
 
 def test_bare_and_call_forms() -> None:
@@ -562,3 +567,543 @@ def test_async_once_reset_in_flight_does_not_run_twice() -> None:
 
     assert asyncio.run(main()) == [2, 2]
     assert calls == 2
+
+
+# ------------------------------------------------------- memoize: new options (0.2)
+
+
+def test_cache_exceptions_cached_and_reraised_same_instance(fake_clock: FakeClock) -> None:
+    calls = []
+
+    @memoize(cache_exceptions=ValueError, exception_ttl=5)
+    def f(x: int) -> int:
+        calls.append(x)
+        raise ValueError(x)
+
+    with pytest.raises(ValueError) as first:
+        f(1)
+    with pytest.raises(ValueError) as second:
+        f(1)
+    assert first.value is second.value
+    assert calls == [1]
+    assert f.cache_contains(1)
+    with pytest.raises(ValueError):
+        f.cache_get(1)
+    fake_clock.advance(6)
+    assert not f.cache_contains(1)
+    with pytest.raises(ValueError):
+        f(1)
+    assert calls == [1, 1]
+
+
+def test_cache_exceptions_only_matching_and_defaults_to_ttl(fake_clock: FakeClock) -> None:
+    calls = []
+
+    @memoize(ttl=10, cache_exceptions=(KeyError, ValueError))
+    def f(kind: str) -> None:
+        calls.append(kind)
+        raise {"key": KeyError, "type": TypeError}[kind]()
+
+    with pytest.raises(KeyError):
+        f("key")
+    with pytest.raises(KeyError):
+        f("key")
+    for _ in range(2):
+        with pytest.raises(TypeError):
+            f("type")
+    assert calls == ["key", "type", "type"]
+    fake_clock.advance(11)
+    with pytest.raises(KeyError):
+        f("key")
+    assert calls == ["key", "type", "type", "key"]
+
+
+def test_cache_exceptions_validation() -> None:
+    with pytest.raises(TypeError):
+        memoize(cache_exceptions=int)  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        memoize(ttl=lambda r: 1.0, cache_exceptions=ValueError)
+    with pytest.raises(ValueError):
+        memoize(exception_ttl=0, cache_exceptions=ValueError)
+    # allowed: explicit exception_ttl
+    memoize(ttl=lambda r: 1.0, cache_exceptions=ValueError, exception_ttl=1)
+
+
+async def test_async_cache_exceptions_shared_and_cached() -> None:
+    calls = []
+
+    @memoize(cache_exceptions=RuntimeError)
+    async def f() -> int:
+        calls.append(1)
+        await asyncio.sleep(0)
+        raise RuntimeError("boom")
+
+    results = await asyncio.gather(f(), f(), return_exceptions=True)
+    assert results[0] is results[1]
+    with pytest.raises(RuntimeError):
+        await f()
+    assert calls == [1]
+
+
+async def test_async_cancelled_error_never_cached() -> None:
+    calls = []
+
+    @memoize(cache_exceptions=BaseException)
+    async def f() -> int:
+        calls.append(1)
+        if len(calls) == 1:
+            raise asyncio.CancelledError
+        return 5
+
+    with pytest.raises(asyncio.CancelledError):
+        await f()
+    assert await f() == 5
+
+
+def test_per_item_ttl(fake_clock: FakeClock) -> None:
+    @memoize(ttl=lambda r: None if r == "forever" else (0 if r == "skip" else r))
+    def f(x: Any) -> Any:
+        return x
+
+    f(3)
+    f("forever")
+    f("skip")
+    assert f.cache_info().currsize == 2
+    assert f.cache_contains(3) and not f.cache_contains("skip")
+    fake_clock.advance(4)
+    assert not f.cache_contains(3)
+    assert f.cache_contains("forever")
+    assert callable(f.cache_parameters()["ttl"])
+
+
+def test_cache_contains_get_do_not_count_or_compute() -> None:
+    calls = []
+
+    @memoize(maxsize=2)
+    def f(x: Any, y: int = 0) -> Any:
+        calls.append(x)
+        return x * 10
+
+    assert not f.cache_contains(1)
+    with pytest.raises(KeyError):
+        f.cache_get(1)
+    f(1)
+    f(2)
+    assert f.cache_contains(1, y=0) and f.cache_get(x=1) == 10
+    f(3)  # evicts 1: cache_get above did not refresh its LRU position
+    assert not f.cache_contains(1)
+    assert f.cache_info().hits == 0 and f.cache_info().misses == 3
+    assert f.cache_contains([1]) is False  # unhashable list args are frozen, not errors
+
+
+def test_cache_parameters() -> None:
+    @memoize(maxsize=3, ttl=datetime.timedelta(seconds=2), typed=True)
+    def f(x: int) -> int:
+        return x
+
+    assert f.cache_parameters() == {
+        "maxsize": 3,
+        "ttl": 2.0,
+        "typed": True,
+        "cache_exceptions": (),
+        "exception_ttl": 2.0,
+    }
+
+
+def test_fast_key_path_matches_general_path() -> None:
+    calls = []
+
+    @memoize
+    def f(a: Any, b: Any) -> int:
+        calls.append(1)
+        return 1
+
+    f(1, 2)
+    f(a=1, b=2)
+    f(1, b=2)
+    f((1, 2), 3)
+    f((1, 2), 3)
+    f([1], 2)  # unhashable positional: falls back to freezing
+    f([1], 2)
+    assert len(calls) == 3
+    with pytest.raises(TypeError, match="not hashable"):
+        f(object.__new__(type("U", (), {"__hash__": None})), 1)
+
+
+def test_disable_caching_memoize_cache_once() -> None:
+    calls = []
+
+    @memoize
+    def m(x: int) -> int:
+        calls.append(x)
+        return x
+
+    @cache(60)
+    def c(x: int) -> int:
+        calls.append(x)
+        return x
+
+    @once
+    def o() -> int:
+        calls.append(0)
+        return 1
+
+    m(1)
+    with overrides(disable_caching=True):
+        m(1)
+        m(1)
+        c(1)
+        c(1)
+        o()
+        o()
+        assert m.cache_info().currsize == 1  # nothing written
+    assert calls == [1, 1, 1, 1, 1, 0, 0]
+    m(1)
+    assert calls == [1, 1, 1, 1, 1, 0, 0]  # earlier entry still intact
+    assert o() == 1 and o() == 1
+    assert calls.count(0) == 3
+
+
+async def test_disable_caching_async() -> None:
+    calls = []
+
+    @memoize
+    async def m(x: int) -> int:
+        calls.append(x)
+        return x
+
+    @once
+    async def o() -> int:
+        calls.append(0)
+        return 1
+
+    with overrides(disable_caching=True):
+        await m(1)
+        await m(1)
+        await o()
+        await o()
+    assert calls == [1, 1, 0, 0]
+    assert m.cache_info().currsize == 0
+
+
+def _collect() -> tuple[list[_core.Event], Callable[[_core.Event], None]]:
+    seen: list[_core.Event] = []
+    _core.listeners.append(seen.append)
+    return seen, seen.append
+
+
+def test_events_hit_miss_evicted(fake_clock: FakeClock) -> None:
+    seen, listener = _collect()
+    try:
+
+        @memoize(maxsize=1, ttl=5)
+        def f(x: int) -> int:
+            return x
+
+        f(1)
+        f(1)
+        f(2)  # evicts 1 (lru)
+        fake_clock.advance(6)
+        f(2)  # expired entry removed on lookup (ttl)
+    finally:
+        _core.listeners.remove(listener)
+    names = [(e.name, e.fields) for e in seen]
+    assert names == [
+        ("cache.miss", {}),
+        ("cache.hit", {}),
+        ("cache.miss", {}),
+        ("cache.evicted", {"reason": "lru"}),
+        ("cache.evicted", {"reason": "ttl"}),
+        ("cache.miss", {}),
+    ]
+    assert all(e.function.endswith("f") for e in seen)
+
+
+async def test_events_async() -> None:
+    seen, listener = _collect()
+    try:
+
+        @memoize
+        async def f(x: int) -> int:
+            await asyncio.sleep(0)
+            return x
+
+        await asyncio.gather(f(1), f(1))
+        await f(1)
+    finally:
+        _core.listeners.remove(listener)
+    assert [e.name for e in seen] == ["cache.miss", "cache.hit", "cache.hit"]
+
+
+def test_events_ttl_eviction_from_cache_info(fake_clock: FakeClock) -> None:
+    @memoize(ttl=1)
+    def f(x: int) -> int:
+        return x
+
+    f(1)
+    fake_clock.advance(2)
+    seen, listener = _collect()
+    try:
+        assert f.cache_info().currsize == 0
+    finally:
+        _core.listeners.remove(listener)
+    assert [(e.name, e.fields) for e in seen] == [("cache.evicted", {"reason": "ttl"})]
+
+
+# ------------------------------------------------------------------ cached_property
+
+
+def test_cached_property_basic_and_class_access() -> None:
+    calls = []
+
+    class A:
+        @cached_property
+        def v(self) -> int:
+            """doc"""
+            calls.append(1)
+            return 42
+
+    a, b = A(), A()
+    assert a.v == 42 and a.v == 42 and b.v == 42
+    assert len(calls) == 2
+    assert A.v is A.__dict__["v"]
+    assert A.v.__doc__ == "doc"
+    with pytest.raises(AttributeError):
+        a.v = 1  # type: ignore[misc]
+
+
+def test_cached_property_ttl_and_invalidation(fake_clock: FakeClock) -> None:
+    calls = []
+
+    class A:
+        @cached_property(ttl=datetime.timedelta(seconds=10))
+        def v(self) -> int:
+            calls.append(1)
+            return len(calls)
+
+        @cached_property
+        def w(self) -> int:
+            return 7
+
+        plain = 1
+
+    a = A()
+    assert a.v == 1 and a.v == 1
+    fake_clock.advance(11)
+    assert a.v == 2
+    del a.v
+    assert a.v == 3
+    assert invalidate(a, "v") == 1
+    assert invalidate(a, "v") == 0
+    assert a.v == 4
+    assert a.w == 7
+    assert invalidate(a) == 2
+    del a.w  # deleting something never cached is a no-op
+    with pytest.raises(AttributeError, match="no cached_property"):
+        invalidate(a, "nope")
+    with pytest.raises(AttributeError, match="not a cached_property"):
+        invalidate(a, "plain")
+    with pytest.raises(ValueError):
+        cached_property(ttl=0)
+
+
+def test_cached_property_slots_without_dict() -> None:
+    class S:
+        __slots__ = ()
+
+        @cached_property
+        def v(self) -> int:
+            return 1
+
+    with pytest.raises(TypeError, match="__dict__"):
+        _ = S().v
+    with pytest.raises(TypeError, match="__dict__"):
+        invalidate(S())
+
+    class S2:
+        __slots__ = ("__dict__",)
+
+        @cached_property
+        def v(self) -> int:
+            return 1
+
+    assert S2().v == 1
+
+
+def test_cached_property_thread_safety_single_compute() -> None:
+    calls = []
+    gate = threading.Barrier(8)
+
+    class A:
+        @cached_property
+        def v(self) -> int:
+            calls.append(1)
+            threading.Event().wait(0.02)
+            return 5
+
+    a = A()
+    out: list[int] = []
+
+    def work() -> None:
+        gate.wait()
+        out.append(a.v)
+
+    threads = [threading.Thread(target=work) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert out == [5] * 8 and len(calls) == 1
+
+
+class _Picklable:
+    calls = 0
+
+    @cached_property
+    def v(self) -> int:
+        type(self).calls += 1
+        return type(self).calls
+
+
+def test_cached_property_copy_and_pickle_do_not_share_state() -> None:
+    a = _Picklable()
+    assert a.v == 1
+    b = copy.copy(a)
+    assert b.v == 2 and a.v == 1
+    q = pickle.loads(pickle.dumps(a))
+    assert q.v == 3
+    del q.v
+    assert invalidate(q) == 0
+
+
+def test_cached_property_set_name_conflict_and_failure_not_cached() -> None:
+    with pytest.raises((RuntimeError, TypeError)):
+
+        class _Bad:
+            a = cached_property(lambda self: 1)
+            b = a
+
+    calls = []
+
+    class A:
+        @cached_property
+        def v(self) -> int:
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError
+            return 2
+
+    a = A()
+    with pytest.raises(RuntimeError):
+        _ = a.v
+    assert a.v == 2
+
+
+def test_cached_property_disable_caching() -> None:
+    calls = []
+
+    class A:
+        @cached_property
+        def v(self) -> int:
+            calls.append(1)
+            return 1
+
+    a = A()
+    with overrides(disable_caching=True):
+        _ = a.v
+        _ = a.v
+    assert len(calls) == 2
+    _ = a.v
+    _ = a.v
+    assert len(calls) == 3
+
+
+async def _await(aw: Awaitable[Any]) -> Any:
+    return await aw
+
+
+async def test_async_cached_property_shares_task_and_caches() -> None:
+    calls = []
+    gate = asyncio.Event()
+
+    class A:
+        @cached_property(ttl=60)
+        async def v(self) -> int:
+            calls.append(1)
+            await gate.wait()
+            return 9
+
+    a = A()
+    tasks = [asyncio.ensure_future(_await(a.v)) for _ in range(4)]
+    await asyncio.sleep(0)
+    gate.set()
+    assert await asyncio.gather(*tasks) == [9] * 4
+    assert await a.v == 9
+    assert calls == [1]
+    del a.v
+    assert await a.v == 9
+    assert calls == [1, 1]
+
+
+async def test_async_cached_property_failure_not_cached_and_invalidate_in_flight() -> None:
+    calls = []
+    gate = asyncio.Event()
+
+    class A:
+        @cached_property
+        async def v(self) -> int:
+            calls.append(1)
+            await gate.wait()
+            if len(calls) == 1:
+                raise RuntimeError
+            return len(calls)
+
+    a = A()
+    t = asyncio.ensure_future(_await(a.v))
+    await asyncio.sleep(0)
+    gate.set()
+    with pytest.raises(RuntimeError):
+        await t
+    assert await a.v == 2
+
+    # invalidated while computing: the in-flight result is returned but not stored
+    gate.clear()
+    b = A()
+    calls.clear()
+    calls.append(0)  # next call returns 2
+    t2 = asyncio.ensure_future(_await(b.v))
+    await asyncio.sleep(0)
+    assert invalidate(b) == 0  # nothing cached yet, but the in-flight task is dropped
+    gate.set()
+    assert await t2 == 2
+    assert await b.v == 3  # recomputed: nothing was stored
+
+
+def test_async_cached_property_across_event_loops() -> None:
+    class A:
+        @cached_property
+        async def v(self) -> int:
+            await asyncio.sleep(0.02)
+            return 4
+
+    a = A()
+    assert _run_in_threads(lambda: a.v) == [4, 4]
+
+
+def test_async_cached_property_disable_caching() -> None:
+    calls = []
+
+    class A:
+        @cached_property
+        async def v(self) -> int:
+            calls.append(1)
+            return 1
+
+    async def main() -> None:
+        a = A()
+        with overrides(disable_caching=True):
+            await a.v
+            await a.v
+        assert len(calls) == 2
+
+    asyncio.run(main())
