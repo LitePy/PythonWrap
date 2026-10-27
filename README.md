@@ -8,13 +8,13 @@ Retry, cache, rate limit, time out, validate, log and more. One import, sync and
 [![CI](https://github.com/LitePy/PythonWrap/actions/workflows/ci.yml/badge.svg)](https://github.com/LitePy/PythonWrap/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/python-wrap?logo=pypi&logoColor=white)](https://pypi.org/project/python-wrap/)
 [![Python](https://img.shields.io/pypi/pyversions/python-wrap?logo=python&logoColor=white)](https://pypi.org/project/python-wrap/)
-[![License: MIT](https://img.shields.io/pypi/l/python-wrap)](LICENSE)
+[![License: MIT](https://img.shields.io/pypi/l/python-wrap)](https://github.com/LitePy/PythonWrap/blob/main/LICENSE)
 [![Docs](https://readthedocs.org/projects/python-wrap/badge/?version=latest)](https://python-wrap.readthedocs.io)
 [![Typed: mypy strict](https://img.shields.io/badge/typed-mypy%20strict-2a6db2)](https://mypy.readthedocs.io/en/stable/command_line.html#cmdoption-mypy-strict)
 
 [**Documentation**](https://python-wrap.readthedocs.io) ·
 [Migration guide](https://python-wrap.readthedocs.io/en/latest/migration/) ·
-[Changelog](CHANGELOG.md)
+[Changelog](https://github.com/LitePy/PythonWrap/blob/main/CHANGELOG.md)
 
 </div>
 
@@ -410,12 +410,12 @@ If you want all of these behaviours behind one consistent, typed, dependency-fre
 
 0.2.0 fixes several decorators that did not do what their names promised (`transactional`, `revert_on_failure`, async `timing`) and makes a few breaking changes: `run_in_thread` returns a `Future`, `benchmark` is a function, `retry_on_exception` is deprecated, `rate_limit` raises `RateLimitExceeded`, and the logging decorators default to `DEBUG`. Python 3.8 and 3.9 are no longer supported. `from python_wrap.decorators import ...` still works.
 
-See the [changelog](CHANGELOG.md) for the one-line migration of each change and the [migration guide](https://python-wrap.readthedocs.io/en/latest/migration/) for details.
+See the [changelog](https://github.com/LitePy/PythonWrap/blob/main/CHANGELOG.md) for the one-line migration of each change and the [migration guide](https://python-wrap.readthedocs.io/en/latest/migration/) for details.
 
 ## Contributing
 
-Bug reports, ideas and pull requests are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) for the development setup and checks, and [SECURITY.md](SECURITY.md) for reporting vulnerabilities.
+Bug reports, ideas and pull requests are welcome. Read [CONTRIBUTING.md](https://github.com/LitePy/PythonWrap/blob/main/CONTRIBUTING.md) for the development setup and checks, and [SECURITY.md](https://github.com/LitePy/PythonWrap/blob/main/SECURITY.md) for reporting vulnerabilities.
 
 ## License
 
-[MIT](LICENSE)
+[MIT](https://github.com/LitePy/PythonWrap/blob/main/LICENSE)

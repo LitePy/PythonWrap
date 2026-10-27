@@ -118,7 +118,7 @@ path.
 
 - `retry_on_exception`: use `retry(on=...)`. Emits a `DeprecationWarning`.
 - `no_debug`: a no-op, to be removed in 0.3.
-- `cache`: kept for compatibility; prefer `memoize(ttl=...)`.
+- `cache`: soft-deprecated in the docs only (no warning yet); prefer `memoize(ttl=...)`.
 
 ### Removed
 
