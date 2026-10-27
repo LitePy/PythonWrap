@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import datetime
-import email.utils
 import functools
 import logging
 import math
@@ -182,6 +181,8 @@ def _parse_seconds(value: Any) -> float | None:
         try:
             seconds = float(text)
         except ValueError:
+            import email.utils  # only HTTP-date headers need it; keeps import fast
+
             moment = email.utils.parsedate_to_datetime(text)
             if moment.tzinfo is None:
                 moment = moment.replace(tzinfo=datetime.timezone.utc)

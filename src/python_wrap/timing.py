@@ -2,21 +2,25 @@
 
 from __future__ import annotations
 
-import cProfile
 import io
 import logging
-import pstats
 import statistics
 import sys
 import threading
-import tracemalloc
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any, overload
+from typing import TYPE_CHECKING, Any, overload
 
 from python_wrap import _core
 from python_wrap._core import F, LoggerLike, P, R
 from python_wrap.logs import _instrument, _log
+
+if TYPE_CHECKING:
+    import cProfile
+    import pstats
+
+# cProfile, pstats and tracemalloc are imported on first use: they are only needed
+# by profile and measure_memory, and importing them eagerly slows down every import.
 
 __all__ = [
     "BenchmarkResult",
@@ -333,6 +337,8 @@ _trace_started_by_us = False
 
 def _trace_acquire() -> None:
     global _trace_users, _trace_started_by_us
+    import tracemalloc
+
     with _trace_lock:
         if _trace_users == 0 and not tracemalloc.is_tracing():
             tracemalloc.start()
@@ -342,6 +348,8 @@ def _trace_acquire() -> None:
 
 def _trace_release() -> None:
     global _trace_users, _trace_started_by_us
+    import tracemalloc
+
     with _trace_lock:
         _trace_users -= 1
         if _trace_users == 0 and _trace_started_by_us:
@@ -395,6 +403,8 @@ def measure_memory(
         ... def build():
         ...     return [0] * 1_000_000
     """
+
+    import tracemalloc
 
     def decorate(f: Callable[P, R]) -> Callable[P, R]:
         lg = _core.get_logger(logger)
@@ -482,6 +492,9 @@ def profile(
         >>> @profile(sort="tottime", limit=10)
         ... def work(): ...
     """
+    import cProfile
+    import pstats
+
     sort_key = pstats.SortKey(sort)  # validate eagerly
 
     def decorate(f: Callable[P, R]) -> Callable[P, R]:
