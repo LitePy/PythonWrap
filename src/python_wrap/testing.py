@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import inspect
+import math
 import threading
 import time
 import types
@@ -234,10 +235,13 @@ class FakeClock:
     """A controllable clock. Sleeping advances it instead of waiting.
 
     Attributes:
-        start: The initial reading. Defaults to the real `time.monotonic()` at creation, so
-            entries stamped before the fake clock was installed (a cache filled at import
-            time, say) are in the fake clock's past and still expire as expected. Pass
-            `start=` for a fixed reading.
+        start: The initial reading. Defaults to the real `time.monotonic()` at creation,
+            rounded up to a whole second, so entries stamped before the fake clock was
+            installed (a cache filled at import time, say) are in the fake clock's past and
+            still expire as expected. The rounding keeps arithmetic exact: with an
+            arbitrary float start, ``(start + 10) - start`` can come out as ``9.999...``
+            and a 10 second threshold would not be reached. Pass `start=` for a fixed
+            reading.
         now: The current reading (starts at `start`).
         sleeps: Every duration passed to `sleep` / `async_sleep`, in order.
 
@@ -253,7 +257,7 @@ class FakeClock:
         ```
     """
 
-    start: float = field(default_factory=time.monotonic)
+    start: float = field(default_factory=lambda: float(math.ceil(time.monotonic())))
     now: float = field(init=False)
     sleeps: list[float] = field(default_factory=list)
     _lock: threading.Lock = field(

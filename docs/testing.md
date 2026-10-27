@@ -84,7 +84,7 @@ assert clock.sleeps == [1.0, 2.0, 4.0]      # the backoff schedule you configure
 assert clock.now == start + 7.0
 ```
 
-`FakeClock()` starts at the real `time.monotonic()` of the moment it is created, so entries stamped before it was installed are in its past and still expire; pass `start=` for a fixed reading. It has `.now`, `.advance(seconds)`, `.sleeps` and `.total_slept`; pass your own instance with `fake_clock(clock)`.
+`FakeClock()` starts at the real `time.monotonic()` of the moment it is created, rounded up to a whole second (so differences stay exact), so entries stamped before it was installed are in its past and still expire; pass `start=` for a fixed reading. It has `.now`, `.advance(seconds)`, `.sleeps` and `.total_slept`; pass your own instance with `fake_clock(clock)`.
 
 ## What the overrides affect
 

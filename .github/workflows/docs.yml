@@ -36,8 +36,8 @@ jobs:
           python-version: "3.13"
 
       # The package itself is installed too, because mkdocstrings reads the docstrings
-      # from it. The dev group is left out.
-      - run: uv sync --frozen --no-default-groups --group docs
+      # from it. The dev group is included because some examples are pytest tests.
+      - run: uv sync --frozen --no-default-groups --group docs --group dev
 
       - name: Build the site
         run: uv run --no-sync mkdocs build --strict

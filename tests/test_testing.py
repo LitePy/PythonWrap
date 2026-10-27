@@ -537,3 +537,14 @@ def test_eventually_sync_under_fast_mode_pauses_real_time():
         assert _time.monotonic() - started >= 0.05
     # A busy loop would make thousands of attempts in 50ms.
     assert len(calls) < 20
+
+
+def test_fake_clock_default_start_is_a_whole_second() -> None:
+    import time
+
+    clock = FakeClock()
+    assert clock.now == int(clock.now)
+    assert clock.now >= time.monotonic() - 1
+    start = clock.now
+    clock.advance(10)
+    assert clock.now - start == 10
