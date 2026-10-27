@@ -172,7 +172,7 @@ Two changes you may notice as "my logs disappeared":
     work(1)
     ```
 
-Every logging decorator also accepts `logger=` (a logger or a name) and `level=`. See [Observability](guides/observability.md#configuring-logging).
+Every logging decorator also accepts `logger=` (a logger or a name) and `level=`. See [Observability](../features/observability/logging.md#configuring-logging).
 
 ### `no_debug` is deprecated
 

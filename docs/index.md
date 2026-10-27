@@ -16,7 +16,7 @@ bulkhead, batching, async helpers, metrics and test helpers. One import, sync an
 fully typed, zero dependencies.</p>
 
 [Get started](#install){ .md-button .md-button--primary }
-[Choose a decorator](choosing.md){ .md-button }
+[Choose a decorator](get-started/choosing.md){ .md-button }
 [View on GitHub](https://github.com/LitePy/PythonWrap){ .md-button }
 
 </div>
@@ -38,7 +38,7 @@ def load_profile(user_id: int) -> dict:
     ...
 ```
 
-`policy(...)` applies the protections in the [recommended order](stacking.md) whatever order you list them in.
+`policy(...)` applies the protections in the [recommended order](get-started/stacking.md) whatever order you list them in.
 
 ## Install
 
@@ -185,7 +185,7 @@ More of the toolkit, in a few lines each:
         assert flaky() == "ok"
     ```
 
-Not sure which decorator you need? Start with [Choose a decorator](choosing.md).
+Not sure which decorator you need? Start with [Choose a decorator](get-started/choosing.md).
 
 ## Principles
 
@@ -207,19 +207,19 @@ Not sure which decorator you need? Start with [Choose a decorator](choosing.md).
 
     ---
 
-    Async functions get `async def` wrappers, waits use `asyncio` instead of blocking the loop, and caches share concurrent awaits. See [Async support](async.md).
+    Async functions get `async def` wrappers, waits use `asyncio` instead of blocking the loop, and caches share concurrent awaits. See [Async support](get-started/async-and-methods.md).
 
 -   :material-text-box-search-outline:{ .lg .middle } __Never configures logging__
 
     ---
 
-    Importing python-wrap does not touch the root logger. Decorators log to the `python_wrap` logger, which has a `NullHandler`. See [Observability](guides/observability.md#configuring-logging).
+    Importing python-wrap does not touch the root logger. Decorators log to the `python_wrap` logger, which has a `NullHandler`. See [Observability](features/observability/logging.md#configuring-logging).
 
 -   :material-chart-line:{ .lg .middle } __Observable and testable__
 
     ---
 
-    `count_calls` and one [event hook](guides/metrics.md) cover retries, caches, circuits and limiters; [`python_wrap.testing`](testing.md) makes tests instant. Overhead numbers: [Performance](performance.md).
+    `count_calls` and one [event hook](features/observability/metrics.md) cover retries, caches, circuits and limiters; [`python_wrap.testing`](testing/index.md) makes tests instant. Overhead numbers: [Performance](project/performance.md).
 
 -   :material-alert-octagon-outline:{ .lg .middle } __Failures are explicit__
 
@@ -229,13 +229,13 @@ Not sure which decorator you need? Start with [Choose a decorator](choosing.md).
 
 </div>
 
-Some of these tools cannot do everything (a thread timeout cannot stop the work, for example). Every such limit is on one page: [Limitations](limitations.md).
+Some of these tools cannot do everything (a thread timeout cannot stop the work, for example). Every such limit is on one page: [Limitations](project/limitations.md).
 
 ## Where to go next
 
 <div class="grid cards" markdown>
 
--   :material-compass-outline:{ .lg .middle } __[Choose a decorator](choosing.md)__
+-   :material-compass-outline:{ .lg .middle } __[Choose a decorator](get-started/choosing.md)__
 
     ---
 
@@ -245,7 +245,7 @@ Some of these tools cannot do everything (a thread timeout cannot stop the work,
 
     ---
 
-    [Resilience](guides/resilience.md), [Caching](guides/caching.md), [Concurrency](guides/concurrency.md), [Async toolkit](guides/async-toolkit.md), [Batching](guides/batching.md), [Observability](guides/observability.md), [Metrics](guides/metrics.md), [Validation](guides/validation.md), [State](guides/state.md), [Policies](guides/policies.md), [Dev tools](guides/devtools.md), [Configuration](guides/configuration.md).
+    [Resilience](features/resilience/index.md), [Caching](features/caching/index.md), [Concurrency](features/concurrency/index.md), [Async toolkit](features/concurrency/async-helpers.md), [Batching](features/caching/batching.md), [Observability](features/observability/index.md), [Metrics](features/observability/metrics.md), [Validation](features/correctness/validation.md), [State](features/correctness/state.md), [Policies](features/resilience/policies.md), [Dev tools](features/devtools.md), [Configuration](features/configuration.md).
 
 -   :material-chef-hat:{ .lg .middle } __[Cookbook](cookbook/index.md)__
 
@@ -253,19 +253,19 @@ Some of these tools cannot do everything (a thread timeout cannot stop the work,
 
     Complete recipes for HTTP clients, crawlers, FastAPI, Django, CLIs and tests.
 
--   :material-test-tube:{ .lg .middle } __[Testing](testing.md)__
+-   :material-test-tube:{ .lg .middle } __[Testing](testing/index.md)__
 
     ---
 
     `fast_mode`, a fake clock, spies and `eventually`: instant, deterministic tests.
 
--   :material-layers-triple-outline:{ .lg .middle } __[Stacking decorators](stacking.md)__
+-   :material-layers-triple-outline:{ .lg .middle } __[Stacking decorators](get-started/stacking.md)__
 
     ---
 
     Order matters. The recommended order, and why `policy(...)` applies it for you.
 
--   :material-swap-horizontal:{ .lg .middle } __[Migrating from 0.1](migration.md)__
+-   :material-swap-horizontal:{ .lg .middle } __[Migrating from 0.1](project/migration.md)__
 
     ---
 

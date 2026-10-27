@@ -6,7 +6,7 @@ The guides explain one decorator at a time. The cookbook shows how they combine 
 2. **The code**, complete and runnable. Every code block on these pages is executed by the docs test suite, so what you read works.
 3. **How it works**, one decorator at a time.
 4. **Pitfalls**, the mistakes that cost a day.
-5. **Test it**, a runnable test file that uses [`python_wrap.testing`](../testing.md), so the decorators never make your tests slow or flaky.
+5. **Test it**, a runnable test file that uses [`python_wrap.testing`](../testing/index.md), so the decorators never make your tests slow or flaky.
 
 Every recipe that matters has a standalone script in the [`examples/`](https://github.com/LitePy/PythonWrap/tree/main/examples) directory that you can run with `python examples/<name>.py`. No third-party packages are needed; framework code (FastAPI, Django, httpx) is shown but marked as such.
 
@@ -29,7 +29,7 @@ New to python-wrap? Start with the [resilient HTTP client](resilient-http-client
 
 ## Ground rules the recipes follow
 
-* **Stack deliberately.** The decorator closest to the function runs first. `@retry` above `@rate_limit` means every retry counts against the limit; the other way round, the whole retry loop counts once. See [Stacking decorators](../stacking.md).
+* **Stack deliberately.** The decorator closest to the function runs first. `@retry` above `@rate_limit` means every retry counts against the limit; the other way round, the whole retry loop counts once. See [Stacking decorators](../get-started/stacking.md).
 * **State belongs to the function.** Caches, breakers and rate-limit windows are created once per decorated function and shared by every caller in the process. That is the point, and also the first thing to reset in tests.
 * **Libraries do not configure logging.** Recipes that print or collect logs set up their own handlers, as your application should.
 * **Be explicit about what is safe to repeat.** `retry`, `hedge` and `race` may run an operation more than once. Use them for reads and idempotent writes.

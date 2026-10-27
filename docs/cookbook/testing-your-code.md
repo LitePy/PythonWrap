@@ -9,7 +9,7 @@ Decorators that wait and remember make tests slow and order-dependent:
 - A `rate_limit` or circuit breaker keeps counting across tests, so a test passes alone and fails in the suite.
 - A TTL cache or throttle window needs real time to pass.
 
-[`python_wrap.testing`](../testing.md) is built for this. It is standard library only (pytest is optional), and the helpers change python-wrap's behaviour from the outside, so production code stays unchanged.
+[`python_wrap.testing`](../testing/index.md) is built for this. It is standard library only (pytest is optional), and the helpers change python-wrap's behaviour from the outside, so production code stays unchanged.
 
 | Helper | Use it to |
 | --- | --- |

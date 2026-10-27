@@ -632,7 +632,7 @@ def enforce_types(func: Callable[..., Any] | None = None, /, *, check_return: bo
     are not). For ``async def`` functions the awaited result is checked. The supported
     subset of annotations is listed under "Annotations supported by `enforce_types`" in
     the `python_wrap.validation` module docstring (the top of its API reference page) and
-    in the [validation guide](../guides/validation.md#supported-annotations); anything
+    in the [validation guide](../features/correctness/validation.md); anything
     unsupported is accepted rather than rejected.
 
     Args:
