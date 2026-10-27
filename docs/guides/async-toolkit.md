@@ -270,6 +270,20 @@ assert db.active == 0
     sides, give each side its own bulkhead. Never use `with bulkhead:` inside a coroutine:
     waiting for a slot there would block the event loop.
 
+!!! warning "A bulkhead inside a global limit can starve"
+    Suppose `map_async(fetch, urls, limit=10)` calls a function that waits for a per-host
+    `Bulkhead(2)`. A task holds one of the 10 global slots *while it queues for the
+    bulkhead*. If most URLs hit the same host, ten tasks sit on global slots, two work and
+    eight wait, so requests to every other host are blocked behind them (and with a
+    `timeout` or `max_waiting` the waiters may be rejected instead). Two ways out:
+
+    * Put the bulkhead outermost per host: acquire it *before* starting the work that
+      takes a global slot, or group the items by host and run one `map_async` per host
+      (each with `limit` equal to that host's bulkhead size).
+    * Size the limits so each per-host limit is at most the global one and the global
+      limit is at least the sum of all the per-host limits, so a global slot is never
+      held for a bulkhead slot that cannot be free.
+
 `BulkheadFull` is a `PythonWrapError`, so it composes with the other decorators, for
 example `fallback` to serve a degraded answer when the bulkhead is full, or `retry` to
 try again a little later. Every rejection also emits the `bulkhead.rejected` event, with

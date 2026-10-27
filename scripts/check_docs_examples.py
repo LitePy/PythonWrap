@@ -1,7 +1,9 @@
 """Run every ```python block found in docs/ and fail if any of them raises.
 
 Each block runs in a fresh namespace, so every example must be self-contained. A block
-preceded by a line containing only ``<!-- skip -->`` is not run. Blocks inside tabs or
+preceded by a line containing only ``<!-- skip -->`` is not run; one preceded by
+``<!-- unix-only -->`` is skipped on Windows. Each block runs as a real module registered in
+``sys.modules`` (so dataclasses, pickling and ``typing.get_type_hints`` work). Blocks inside tabs or
 admonitions (indented fences) are dedented first. ``docs/api`` is generated from docstrings
 and is not scanned.
 
@@ -15,12 +17,14 @@ import sys
 import textwrap
 import time
 import traceback
+import types
 import warnings
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DOCS = ROOT / "docs"
 SKIP_MARK = "<!-- skip -->"
+UNIX_ONLY_MARK = "<!-- unix-only -->"
 
 
 def extract(text: str) -> list[tuple[int, str, bool]]:
@@ -35,7 +39,8 @@ def extract(text: str) -> list[tuple[int, str, bool]]:
             j = i - 1
             while j >= 0 and not lines[j].strip():
                 j -= 1
-            skipped = j >= 0 and lines[j].strip() == SKIP_MARK
+            mark = lines[j].strip() if j >= 0 else ""
+            skipped = mark == SKIP_MARK or (mark == UNIX_ONLY_MARK and sys.platform == "win32")
             body: list[str] = []
             i += 1
             while i < len(lines) and not lines[i].lstrip().startswith("```"):
@@ -60,16 +65,21 @@ def main(argv: list[str]) -> int:
                 skipped_count += 1
                 continue
             ran += 1
-            namespace: dict[str, object] = {"__name__": "__docs_example__"}
+            name = f"_docs_example_{ran}"
+            module = types.ModuleType(name)
+            module.__file__ = where
+            sys.modules[name] = module
             try:
                 code = compile(source, where, "exec")
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore", DeprecationWarning)
-                    exec(code, namespace)
+                    exec(code, module.__dict__)
             except BaseException:
                 failed += 1
                 print(f"FAILED {where}", file=sys.stderr)
                 traceback.print_exc()
+            finally:
+                sys.modules.pop(name, None)
     elapsed = time.perf_counter() - started
     print(f"{ran} examples run, {skipped_count} skipped, {failed} failed in {elapsed:.2f}s")
     return 1 if failed else 0

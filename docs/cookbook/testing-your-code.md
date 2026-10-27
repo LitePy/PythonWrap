@@ -156,8 +156,8 @@ for _name, _test in list(globals().items()):
 !!! warning "State lives on the decorated function"
     Caches, circuit breakers, rate-limit windows and `once` results belong to the function object, which lives as long as the module. Reset them between tests or tests depend on their order: `func.cache_clear()`, `breaker.reset()` / `func.breaker.reset()`, `func.reset()` for `once`, `func.cancel()` for `debounce`. `rate_limit`, `throttle` and `singleflight` have no reset: move the clock with `fake_clock`, use a distinct key per test (as `send_sms("ana")` does), or build the decorated function inside the test.
 
-!!! warning "Install the fake clock before the first call"
-    An entry stored under the real clock has a timestamp from a different timeline than the fake one (which starts at 1000.0). If a test warms a cache and *then* enters `fake_clock()`, `advance()` will not expire it. Enter the clock first, or `cache_clear()` inside it, as the TTL test above does.
+!!! note "Entries made before the fake clock"
+    `fake_clock()` starts at the real `time.monotonic()` when it is created, so a cache warmed *before* entering the clock is in its past and expires normally after `advance()`. A fake clock created with an explicit `start=` (say `start=0`) is on a different timeline from earlier entries; entering the clock first, or `cache_clear()` inside it, avoids surprises.
 
 * `fake_clock` does not control `timeout` deadlines or `debounce` timers; they use real timers. Test `debounce` with `.flush()` and `timeout` with tiny real durations.
 * `fast_mode` and `fake_clock` change the process-wide clock, not just the current thread, so worker threads started by the test see them. Do not run tests that use them in parallel threads of the same process (pytest-xdist processes are fine).

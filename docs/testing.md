@@ -77,13 +77,14 @@ def flaky() -> str:
     return "ok"
 
 with fake_clock() as clock:
+    start = clock.now
     assert flaky() == "ok"            # returns at once; no real waiting
 
 assert clock.sleeps == [1.0, 2.0, 4.0]      # the backoff schedule you configured
-assert clock.now == 1000.0 + 7.0            # FakeClock(start=1000.0) by default
+assert clock.now == start + 7.0
 ```
 
-`FakeClock(start=...)` has `.now`, `.advance(seconds)`, `.sleeps` and `.total_slept`; pass your own instance with `fake_clock(clock)`.
+`FakeClock()` starts at the real `time.monotonic()` of the moment it is created, so entries stamped before it was installed are in its past and still expire; pass `start=` for a fixed reading. It has `.now`, `.advance(seconds)`, `.sleeps` and `.total_slept`; pass your own instance with `fake_clock(clock)`.
 
 The actual deadlines of `timeout` (signal timer, worker thread, `asyncio.wait_for`) and `debounce` (`threading.Timer`, event-loop tasks) use real timers and are not affected by the fake clock. Test them with tiny real durations, or call `debounce`'s `.flush()`.
 

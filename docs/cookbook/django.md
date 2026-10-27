@@ -16,7 +16,8 @@ The decorators involved (`memoize`, `transactional`, `deprecate`) know nothing a
 import contextlib
 import warnings
 
-from python_wrap import current_transaction, deprecate, memoize, transactional
+from python_wrap import deprecate, memoize
+from python_wrap.state import INJECTED, Transaction, transactional
 
 DB: dict[int, str] = {1: "free", 2: "pro"}
 OUTBOX: list[str] = []  # emails "sent"
@@ -36,9 +37,7 @@ def fetch_plan(user_id: int) -> str:
 
 
 @transactional
-def upgrade(user_id: int, plan: str, *, fail: bool = False) -> None:
-    tx = current_transaction()  # typed alternative to a `tx` parameter
-    assert tx is not None
+def upgrade(user_id: int, plan: str, *, fail: bool = False, tx: Transaction = INJECTED) -> None:
     previous = DB[user_id]
     DB[user_id] = plan
     tx.on_rollback(DB.__setitem__, user_id, previous)  # undo the write if anything fails
@@ -96,7 +95,8 @@ from django.db import transaction
 from django.db.models.signals import post_save
 from django.dispatch import receiver
 
-from python_wrap import current_transaction, deprecate, memoize, transactional
+from python_wrap import deprecate, memoize
+from python_wrap.state import INJECTED, Transaction, transactional
 
 from .models import Subscription
 from .tasks import send_receipt
@@ -115,9 +115,7 @@ def invalidate_plan(sender, instance, **kwargs) -> None:
 
 
 @transactional
-def upgrade(user_id: int, plan: str) -> None:
-    tx = current_transaction()
-    assert tx is not None
+def upgrade(user_id: int, plan: str, *, tx: Transaction = INJECTED) -> None:
     with transaction.atomic():  # the database part: Django rolls this back by itself
         Subscription.objects.filter(user_id=user_id).update(plan=plan)
         transaction.on_commit(lambda: send_receipt.delay(user_id))  # after the DB commit
@@ -156,7 +154,8 @@ The service layer is plain Python, so its tests do not need the database. Reset 
 import contextlib
 import warnings
 
-from python_wrap import current_transaction, deprecate, memoize, transactional
+from python_wrap import deprecate, memoize
+from python_wrap.state import INJECTED, Transaction, transactional
 
 DB: dict[int, str] = {1: "free", 2: "pro"}
 OUTBOX: list[str] = []  # emails "sent"
@@ -176,9 +175,7 @@ def fetch_plan(user_id: int) -> str:
 
 
 @transactional
-def upgrade(user_id: int, plan: str, *, fail: bool = False) -> None:
-    tx = current_transaction()  # typed alternative to a `tx` parameter
-    assert tx is not None
+def upgrade(user_id: int, plan: str, *, fail: bool = False, tx: Transaction = INJECTED) -> None:
     previous = DB[user_id]
     DB[user_id] = plan
     tx.on_rollback(DB.__setitem__, user_id, previous)  # undo the write if anything fails

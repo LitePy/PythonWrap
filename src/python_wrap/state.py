@@ -7,14 +7,22 @@ import contextvars
 import copy
 import functools
 import inspect
+import threading
 from collections.abc import Callable, Iterable
 from types import TracebackType
-from typing import Any, ParamSpec, TypeVar, overload
+from typing import Any, Final, ParamSpec, TypeVar, cast, overload
 
 from python_wrap import _core
 from python_wrap._core import F, LoggerLike
 
-__all__ = ["Transaction", "current_transaction", "revert_on_failure", "transactional"]
+__all__ = [
+    "INJECTED",
+    "Transaction",
+    "current_transaction",
+    "require_transaction",
+    "revert_on_failure",
+    "transactional",
+]
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -224,6 +232,29 @@ def current_transaction() -> Transaction | None:
     return _current.get()
 
 
+def require_transaction() -> Transaction:
+    """Return the current transaction, raising if there is none.
+
+    Like `current_transaction` but typed as `Transaction`, so there is no
+    ``assert tx is not None`` boilerplate.
+
+    Returns:
+        The transaction of the innermost running ``@transactional`` call.
+
+    Raises:
+        RuntimeError: If called outside a ``@transactional`` function.
+
+    Example:
+        >>> @transactional
+        ... def charge():
+        ...     require_transaction().on_rollback(print, "undo")
+    """
+    tx = _current.get()
+    if tx is None:
+        raise RuntimeError("no active transaction: call this from a @transactional function")
+    return tx
+
+
 class Transaction:
     """Collects commit and rollback callbacks and runs the right set once.
 
@@ -248,6 +279,7 @@ class Transaction:
         self._commit: list[tuple[Callable[..., Any], tuple[Any, ...], dict[str, Any]]] = []
         self._rollback: list[tuple[Callable[..., Any], tuple[Any, ...], dict[str, Any]]] = []
         self._state = "pending"
+        self._state_lock = threading.Lock()
 
     @property
     def state(self) -> str:
@@ -257,6 +289,12 @@ class Transaction:
     def _check_open(self) -> None:
         if self._state != "pending":
             raise RuntimeError(f"transaction already {self._state}")
+
+    def _complete(self, state: str) -> None:
+        """Atomically move from pending to ``state``; only one caller can succeed."""
+        with self._state_lock:
+            self._check_open()
+            self._state = state
 
     def on_rollback(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
         """Register ``fn(*args, **kwargs)`` to run if the transaction rolls back."""
@@ -281,15 +319,13 @@ class Transaction:
 
     def commit(self) -> None:
         """Mark committed and run the commit callbacks in order."""
-        self._check_open()
-        self._state = "committed"
+        self._complete("committed")
         for fn, args, kwargs in self._commit:
             self._call_sync(fn, args, kwargs)
 
     def rollback(self) -> None:
         """Mark rolled back and run the rollback callbacks in reverse order."""
-        self._check_open()
-        self._state = "rolled_back"
+        self._complete("rolled_back")
         for fn, args, kwargs in reversed(self._rollback):
             try:
                 self._call_sync(fn, args, kwargs)
@@ -298,8 +334,7 @@ class Transaction:
 
     async def acommit(self) -> None:
         """Like `commit`, awaiting async callbacks."""
-        self._check_open()
-        self._state = "committed"
+        self._complete("committed")
         for fn, args, kwargs in self._commit:
             result = fn(*args, **kwargs)
             if inspect.isawaitable(result):
@@ -307,8 +342,7 @@ class Transaction:
 
     async def arollback(self) -> None:
         """Like `rollback`, awaiting async callbacks."""
-        self._check_open()
-        self._state = "rolled_back"
+        self._complete("rolled_back")
         for fn, args, kwargs in reversed(self._rollback):
             try:
                 result = fn(*args, **kwargs)
@@ -350,6 +384,20 @@ class Transaction:
             await self.arollback()
 
 
+class _Injected:
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "INJECTED"
+
+
+INJECTED: Final[Transaction] = cast(Transaction, _Injected())
+"""Typed placeholder default for a ``tx`` parameter that `transactional` fills in.
+
+Write ``def charge(amount: int, *, tx: Transaction = INJECTED) -> None`` and callers
+type-check without passing ``tx``. Never use the value itself."""
+
+
 @overload
 def transactional(func: F, /) -> F: ...
 @overload
@@ -358,11 +406,13 @@ def transactional(func: Callable[..., Any] | None = None, /, *, logger: LoggerLi
     """Run the function inside a fresh `Transaction` per call.
 
     If the function has a parameter named ``tx`` it receives the transaction as the
-    keyword argument ``tx=`` (so do not also pass it positionally; keyword-only is
-    cleanest); otherwise use `current_transaction` (a ``ContextVar``, correct across
-    threads and asyncio tasks). Returning normally commits, raising rolls back and
-    re-raises. Nested ``@transactional`` calls each get their own transaction. Works for
-    sync and ``async def`` functions (async callbacks are awaited).
+    keyword argument ``tx=``. Declare it as ``tx: Transaction = INJECTED`` (keyword-only is
+    cleanest) so callers type-check without passing it; passing ``tx`` yourself raises
+    ``TypeError``. Otherwise use `require_transaction` / `current_transaction` (a
+    ``ContextVar``, correct across threads and asyncio tasks). Returning normally
+    commits, raising rolls back and re-raises. Nested ``@transactional`` calls each get
+    their own transaction. Works for sync and ``async def`` functions (async callbacks
+    are awaited).
 
     v0.1's ``transactional`` was a no-op.
 
@@ -373,22 +423,43 @@ def transactional(func: Callable[..., Any] | None = None, /, *, logger: LoggerLi
     Returns:
         The wrapped function, or a decorator when called with options.
 
+    Raises:
+        TypeError: At call time, if the caller passes ``tx`` explicitly.
+
     Example:
         >>> @transactional
-        ... def transfer(tx):
+        ... def transfer(tx: Transaction = INJECTED):
         ...     tx.on_rollback(print, "undone")
     """
 
     def decorate(f: Callable[..., Any]) -> Any:
+        tx_pos: int | None = None
         try:
-            wants_tx = "tx" in inspect.signature(f).parameters
+            params = inspect.signature(f).parameters
+            wants_tx = "tx" in params
+            if wants_tx:
+                names = list(params)
+                kind = params["tx"].kind
+                if kind in (kind.POSITIONAL_ONLY, kind.POSITIONAL_OR_KEYWORD):
+                    tx_pos = names.index("tx")
         except (TypeError, ValueError):
             wants_tx = False
+
+        def check_not_passed(args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+            if ("tx" in kwargs and kwargs["tx"] is not INJECTED) or (
+                tx_pos is not None and len(args) > tx_pos and args[tx_pos] is not INJECTED
+            ):
+                raise TypeError(
+                    f"{_core.qualname(f)}() received 'tx' from the caller, but @transactional "
+                    "supplies it; do not pass tx"
+                )
 
         if _core.is_async(f):
 
             @functools.wraps(f)
             async def awrapper(*args: Any, **kwargs: Any) -> Any:
+                if wants_tx:
+                    check_not_passed(args, kwargs)
                 tx = Transaction(logger)
                 if wants_tx:
                     kwargs["tx"] = tx
@@ -403,6 +474,8 @@ def transactional(func: Callable[..., Any] | None = None, /, *, logger: LoggerLi
 
         @functools.wraps(f)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
+            if wants_tx:
+                check_not_passed(args, kwargs)
             tx = Transaction(logger)
             if wants_tx:
                 kwargs["tx"] = tx
