@@ -2,9 +2,9 @@
 
 Rules every module follows:
 
-* Never configure logging. Log through :func:`get_logger`; the package logger carries a
+* Never configure logging. Log through `get_logger`; the package logger carries a
   ``NullHandler`` so nothing is printed unless the application configures logging.
-* Support ``async def`` functions: branch on :func:`is_async` and return an ``async def``
+* Support ``async def`` functions: branch on `is_async` and return an ``async def``
   wrapper, so ``inspect.iscoroutinefunction(wrapped)`` stays true.
 * Read time through ``_core.monotonic()`` / ``_core.perf_counter()`` and wait through
   ``_core.sleep()`` / ``_core.async_sleep()`` — always as module attributes, never
@@ -13,14 +13,14 @@ Rules every module follows:
 
 Test overrides contract
 -----------------------
-``_core.overrides`` is a single process-wide :class:`Overrides` instance, mutated in
+``_core.overrides`` is a single process-wide `Overrides` instance, mutated in
 place (never replaced), so it may be read as ``_core.overrides.<field>`` at any time.
 Reads are plain attribute reads (thread-safe under the GIL); changing it is a test-time
-operation done through :func:`set_overrides` (which holds ``overrides_lock``) or the
-public helpers in :mod:`python_wrap.testing`. Modules must read the field **at call
+operation done through `set_overrides` (which holds ``overrides_lock``) or the
+public helpers in `python_wrap.testing`. Modules must read the field **at call
 time**, not at decoration time, so a test can flip it after import:
 
-* ``no_sleep``: :func:`sleep` / :func:`async_sleep` return immediately (the async one
+* ``no_sleep``: `sleep` / `async_sleep` return immediately (the async one
   still yields to the event loop once). Handled here; other modules need do nothing as
   long as they wait only through ``_core``. A fake clock installed by ``fake_clock()``
   replaces the sleeps and so still advances time.
@@ -75,7 +75,7 @@ def set_overrides(**values: Any) -> dict[str, Any]:
     """Set override fields atomically and return their previous values.
 
     Raises:
-        TypeError: If a name is not a field of :class:`Overrides`.
+        TypeError: If a name is not a field of `Overrides`.
         ValueError: If ``max_attempts`` is not ``None`` or a positive integer.
     """
     names = {f.name for f in fields(Overrides)}
@@ -100,7 +100,7 @@ def sleep(seconds: float) -> None:
 
 
 async def async_sleep(seconds: float) -> None:
-    """Indirection over :func:`asyncio.sleep` so tests can patch it.
+    """Indirection over `asyncio.sleep` so tests can patch it.
 
     While ``overrides.no_sleep`` is set it only yields to the event loop once.
     """
