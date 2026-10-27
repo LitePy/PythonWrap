@@ -103,6 +103,16 @@ nav:
       - State safety: guides/state.md
       - Policies: guides/policies.md
       - Developer tools: guides/devtools.md
+  - Cookbook:
+      - cookbook/index.md
+      - Resilient HTTP client: cookbook/resilient-http-client.md
+      - Async crawler and bulk fetch: cookbook/async-crawler.md
+      - FastAPI: cookbook/fastapi.md
+      - Django: cookbook/django.md
+      - CLI tools and scripts: cookbook/cli-and-scripts.md
+      - DataLoader-style batching: cookbook/dataloader-batching.md
+      - Testing your code: cookbook/testing-your-code.md
+      - Observability: cookbook/observability.md
   - Concepts:
       - Async support: async.md
       - Stacking decorators: stacking.md
