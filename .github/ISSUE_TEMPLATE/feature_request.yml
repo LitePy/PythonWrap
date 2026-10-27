@@ -1,0 +1,27 @@
+name: Feature request
+description: Suggest a new decorator or an option on an existing one.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: The situation first, not the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like to write?
+      description: A sketch of the API as you would want to call it.
+      render: python
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other libraries or hand-written code you tried, and why they fall short.
+  - type: markdown
+    attributes:
+      value: |
+        python-wrap has no runtime dependencies and supports sync and async code,
+        so proposals are weighed against both.

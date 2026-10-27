@@ -1,0 +1,184 @@
+# Publish on a version tag, using PyPI Trusted Publishing.
+#
+# One-time setup (a publisher registered on PyPI and TestPyPI, and two GitHub
+# environments) is described in RELEASING.md. It must exist before the first tag: a tag
+# pushed against an unregistered publisher fails at the upload, and a version number on
+# PyPI can never be reused.
+#
+# Routing: a final version (0.2.0, 0.2.0.post1) goes to PyPI. Anything else (a, b, rc,
+# .dev) goes to TestPyPI only, so a release candidate can be rehearsed without burning a
+# real version number.
+#
+# No API token is involved anywhere in this file, and none should be added. Trusted
+# Publishing mints a short-lived credential scoped to this workflow and environment.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  # Lets the build-and-verify half be exercised without cutting a tag.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and verify the distributions
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.2
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          python-version: "3.13"
+
+      # Read the version from the file rather than importing the package: the build
+      # backend reads it from the same place, so this is what would actually be
+      # published. A tag that disagrees with it is how a release goes out under the
+      # wrong number, and that is unfixable afterwards.
+      - name: The tag must match the packaged version
+        id: meta
+        run: |
+          packaged=$(sed -nE 's/^__version__ *= *"([^"]+)".*/\1/p' src/python_wrap/__init__.py | head -n1)
+          if [ -z "$packaged" ]; then
+            echo "::error::could not read __version__ from src/python_wrap/__init__.py"
+            exit 1
+          fi
+          echo "version=$packaged" >> "$GITHUB_OUTPUT"
+          if printf '%s' "$packaged" | grep -Eq '^[0-9]+(\.[0-9]+)*(\.post[0-9]+)?$'; then
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          fi
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            tag="${GITHUB_REF_NAME#v}"
+            echo "tag=$tag packaged=$packaged"
+            if [ "$tag" != "$packaged" ]; then
+              echo "::error::tag $GITHUB_REF_NAME does not match python_wrap.__version__ ($packaged)"
+              exit 1
+            fi
+          fi
+
+      - name: Build
+        run: uv build
+
+      - name: twine check
+        run: uvx twine check --strict dist/*
+
+      - name: Smoke-test the wheel in a clean environment
+        run: |
+          python3 -m zipfile -l dist/*.whl | grep -q 'python_wrap/py.typed'
+          uv venv "$RUNNER_TEMP/smoke" --python 3.13
+          uv pip install --python "$RUNNER_TEMP/smoke" dist/*.whl
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/smoke/bin/python" -c "import python_wrap; print(python_wrap.__version__)"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish-testpypi:
+    name: Publish to TestPyPI
+    needs: build
+    if: github.ref_type == 'tag' && needs.build.outputs.prerelease == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/python-wrap
+    permissions:
+      # The OIDC token Trusted Publishing exchanges for a short-lived upload token.
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@v1.14.2
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          # Re-running after a failed attempt should not be blocked by files that
+          # already landed.
+          skip-existing: true
+
+  publish-pypi:
+    name: Publish to PyPI
+    needs: build
+    if: github.ref_type == 'tag' && needs.build.outputs.prerelease == 'false'
+    runs-on: ubuntu-latest
+    environment:
+      # Add a required reviewer to this environment to make every real upload wait for
+      # one click.
+      name: pypi
+      url: https://pypi.org/p/python-wrap
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@v1.14.2
+        with:
+          # PEP 740 attestations, signed by the same OIDC identity.
+          attestations: true
+
+  github-release:
+    name: Create the GitHub release
+    needs: [build, publish-testpypi, publish-pypi]
+    # Whichever publish job applied must have succeeded; the other is skipped.
+    if: >-
+      !cancelled() && github.ref_type == 'tag' && needs.build.result == 'success'
+      && contains(fromJSON('["success", "skipped"]'), needs.publish-testpypi.result)
+      && contains(fromJSON('["success", "skipped"]'), needs.publish-pypi.result)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+
+      # The release notes are the CHANGELOG section for this version: from its `## `
+      # heading up to the next one. Matches `## [0.2.0] - date` and `## 0.2.0`.
+      - name: Extract the changelog section
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          awk -v v="$VERSION" '
+            /^## / {
+              if (found) exit
+              if (index($0, "[" v "]") || index($0, "## " v) == 1) { found = 1; next }
+            }
+            found { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "::warning::no CHANGELOG.md section found for $VERSION"
+            echo "See CHANGELOG.md for what changed in this release." > release-notes.md
+          fi
+          cat release-notes.md
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ needs.build.outputs.prerelease }}
+        run: |
+          flags=()
+          if [ "$PRERELEASE" = "true" ]; then flags+=(--prerelease); fi
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file release-notes.md \
+            "${flags[@]}"

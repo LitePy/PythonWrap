@@ -1,0 +1,38 @@
+name: Bug report
+description: Something behaves differently from what the documentation says.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what you got instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: The smallest code that shows the problem, including the decorator and how it is called (sync, async, method).
+      render: python
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: python-wrap version
+      description: "Run: python -c 'import python_wrap; print(python_wrap.__version__)'"
+    validations:
+      required: true
+  - type: input
+    id: python
+    attributes:
+      label: Python version and operating system
+      placeholder: "3.13.1 on Windows 11"
+    validations:
+      required: true
+  - type: textarea
+    id: traceback
+    attributes:
+      label: Traceback or log output
+      render: text

@@ -1,90 +1,115 @@
-[tool.poetry]
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
 name = "python-wrap"
-version = "0.1.0"
-description = "A comprehensive collection of Python decorators and utility functions for enhanced development workflows"
-authors = ["Mahmoud Ahmed <contact.mahmoudahmed@gmail.com>"]
-maintainers = ["Mahmoud Ahmed <contact.mahmoudahmed@gmail.com>"]
-license = "MIT"
+dynamic = ["version"]
+description = "Everyday Python decorators that just work: retry, memoize, timeout, rate limiting, circuit breakers and more. Typed, async-aware, zero dependencies."
 readme = "README.md"
-homepage = "https://github.com/Pythondeveloper6/PythonWrap"
-repository = "https://github.com/Pythondeveloper6/PythonWrap"
-documentation = "https://python-wrap.readthedocs.io"
-keywords = ["decorators", "utilities", "python", "development", "tools","python"]
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Mahmoud Ahmed", email = "pythondeveloper6@gmail.com" }]
+maintainers = [{ name = "Mahmoud Ahmed", email = "pythondeveloper6@gmail.com" }]
+keywords = [
+    "decorators",
+    "retry",
+    "memoize",
+    "cache",
+    "timeout",
+    "rate-limit",
+    "circuit-breaker",
+    "debounce",
+    "throttle",
+    "asyncio",
+    "utilities",
+]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Framework :: AsyncIO",
     "Topic :: Software Development :: Libraries :: Python Modules",
-    "Topic :: Software Development :: Libraries :: Application Frameworks",
-    "Typing :: Typed"
+    "Topic :: Utilities",
+    "Typing :: Typed",
 ]
-packages = [{include = "python_wrap"}]
+# Zero runtime dependencies is a feature: this package should be safe to add to any project.
+dependencies = []
 
-[tool.poetry.dependencies]
-python = "^3.8"
-wrapt = "^1.15.0"
-typing-extensions = "^4.7.1"  # For better type hints support
+[project.urls]
+Homepage = "https://github.com/LitePy/PythonWrap"
+Documentation = "https://python-wrap.readthedocs.io"
+Source = "https://github.com/LitePy/PythonWrap"
+Issues = "https://github.com/LitePy/PythonWrap/issues"
+Changelog = "https://github.com/LitePy/PythonWrap/blob/main/CHANGELOG.md"
 
-[tool.poetry.group.dev.dependencies]
-pytest = "^7.4.0"
-pytest-cov = "^4.1.0"
-black = "^23.7.0"  # Code formatting
-isort = "^5.12.0"  # Import sorting
-mypy = "^1.4.1"  # Type checking
-pylint = "^2.17.5"  # Code linting
-pre-commit = "^3.3.3"  # Git hooks
-sphinx = "^7.1.1"  # Documentation
-sphinx-rtd-theme = "^1.2.2"  # Documentation theme
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-cov>=6.0",
+    "pytest-asyncio>=0.24",
+    "hypothesis>=6.100",
+    "ruff>=0.8",
+    "mypy>=1.13",
+]
+docs = [
+    "mkdocs-material>=9.5",
+    "mkdocstrings[python]>=0.27",
+]
+release = ["build>=1.2", "twine>=6.0"]
 
-[tool.poetry.urls]
-"Bug Tracker" = "https://github.com/Pythondeveloper6/PythonWrap/issues"
-"Changelog" = "https://github.com/Pythondeveloper6/PythonWrap/blob/main/CHANGELOG.md"
+[tool.hatch.version]
+path = "src/python_wrap/__init__.py"
 
-[build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+[tool.hatch.build.targets.wheel]
+packages = ["src/python_wrap"]
+exclude = ["**/__pycache__", "**/*.py[cod]", "**/.DS_Store"]
 
-[tool.black]
-line-length = 88
-target-version = ["py38"]
-include = '\.pyi?$'
-
-[tool.isort]
-profile = "black"
-multi_line_output = 3
-line_length = 88
-
-[tool.mypy]
-python_version = "3.8"
-warn_return_any = true
-warn_unused_configs = true
-disallow_untyped_defs = true
-check_untyped_defs = true
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src/python_wrap",
+    "/tests",
+    "/README.md",
+    "/LICENSE",
+    "/CHANGELOG.md",
+]
+exclude = ["**/__pycache__", "**/*.py[cod]", "**/.DS_Store"]
 
 [tool.pytest.ini_options]
-minversion = "7.0"
-addopts = "-ra -q --cov=python_wrap --cov-report=term-missing"
 testpaths = ["tests"]
+addopts = "--strict-markers -q"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+filterwarnings = ["error::pytest.PytestUnraisableExceptionWarning"]
 
 [tool.coverage.run]
 source = ["python_wrap"]
 branch = true
 
 [tool.coverage.report]
-exclude_lines = [
-    "pragma: no cover",
-    "def __repr__",
-    "if self.debug:",
-    "raise NotImplementedError",
-    "if __name__ == .__main__.:",
-    "pass",
-    "raise ImportError"
-]
-ignore_errors = true
-omit = ["tests/*", "setup.py"]
+show_missing = true
+exclude_also = ["if TYPE_CHECKING:", "@overload", "raise NotImplementedError", "\\.\\.\\."]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4", "SIM", "RUF"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["python_wrap"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+files = ["src/python_wrap"]
