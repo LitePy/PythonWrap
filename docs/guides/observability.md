@@ -245,8 +245,25 @@ register("ana", "123-45-6789")
 assert "123-45-6789" not in sink.messages[1]
 ```
 
+To **add** names without replacing the defaults, use `redact_extra=`, on `log_args` and on `audit`:
+
+```python
+from python_wrap import audit
+
+records = []
+
+@audit(redact_extra=["ssn"], sink=records.append)
+def register(name: str, ssn: str, password: str) -> None: ...
+
+register("ana", "123-45-6789", "hunter2")
+args = records[0].arguments
+assert args["ssn"] == "***" and args["password"] == "***" and args["name"] == "ana"
+```
+
+To apply the same names to every `log_args` and `audit` in the project, set them once with `configure(redact_extra=[...])` (or replace the whole list with `configure(redact=[...])`); see [Project-wide configuration](configuration.md).
+
 !!! warning "`redact=` replaces the defaults"
-    Passing `redact=("ssn",)` masks only `ssn`; `password` is no longer masked. Extend `DEFAULT_REDACT` as shown above. Redaction works by parameter **name**; it does not scan values, and it does not touch what the function itself logs or returns.
+    Passing `redact=("ssn",)` masks only `ssn`; `password` is no longer masked. Prefer `redact_extra=`. Redaction works by parameter **name**; it does not scan values, and it does not touch what the function itself logs or returns.
 
 ## `audit`
 

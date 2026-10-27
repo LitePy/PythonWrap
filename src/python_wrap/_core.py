@@ -107,8 +107,13 @@ async def async_sleep(seconds: float) -> None:
     await asyncio.sleep(0 if overrides.no_sleep else seconds)
 
 
+_default_logger: LoggerLike = None
+
+
 def get_logger(logger: LoggerLike = None) -> logging.Logger:
     """Resolve a ``logger=`` argument: a Logger, a logger name, or the package logger."""
+    if logger is None:
+        logger = _default_logger  # set by python_wrap.config.configure(logger=...)
     if isinstance(logger, logging.Logger):
         return logger
     return logging.getLogger(logger or LOGGER_NAME)
