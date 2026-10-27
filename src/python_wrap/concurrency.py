@@ -1,7 +1,8 @@
 """Concurrency and flow-control decorators.
 
-* `timeout` — bound how long a call may run.
+* `timeout` — bound how long a call (or a `with` / `async with` block) may run.
 * `rate_limit` — at most *N* calls per period, rejecting or waiting.
+* `RateLimiter` — a rate limit shared by several functions and blocks.
 * `run_in_thread` — start a call in a new thread and get a ``Future`` back.
 * `throttle` — run at most once per interval; calls in between are skipped.
 * `debounce` — run once activity has stopped for a while.
@@ -25,17 +26,21 @@ import sys
 import threading
 import weakref
 from collections import deque
-from collections.abc import Awaitable, Callable, Coroutine, Hashable
-from types import FrameType
+from collections.abc import Awaitable, Callable, Coroutine, Hashable, Iterable
+from types import FrameType, TracebackType
 from typing import Any, Concatenate, Generic, ParamSpec, Protocol, TypeVar, cast, overload
 
 from python_wrap import _core
+from python_wrap import deadline as _deadline
 from python_wrap._core import F, P, R
 from python_wrap.errors import RateLimitExceeded, TimeoutExpired
 
 __all__ = [
     "AsyncDebounced",
     "Debounced",
+    "Limit",
+    "RateLimiter",
+    "Timeout",
     "debounce",
     "rate_limit",
     "run_in_thread",
@@ -53,52 +58,76 @@ P2 = ParamSpec("P2")
 # ---------------------------------------------------------------------------------------
 
 _HAS_SETITIMER = hasattr(signal, "setitimer") and hasattr(signal, "SIGALRM")
+_BLOCK = "<block>"  # the "function" name used in messages and events for `with timeout()`
 
 
 def _signals_usable() -> bool:
     return _HAS_SETITIMER and threading.current_thread() is threading.main_thread()
 
 
-def _timeout_message(func: Callable[..., Any], seconds: float) -> str:
-    return f"{_core.qualname(func)} did not finish within {seconds:g}s"
+def _timeout_message(label: str, seconds: float) -> str:
+    return f"{label} did not finish within {seconds:g}s"
 
 
-def _call_with_alarm(func: Callable[P, R], seconds: float, *args: P.args, **kwargs: P.kwargs) -> R:
-    """Run ``func`` under a SIGALRM/``setitimer`` deadline, cooperating with outer ones."""
-    start = _core.monotonic()
-    deadline = start + seconds
-    expired = TimeoutExpired(_timeout_message(func, seconds), seconds=seconds)
-    outer_fired = False
+def _expired(label: str, seconds: float) -> TimeoutExpired:
+    """Build the error for an expiry and emit ``timeout.expired``."""
+    _core.emit("timeout.expired", label, seconds=seconds)
+    return TimeoutExpired(_timeout_message(label, seconds), seconds=seconds)
 
-    previous_handler = signal.getsignal(signal.SIGALRM)
-    previous_delay, previous_interval = signal.getitimer(signal.ITIMER_REAL)
 
-    def handler(signum: int, frame: FrameType | None) -> None:
-        nonlocal outer_fired
-        if _core.monotonic() >= deadline - 1e-3 or not previous_delay:
-            raise expired
-        # The alarm belongs to an enclosing timeout whose deadline comes first.
-        outer_fired = True
-        signal.signal(signal.SIGALRM, previous_handler)
-        if callable(previous_handler):
-            previous_handler(signum, frame)
+class _Alarm:
+    """One SIGALRM/``setitimer`` deadline, cooperating with enclosing ones.
 
-    signal.signal(signal.SIGALRM, handler)
-    delay = seconds if not previous_delay else min(seconds, previous_delay)
-    signal.setitimer(signal.ITIMER_REAL, delay)
-    try:
-        return func(*args, **kwargs)
-    finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        if not outer_fired:
+    Enter it in the main thread only. The previous handler and any armed timer are
+    restored on exit; an enclosing timer whose deadline comes first still fires.
+    """
+
+    def __init__(self, label: str, seconds: float) -> None:
+        self.label = label
+        self.seconds = seconds
+        self.error = TimeoutExpired(_timeout_message(label, seconds), seconds=seconds)
+        self._outer_fired = False
+
+    def __enter__(self) -> None:
+        self._start = _core.monotonic()
+        deadline = self._start + self.seconds
+        self._previous_handler = previous_handler = signal.getsignal(signal.SIGALRM)
+        self._previous_delay, self._previous_interval = signal.getitimer(signal.ITIMER_REAL)
+        previous_delay = self._previous_delay
+
+        def handler(signum: int, frame: FrameType | None) -> None:
+            if _core.monotonic() >= deadline - 1e-3 or not previous_delay:
+                raise self.error
+            # The alarm belongs to an enclosing timeout whose deadline comes first.
+            self._outer_fired = True
             signal.signal(signal.SIGALRM, previous_handler)
-            if previous_delay:
-                remaining = previous_delay - (_core.monotonic() - start)
+            if callable(previous_handler):
+                previous_handler(signum, frame)
+
+        signal.signal(signal.SIGALRM, handler)
+        delay = self.seconds if not previous_delay else min(self.seconds, previous_delay)
+        signal.setitimer(signal.ITIMER_REAL, delay)
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        if not self._outer_fired:
+            signal.signal(signal.SIGALRM, self._previous_handler)
+            if self._previous_delay:
+                remaining = self._previous_delay - (_core.monotonic() - self._start)
                 # Re-arm the enclosing timer; if its deadline already passed, fire ASAP.
-                signal.setitimer(signal.ITIMER_REAL, max(remaining, 1e-6), previous_interval)
+                signal.setitimer(signal.ITIMER_REAL, max(remaining, 1e-6), self._previous_interval)
+        if exc is self.error:
+            _core.emit("timeout.expired", self.label, seconds=self.seconds)
 
 
-def _call_in_worker(func: Callable[P, R], seconds: float, *args: P.args, **kwargs: P.kwargs) -> R:
+def _call_in_worker(
+    func: Callable[P, R], label: str, seconds: float, *args: P.args, **kwargs: P.kwargs
+) -> R:
     """Run ``func`` in a daemon thread and stop waiting for it after ``seconds``."""
     future: concurrent.futures.Future[R] = concurrent.futures.Future()
     context = contextvars.copy_context()
@@ -109,61 +138,209 @@ def _call_in_worker(func: Callable[P, R], seconds: float, *args: P.args, **kwarg
         except BaseException as exc:
             future.set_exception(exc)
 
-    worker = threading.Thread(target=runner, name=f"timeout-{_core.qualname(func)}", daemon=True)
+    worker = threading.Thread(target=runner, name=f"timeout-{label}", daemon=True)
     worker.start()
     try:
         return future.result(timeout=seconds)
     except concurrent.futures.TimeoutError:
-        raise TimeoutExpired(_timeout_message(func, seconds), seconds=seconds) from None
+        raise _expired(label, seconds) from None
 
 
 if sys.version_info >= (3, 11):
-
-    async def _await_with_deadline(
-        awaitable: Awaitable[T], func: Callable[..., Any], seconds: float
-    ) -> T:
-        """Await under `asyncio.timeout`; convert only *our* expiry to TimeoutExpired."""
-        cm = asyncio.timeout(seconds)
-        try:
-            async with cm:
-                return await awaitable
-        except TimeoutError as exc:
-            if not cm.expired():
-                raise  # raised by the wrapped function itself: propagate unchanged
-            raise TimeoutExpired(_timeout_message(func, seconds), seconds=seconds) from exc
+    _async_timer = asyncio.timeout
 
 else:  # pragma: no cover - exercised by the Python 3.10 CI job
 
-    async def _await_with_deadline(
-        awaitable: Awaitable[T], func: Callable[..., Any], seconds: float
-    ) -> T:
-        """Run the awaitable as a task; convert only *our* expiry to TimeoutExpired."""
-        task = asyncio.ensure_future(awaitable)
+    class _CancelTimer:
+        """`asyncio.timeout` stand-in for 3.10: cancel the task at the deadline.
+
+        Like `asyncio.timeout`, the cancellation that it caused is turned into a
+        ``TimeoutError`` on exit; any other cancellation propagates unchanged.
+        """
+
+        def __init__(self, seconds: float) -> None:
+            self._seconds = seconds
+            self._fired = False
+
+        def expired(self) -> bool:
+            return self._fired
+
+        async def __aenter__(self) -> _CancelTimer:
+            task = asyncio.current_task()
+            if task is None:
+                raise RuntimeError("timeout() must be used inside a task")
+
+            def fire() -> None:
+                self._fired = True
+                task.cancel()
+
+            self._handle = asyncio.get_running_loop().call_later(self._seconds, fire)
+            return self
+
+        async def __aexit__(
+            self,
+            exc_type: type[BaseException] | None,
+            exc: BaseException | None,
+            tb: TracebackType | None,
+        ) -> None:
+            self._handle.cancel()
+            if self._fired and exc_type is asyncio.CancelledError:
+                raise TimeoutError from exc
+
+    _async_timer = _CancelTimer
+
+
+async def _await_with_deadline(awaitable: Awaitable[T], label: str, seconds: float) -> T:
+    """Await under a timer; convert only *our* expiry to TimeoutExpired."""
+    timer = _async_timer(seconds)
+    try:
+        async with timer:
+            return await awaitable
+    except TimeoutError as exc:
+        if not timer.expired():
+            raise  # raised by the wrapped function itself: propagate unchanged
+        raise _expired(label, seconds) from exc
+
+
+class Timeout:
+    """A time limit usable as a decorator, `with` block or `async with` block.
+
+    Created by `timeout`; see there for the strategies and caveats. One instance can
+    decorate several functions and be entered several times (also concurrently from
+    different tasks); every use gets its own timer.
+
+    Attributes:
+        seconds: The configured limit.
+        use_signals: The configured sync strategy (`None` means automatic).
+    """
+
+    def __init__(self, seconds: float, *, use_signals: bool | None = None) -> None:
+        if seconds <= 0:
+            raise ValueError(f"timeout seconds must be positive, got {seconds!r}")
+        if use_signals and not _HAS_SETITIMER:
+            raise RuntimeError("use_signals=True needs signal.setitimer, unavailable here")
+        self.seconds = seconds
+        self.use_signals = use_signals
+        self._alarms: list[_Alarm] = []
+        self._timers: dict[asyncio.Task[Any], list[Any]] = {}
+
+    def _limit(self, label: str) -> float:
+        """The limit for a call starting now: ``seconds`` clamped to the deadline."""
+        left = _deadline.remaining()
+        if left is None or left >= self.seconds:
+            return self.seconds
+        if left <= 0:
+            _core.emit("timeout.expired", label, seconds=0.0)
+            raise TimeoutExpired(f"{label} not started: the deadline has passed", seconds=0.0)
+        return left
+
+    # -- decorator ----------------------------------------------------------------------
+
+    def __call__(self, func: F, /) -> F:
+        """Apply the limit to every call of ``func`` (sync or ``async def``)."""
+        label = _core.qualname(func)
+        use_signals = self.use_signals
+
+        if _core.is_async(func):
+
+            @functools.wraps(func)
+            async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+                seconds = self._limit(label)
+                return await _await_with_deadline(func(*args, **kwargs), label, seconds)
+
+            return cast(F, async_wrapper)
+
+        @functools.wraps(func)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            if use_signals and not _signals_usable():
+                raise RuntimeError(
+                    "use_signals=True: signal-based timeouts only work in the main thread"
+                )
+            seconds = self._limit(label)
+            if use_signals or (use_signals is None and _signals_usable()):
+                with _Alarm(label, seconds):
+                    return func(*args, **kwargs)
+            return _call_in_worker(func, label, seconds, *args, **kwargs)
+
+        return cast(F, wrapper)
+
+    # -- sync context manager -----------------------------------------------------------
+
+    def __enter__(self) -> Timeout:
+        if self.use_signals is False or not _signals_usable():
+            raise RuntimeError(
+                "`with timeout(...)` needs SIGALRM (Unix) and the main thread, because a "
+                "block of code cannot be moved to a worker thread; decorate a function "
+                "with @timeout instead, or use `async with timeout(...)` in async code"
+            )
+        alarm = _Alarm(_BLOCK, self._limit(_BLOCK))
+        alarm.__enter__()
+        self._alarms.append(alarm)
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        self._alarms.pop().__exit__(exc_type, exc, tb)
+
+    # -- async context manager ----------------------------------------------------------
+
+    async def __aenter__(self) -> Timeout:
+        task = asyncio.current_task()
+        if task is None:  # pragma: no cover - asyncio always runs coroutines in a task
+            raise RuntimeError("`async with timeout(...)` must run inside an asyncio task")
+        seconds = self._limit(_BLOCK)
+        timer = _async_timer(seconds)
+        await timer.__aenter__()
+        self._timers.setdefault(task, []).append((timer, seconds))
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        task = asyncio.current_task()
+        assert task is not None
+        stack = self._timers[task]
+        timer, seconds = stack.pop()
+        if not stack:
+            del self._timers[task]
         try:
-            done, _ = await asyncio.wait({task}, timeout=seconds)
-        except asyncio.CancelledError:
-            task.cancel()
-            raise
-        if done:
-            return task.result()  # exceptions from the function propagate unchanged
-        task.cancel()
-        await asyncio.wait({task})
-        if not task.cancelled() and task.exception() is not None:
-            exc = task.exception()
-            raise TimeoutExpired(_timeout_message(func, seconds), seconds=seconds) from exc
-        raise TimeoutExpired(_timeout_message(func, seconds), seconds=seconds)
+            await timer.__aexit__(exc_type, exc, tb)
+        except TimeoutError as error:
+            if not timer.expired():  # pragma: no cover - only our own expiry is converted
+                raise
+            raise _expired(_BLOCK, seconds) from error
+
+    def __repr__(self) -> str:
+        return f"Timeout(seconds={self.seconds!r}, use_signals={self.use_signals!r})"
 
 
-def timeout(seconds: float, *, use_signals: bool | None = None) -> Callable[[F], F]:
-    """Raise `TimeoutExpired` if a call runs longer than ``seconds``.
+def timeout(seconds: float, *, use_signals: bool | None = None) -> Timeout:
+    """Raise `TimeoutExpired` if a call or block runs longer than ``seconds``.
 
-    ``TimeoutExpired`` subclasses the built-in ``TimeoutError``.
+    ``TimeoutExpired`` subclasses the built-in ``TimeoutError``. The returned `Timeout`
+    works three ways:
 
-    * ``async def`` functions are cancelled at the deadline (with `asyncio.timeout`
-      on Python 3.11+, or by running the call as a task on 3.10). Only the decorator's own
-      deadline is turned into ``TimeoutExpired``: a ``TimeoutError`` raised by the wrapped
-      function itself propagates unchanged.
-    * Sync functions, with signals (the default on Unix when called from the main thread):
+    * ``@timeout(5)`` decorates sync and ``async def`` functions.
+    * ``async with timeout(5):`` limits a block in async code (`asyncio.timeout` on
+      Python 3.11+, a cancellation timer on 3.10).
+    * ``with timeout(5):`` limits a block in sync code, with signals only: it needs
+      ``signal.setitimer`` (Unix) and the main thread, otherwise entering it raises
+      ``RuntimeError`` (a block cannot be moved to a worker thread; decorate a function
+      instead).
+
+    How each kind of code is stopped:
+
+    * ``async def`` code is cancelled at the deadline. Only the timeout's own expiry is
+      turned into ``TimeoutExpired``: a ``TimeoutError`` raised by the wrapped code
+      itself propagates unchanged.
+    * Sync code, with signals (the default on Unix when called from the main thread):
       a ``SIGALRM`` timer from `signal.setitimer` interrupts the call. The previous
       ``SIGALRM`` handler and any already-armed timer are restored afterwards, so nested
       timeouts work.
@@ -172,9 +349,14 @@ def timeout(seconds: float, *, use_signals: bool | None = None) -> Callable[[F],
       waiting at the deadline. **This fallback cannot stop the work** — the function keeps
       running in the background until it returns on its own, and its result is discarded.
 
+    Inside a `python_wrap.deadline.deadline` block the limit is clamped to the time the
+    deadline has left; if the deadline has already passed, the call (or block) is not
+    started and ``TimeoutExpired`` is raised at once. Every expiry emits the
+    ``timeout.expired`` event.
+
     Warning:
         With the signal strategy, ``TimeoutExpired`` is raised *inside* the wrapped
-        function, at whatever line it is executing when the alarm fires. A broad
+        code, at whatever line it is executing when the alarm fires. A broad
         ``except Exception:`` (or ``except TimeoutError:``) in that code catches it like
         any other error; if the code then carries on, the time limit is silently lost and
         the call returns normally. ``TimeoutExpired`` deliberately stays an ``Exception``
@@ -186,61 +368,50 @@ def timeout(seconds: float, *, use_signals: bool | None = None) -> Callable[[F],
                 ...
 
         The same applies to context managers that suppress exceptions and to
-        ``finally`` blocks that ``return``. ``async def`` functions have the analogous
+        ``finally`` blocks that ``return``. ``async def`` code has the analogous
         caveat for code that swallows ``asyncio.CancelledError``.
 
     Args:
         seconds: Time limit in seconds; must be positive.
         use_signals: ``True`` forces the signal strategy, ``False`` forces the thread
-            fallback, ``None`` (default) picks signals when they are usable.
+            fallback (and so rules out ``with timeout(...)``), ``None`` (default) picks
+            signals when they are usable.
 
     Returns:
-        A decorator that preserves the wrapped function's signature.
+        A `Timeout`: a decorator that preserves the wrapped function's type, and a sync
+        and async context manager.
 
     Raises:
         ValueError: If ``seconds`` is not positive.
         RuntimeError: If ``use_signals=True`` but ``signal.setitimer`` does not exist on
-            this platform (at decoration time), or the call is not made from the main
-            thread (at call time).
-        TimeoutExpired: From the wrapped call, when the time limit is exceeded.
+            this platform (at creation time); if ``use_signals=True`` and the call is not
+            made from the main thread (at call time); or on entering ``with`` where
+            signals cannot be used.
+        TimeoutExpired: From the wrapped call or block, when the time limit is exceeded.
 
     Example:
-        >>> @timeout(5)
-        ... def fetch() -> str:
-        ...     return "done"
-        >>> fetch()
-        'done'
+        ```python
+        import asyncio
+        from python_wrap.concurrency import timeout
+        from python_wrap.errors import TimeoutExpired
+
+        @timeout(5)
+        def fetch() -> str:
+            return "done"
+
+        assert fetch() == "done"
+
+        async def main() -> None:
+            try:
+                async with timeout(0.01):
+                    await asyncio.sleep(1)
+            except TimeoutExpired as exc:
+                assert exc.seconds == 0.01
+
+        asyncio.run(main())
+        ```
     """
-    if seconds <= 0:
-        raise ValueError(f"timeout seconds must be positive, got {seconds!r}")
-    if use_signals and not _HAS_SETITIMER:
-        raise RuntimeError("use_signals=True needs signal.setitimer, unavailable here")
-
-    def decorate(func: Callable[P, R]) -> Callable[P, R]:
-        if _core.is_async(func):
-            async_func = cast(Callable[P, Awaitable[Any]], func)
-
-            @functools.wraps(func)
-            async def async_wrapper(*args: P.args, **kwargs: P.kwargs) -> Any:
-                return await _await_with_deadline(async_func(*args, **kwargs), func, seconds)
-
-            return cast(Callable[P, R], async_wrapper)
-
-        @functools.wraps(func)
-        def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-            if use_signals:
-                if not _signals_usable():
-                    raise RuntimeError(
-                        "use_signals=True: signal-based timeouts only work in the main thread"
-                    )
-                return _call_with_alarm(func, seconds, *args, **kwargs)
-            if use_signals is None and _signals_usable():
-                return _call_with_alarm(func, seconds, *args, **kwargs)
-            return _call_in_worker(func, seconds, *args, **kwargs)
-
-        return wrapper
-
-    return cast("Callable[[F], F]", decorate)
+    return Timeout(seconds, use_signals=use_signals)
 
 
 # ---------------------------------------------------------------------------------------
@@ -249,46 +420,323 @@ def timeout(seconds: float, *, use_signals: bool | None = None) -> Callable[[F],
 
 _SWEEP_EVERY = 1024
 
+Limit = tuple[int, float]
+"""One rate limit: ``(calls, period_seconds)``."""
+
+
+def _limits(
+    calls: int | None, period: float | None, limits: Iterable[Limit] | None
+) -> tuple[Limit, ...]:
+    """Validate and combine the ``calls``/``period`` pair and ``limits``."""
+    result: list[Limit] = []
+    if calls is not None or period is not None:
+        if calls is None or period is None:
+            raise TypeError("rate limit: give both calls and period")
+        result.append((calls, period))
+    if limits is not None:
+        result.extend((c, p) for c, p in limits)
+    if not result:
+        raise TypeError("rate limit: give calls and period, or limits=[(calls, period), ...]")
+    for c, p in result:
+        if c < 1:
+            raise ValueError(f"rate_limit calls must be >= 1, got {c!r}")
+        if p <= 0:
+            raise ValueError(f"rate_limit period must be positive, got {p!r}")
+    return tuple(result)
+
+
+def _describe(limits: tuple[Limit, ...]) -> str:
+    return " and ".join(f"{c} calls per {p:g}s" for c, p in limits)
+
 
 class _SlidingWindow:
-    """A thread-safe sliding-window log of call timestamps, one deque per key."""
+    """Thread-safe sliding-window logs of call timestamps: per key, one deque per limit."""
 
-    def __init__(self, calls: int, period: float) -> None:
-        self.calls = calls
-        self.period = period
+    def __init__(self, limits: tuple[Limit, ...]) -> None:
+        self.limits = limits
         self._lock = threading.Lock()
-        self._buckets: dict[Hashable, deque[float]] = {}
+        self._buckets: dict[Hashable, tuple[deque[float], ...]] = {}
         self._since_sweep = 0
 
     def acquire(self, key: Hashable) -> float:
-        """Record a call and return 0.0, or return how long to wait before retrying."""
+        """Record a call and return 0.0, or return how long to wait before retrying.
+
+        A call is recorded only if *every* limit allows it.
+        """
         now = _core.monotonic()
-        horizon = now - self.period
         with self._lock:
             self._since_sweep += 1
             if self._since_sweep >= _SWEEP_EVERY:
-                self._sweep(horizon)
-            bucket = self._buckets.setdefault(key, deque())
-            while bucket and bucket[0] <= horizon:
-                bucket.popleft()
-            if len(bucket) < self.calls:
+                self._sweep(now)
+            buckets = self._buckets.get(key)
+            if buckets is None:
+                buckets = self._buckets[key] = tuple(deque() for _ in self.limits)
+            wait = 0.0
+            for (calls, period), bucket in zip(self.limits, buckets, strict=True):
+                horizon = now - period
+                while bucket and bucket[0] <= horizon:
+                    bucket.popleft()
+                if len(bucket) >= calls:
+                    wait = max(wait, bucket[0] + period - now)
+            if wait > 0:
+                return wait
+            for bucket in buckets:
                 bucket.append(now)
-                return 0.0
-            return bucket[0] + self.period - now
+            return 0.0
 
-    def _sweep(self, horizon: float) -> None:
+    def _sweep(self, now: float) -> None:
         self._since_sweep = 0
-        stale = [k for k, b in self._buckets.items() if not b or b[-1] <= horizon]
+        periods = [period for _, period in self.limits]
+
+        def is_stale(buckets: tuple[deque[float], ...]) -> bool:
+            return all(not b or b[-1] <= now - p for p, b in zip(periods, buckets, strict=True))
+
+        stale = [k for k, buckets in self._buckets.items() if is_stale(buckets)]
         for k in stale:
             del self._buckets[k]
 
 
+class RateLimiter:
+    """A reusable sliding-window rate limit, shared by everything that uses it.
+
+    Use one instance to give several functions or code blocks a single budget:
+
+    * as a decorator (on sync or ``async def`` functions and methods);
+    * as ``with limiter:`` / ``async with limiter:`` around a block;
+    * through ``acquire()`` / ``try_acquire()`` / ``acquire_async()``.
+
+    A call is allowed when fewer than ``calls`` calls started in the last ``period``
+    seconds (a sliding-window log, so no ``2 * calls`` burst at a window boundary). With
+    ``limits=[(5, 1.0), (600, 900.0)]`` every limit must allow the call. Rejected or
+    still-waiting calls are not counted. Thread-safe; async callers wait with ``await``
+    and never block the event loop. While ``python_wrap.testing`` disables rate limits,
+    every call goes through and nothing is recorded.
+
+    Events: ``rate_limit.rejected(retry_after)`` for each rejected call and
+    ``rate_limit.waited(seconds)`` after a call had to wait, reported under ``name``
+    (or the decorated function's qualified name).
+
+    Args:
+        calls: Maximum number of calls per ``period`` (>= 1).
+        period: Window length in seconds (> 0).
+        limits: More ``(calls, period)`` pairs; may replace or add to ``calls``/``period``.
+        block: What the decorator and ``with`` do when over the limit: ``False``
+            (default) raises `RateLimitExceeded`, ``True`` waits for a slot.
+        name: Label for error messages and events.
+
+    Raises:
+        TypeError: If no limit is given, or only one of ``calls`` and ``period``.
+        ValueError: If a limit is out of range.
+
+    Example:
+        ```python
+        from python_wrap.concurrency import RateLimiter
+
+        github = RateLimiter(limits=[(4, 1.0), (5000, 3600.0)], name="github")
+
+        @github
+        def get_repo(name: str) -> str:
+            return name
+
+        @github
+        def get_user(name: str) -> str:
+            return name
+
+        assert get_repo("a") == "a" and get_user("b") == "b"  # one shared budget
+        with github:  # a plain block counts too
+            pass
+        assert github.try_acquire()
+        assert not github.try_acquire()  # 4 calls in the last second
+        ```
+    """
+
+    def __init__(
+        self,
+        calls: int | None = None,
+        period: float | None = None,
+        *,
+        limits: Iterable[Limit] | None = None,
+        block: bool = False,
+        name: str | None = None,
+    ) -> None:
+        self.limits = _limits(calls, period, limits)
+        self.block = block
+        self.name = name
+        self._window = _SlidingWindow(self.limits)
+
+    def __repr__(self) -> str:
+        return f"RateLimiter(name={self.name!r}, limits={list(self.limits)!r})"
+
+    # -- core ---------------------------------------------------------------------------
+
+    def _rejected(self, label: str, retry_after: float) -> RateLimitExceeded:
+        _core.emit("rate_limit.rejected", label, retry_after=retry_after)
+        return RateLimitExceeded(
+            f"{label} rate limit of {_describe(self.limits)} exceeded; "
+            f"retry after {retry_after:.3g}s",
+            retry_after=retry_after,
+        )
+
+    def _gives_up(self, label: str, wait: float, give_up: float | None) -> bool:
+        """True (after emitting the rejection) if ``wait`` overshoots ``give_up``."""
+        if give_up is not None and _core.monotonic() + wait > give_up:
+            _core.emit("rate_limit.rejected", label, retry_after=wait)
+            return True
+        return False
+
+    def _take(
+        self, key: Hashable, label: str, *, block: bool, timeout: float | None, strict: bool
+    ) -> bool:
+        """Take a slot in a thread. ``strict`` raises on rejection instead of returning False."""
+        if _core.overrides.disable_rate_limits:
+            return True
+        wait = self._window.acquire(key)
+        if wait <= 0:
+            return True
+        if not block:
+            error = self._rejected(label, wait)
+            if strict:
+                raise error
+            return False
+        start = _core.monotonic()
+        give_up = None if timeout is None else start + timeout
+        while wait > 0:
+            if self._gives_up(label, wait, give_up):
+                return False
+            _core.sleep(wait)
+            if _core.overrides.disable_rate_limits:
+                break
+            wait = self._window.acquire(key)
+        _core.emit("rate_limit.waited", label, seconds=_core.monotonic() - start)
+        return True
+
+    async def _atake(
+        self, key: Hashable, label: str, *, block: bool, timeout: float | None, strict: bool
+    ) -> bool:
+        """`_take` for coroutines: waits with ``await``."""
+        if _core.overrides.disable_rate_limits:
+            return True
+        wait = self._window.acquire(key)
+        if wait <= 0:
+            return True
+        if not block:
+            error = self._rejected(label, wait)
+            if strict:
+                raise error
+            return False
+        start = _core.monotonic()
+        give_up = None if timeout is None else start + timeout
+        while wait > 0:
+            if self._gives_up(label, wait, give_up):
+                return False
+            await _core.async_sleep(wait)
+            if _core.overrides.disable_rate_limits:
+                break
+            wait = self._window.acquire(key)
+        _core.emit("rate_limit.waited", label, seconds=_core.monotonic() - start)
+        return True
+
+    def _label(self) -> str:
+        return self.name or "rate_limiter"
+
+    # -- explicit API -------------------------------------------------------------------
+
+    def try_acquire(self) -> bool:
+        """Take a slot if one is free right now.
+
+        Returns:
+            ``True`` if the call may proceed (it is counted), ``False`` otherwise.
+        """
+        return self._take(None, self._label(), block=False, timeout=None, strict=False)
+
+    def acquire(self, block: bool = True, timeout: float | None = None) -> bool:
+        """Take a slot, waiting for one in this thread if ``block`` is true.
+
+        Never call it from a coroutine; use `acquire_async` there.
+
+        Args:
+            block: Wait for a slot (``True``) or return at once (``False``).
+            timeout: Give up after this many seconds (``None`` waits as long as needed).
+                Slots only free up as time passes, so the call returns ``False`` right
+                away when the next slot is further away than ``timeout``.
+
+        Returns:
+            ``True`` if a slot was taken, ``False`` if not.
+        """
+        return self._take(None, self._label(), block=block, timeout=timeout, strict=False)
+
+    async def acquire_async(self, block: bool = True, timeout: float | None = None) -> bool:
+        """`acquire` for async code: waits with ``await``, never blocking the loop.
+
+        Args:
+            block: Wait for a slot (``True``) or return at once (``False``).
+            timeout: Give up after this many seconds (``None`` waits as long as needed).
+
+        Returns:
+            ``True`` if a slot was taken, ``False`` if not.
+        """
+        return await self._atake(None, self._label(), block=block, timeout=timeout, strict=False)
+
+    def __enter__(self) -> RateLimiter:
+        self._take(None, self._label(), block=self.block, timeout=None, strict=True)
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        return None
+
+    async def __aenter__(self) -> RateLimiter:
+        await self._atake(None, self._label(), block=self.block, timeout=None, strict=True)
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        return None
+
+    # -- decorator ----------------------------------------------------------------------
+
+    def __call__(self, func: F, /) -> F:
+        """Count every call of ``func`` against this limiter (sync or ``async def``)."""
+        return self._wrap(func, None)
+
+    def _wrap(self, func: F, key: Callable[..., Hashable] | None) -> F:
+        label = self.name or _core.qualname(func)
+        block = self.block
+
+        if _core.is_async(func):
+
+            @functools.wraps(func)
+            async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+                k = None if key is None else key(*args, **kwargs)
+                await self._atake(k, label, block=block, timeout=None, strict=True)
+                return await func(*args, **kwargs)
+
+            return cast(F, async_wrapper)
+
+        @functools.wraps(func)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            k = None if key is None else key(*args, **kwargs)
+            self._take(k, label, block=block, timeout=None, strict=True)
+            return func(*args, **kwargs)
+
+        return cast(F, wrapper)
+
+
 def rate_limit(
-    calls: int,
-    period: float,
+    calls: int | None = None,
+    period: float | None = None,
     *,
     block: bool = False,
     key: Callable[..., Hashable] | None = None,
+    limits: Iterable[Limit] | None = None,
 ) -> Callable[[F], F]:
     """Allow at most ``calls`` calls per ``period`` seconds.
 
@@ -297,6 +745,12 @@ def rate_limit(
     ``2 * calls`` through at a window boundary. Rejected (or waiting) calls are not
     counted. The limiter is thread-safe and is shared by every caller of the decorated
     function — including every instance, for methods — unless ``key`` splits it.
+
+    Each decorated function gets its own `RateLimiter`. To share one budget between
+    several functions, create a `RateLimiter` and use it as the decorator. Pass
+    ``limits=[(5, 1.0), (600, 900.0)]`` to enforce several limits at once (all must
+    allow a call). While ``python_wrap.testing`` disables rate limits, every call goes
+    through. Emits ``rate_limit.rejected`` and ``rate_limit.waited``.
 
     Args:
         calls: Maximum number of calls per window; at least 1.
@@ -307,64 +761,29 @@ def rate_limit(
         key: Optional function called with the call's arguments (including ``self`` for
             methods) that returns a hashable bucket key, e.g. a user id. Each key gets
             its own limit.
+        limits: Further ``(calls, period)`` pairs, alone or on top of ``calls``/``period``.
 
     Returns:
         A decorator that preserves the wrapped function's signature.
 
     Raises:
-        ValueError: If ``calls < 1`` or ``period <= 0``.
+        TypeError: If no limit is given, or only one of ``calls`` and ``period``.
+        ValueError: If ``calls < 1`` or ``period <= 0`` (for any limit).
         RateLimitExceeded: From the wrapped call when over the limit and ``block`` is
             false. Its ``retry_after`` attribute says how many seconds until a slot frees.
 
     Example:
         >>> @rate_limit(2, 1.0, key=lambda user, *_: user)
         ... def send(user: str, text: str) -> None: ...
+        >>> @rate_limit(limits=[(5, 1.0), (600, 900.0)])
+        ... def strava_call() -> None: ...
     """
-    if calls < 1:
-        raise ValueError(f"rate_limit calls must be >= 1, got {calls!r}")
-    if period <= 0:
-        raise ValueError(f"rate_limit period must be positive, got {period!r}")
+    all_limits = _limits(calls, period, limits)
 
-    def decorate(func: Callable[P, R]) -> Callable[P, R]:
-        window = _SlidingWindow(calls, period)
-        name = _core.qualname(func)
+    def decorate(func: F) -> F:
+        return RateLimiter(limits=all_limits, block=block)._wrap(func, key)
 
-        def bucket_key(args: tuple[Any, ...], kwargs: dict[str, Any]) -> Hashable:
-            return None if key is None else key(*args, **kwargs)
-
-        def rejected(retry_after: float) -> RateLimitExceeded:
-            return RateLimitExceeded(
-                f"{name} rate limit of {calls} calls per {period:g}s exceeded; "
-                f"retry after {retry_after:.3g}s",
-                retry_after=retry_after,
-            )
-
-        if _core.is_async(func):
-            async_func = cast(Callable[P, Awaitable[Any]], func)
-
-            @functools.wraps(func)
-            async def async_wrapper(*args: P.args, **kwargs: P.kwargs) -> Any:
-                k = bucket_key(args, kwargs)
-                while (wait := window.acquire(k)) > 0:
-                    if not block:
-                        raise rejected(wait)
-                    await _core.async_sleep(wait)
-                return await async_func(*args, **kwargs)
-
-            return cast(Callable[P, R], async_wrapper)
-
-        @functools.wraps(func)
-        def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-            k = bucket_key(args, kwargs)
-            while (wait := window.acquire(k)) > 0:
-                if not block:
-                    raise rejected(wait)
-                _core.sleep(wait)
-            return func(*args, **kwargs)
-
-        return wrapper
-
-    return cast("Callable[[F], F]", decorate)
+    return decorate
 
 
 # ---------------------------------------------------------------------------------------
@@ -504,14 +923,20 @@ def throttle(interval: float) -> _ThrottleDecorator:
         last_start: float | None = None
         last_result: Any = None
 
+        name = _core.qualname(func)
+
         def should_run() -> tuple[bool, Any]:
             nonlocal last_start
+            if _core.overrides.disable_rate_limits:
+                return True, None
             now = _core.monotonic()
             with lock:
-                if last_start is not None and now - last_start < interval:
-                    return False, last_result
-                last_start = now
-                return True, None
+                if last_start is None or now - last_start >= interval:
+                    last_start = now
+                    return True, None
+                previous = last_result
+            _core.emit("throttle.skipped", name)
+            return False, previous
 
         def store(result: Any) -> Any:
             nonlocal last_result

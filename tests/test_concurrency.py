@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import contextlib
 import gc
 import inspect
 import signal
@@ -11,8 +12,10 @@ import time
 
 import pytest
 
-from python_wrap import concurrency
+from python_wrap import _core, concurrency
 from python_wrap.concurrency import (
+    RateLimiter,
+    Timeout,
     debounce,
     rate_limit,
     run_in_thread,
@@ -21,6 +24,7 @@ from python_wrap.concurrency import (
     timeout,
 )
 from python_wrap.errors import RateLimitExceeded, TimeoutExpired
+from python_wrap.testing import disable_rate_limits
 
 HAS_SIGNALS = hasattr(signal, "setitimer")
 needs_signals = pytest.mark.skipif(not HAS_SIGNALS, reason="needs signal.setitimer")
@@ -333,7 +337,7 @@ def test_rate_limit_per_key(fake_clock):
 
 def test_rate_limit_sweeps_stale_buckets(fake_clock, monkeypatch):
     monkeypatch.setattr(concurrency, "_SWEEP_EVERY", 3)
-    window = concurrency._SlidingWindow(1, 1)
+    window = concurrency._SlidingWindow(((1, 1.0),))
     window.acquire("a")
     window.acquire("b")
     fake_clock.advance(2)
@@ -986,3 +990,371 @@ async def test_singleflight_async_reentrant_same_key_runs_directly():
         return len(depth)
 
     assert await asyncio.wait_for(f("k"), 2) == 3
+
+
+# --------------------------------------------------------------------------------------
+# 0.2 features: timeout as a context manager, RateLimiter, multiple limits, overrides
+# --------------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def events():
+    seen = []
+    _core.listeners.append(seen.append)
+    try:
+        yield seen
+    finally:
+        _core.listeners.remove(seen.append)
+
+
+def test_timeout_object_is_reusable_decorator_and_repr():
+    limit = timeout(1)
+    assert isinstance(limit, Timeout)
+    assert limit(lambda: 1)() == 1
+    assert limit(lambda: 2)() == 2
+    assert "seconds=1" in repr(limit)
+
+
+@needs_signals
+def test_timeout_sync_block_interrupts_and_restores(events):
+    before = signal.getsignal(signal.SIGALRM)
+    started = time.perf_counter()
+    with pytest.raises(TimeoutExpired) as info, timeout(0.02):
+        time.sleep(1)
+    assert time.perf_counter() - started < 0.5
+    assert info.value.seconds == 0.02
+    assert "<block>" in str(info.value)
+    assert signal.getsignal(signal.SIGALRM) is before
+    assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+    assert [(e.name, e.function, e.fields) for e in events] == [
+        ("timeout.expired", "<block>", {"seconds": 0.02})
+    ]
+
+
+@needs_signals
+def test_timeout_sync_block_passes_and_nests():
+    limit = timeout(5)
+    with limit as entered:
+        assert entered is limit
+        with pytest.raises(TimeoutExpired), timeout(0.02):
+            time.sleep(1)
+        remaining, _ = signal.getitimer(signal.ITIMER_REAL)
+        assert 4 < remaining <= 5  # the outer timer was re-armed
+        with limit:  # the same object can be entered again while active
+            pass
+    assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+
+
+def test_timeout_sync_block_needs_signals_and_main_thread(monkeypatch):
+    with pytest.raises(RuntimeError, match="main thread"), timeout(1, use_signals=False):
+        pass
+
+    def in_thread():
+        with timeout(1):
+            pass
+
+    assert isinstance(run_in_thread(in_thread)().exception(timeout=1), RuntimeError)
+    monkeypatch.setattr(concurrency, "_HAS_SETITIMER", False)
+    with pytest.raises(RuntimeError), timeout(1):
+        pass
+
+
+async def test_timeout_async_block(events):
+    started = time.perf_counter()
+    with pytest.raises(TimeoutExpired) as info:
+        async with timeout(0.02):
+            await asyncio.sleep(1)
+    assert time.perf_counter() - started < 0.5
+    assert info.value.seconds == 0.02
+    assert isinstance(info.value.__cause__, TimeoutError)
+    assert [e.name for e in events] == ["timeout.expired"]
+
+    limit = timeout(1)
+    async with limit as entered:
+        assert entered is limit
+        await asyncio.sleep(0)
+    assert limit._timers == {}
+
+
+async def test_timeout_async_block_inner_errors_propagate_unchanged():
+    with pytest.raises(TimeoutError) as info:
+        async with timeout(1):
+            raise TimeoutError("mine")
+    assert type(info.value) is TimeoutError
+    with pytest.raises(KeyError):
+        async with timeout(1):
+            raise KeyError
+
+
+async def test_timeout_async_block_shared_by_concurrent_tasks():
+    limit = timeout(0.05)
+
+    async def quick(n):
+        async with limit:
+            await asyncio.sleep(0)
+            return n
+
+    async def slow():
+        async with limit:
+            await asyncio.sleep(1)
+
+    results = await asyncio.gather(quick(1), slow(), quick(2), return_exceptions=True)
+    assert results[0] == 1 and results[2] == 2
+    assert isinstance(results[1], TimeoutExpired)
+    assert limit._timers == {}
+
+
+def test_timeout_worker_expiry_emits_event(events):
+    @timeout(0.02, use_signals=False)
+    def slow():
+        time.sleep(0.1)
+
+    with pytest.raises(TimeoutExpired):
+        slow()
+    assert [e.name for e in events] == ["timeout.expired"]
+    assert events[0].function.endswith("slow")
+
+
+# -- RateLimiter -----------------------------------------------------------------------
+
+
+def test_rate_limiter_validates():
+    with pytest.raises(TypeError):
+        RateLimiter()
+    with pytest.raises(TypeError):
+        RateLimiter(5)
+    with pytest.raises(ValueError):
+        RateLimiter(limits=[(1, 1.0), (0, 5.0)])
+    with pytest.raises(TypeError):
+        rate_limit()
+    assert "limits=[(2, 1.0)]" in repr(RateLimiter(2, 1.0))
+
+
+def test_rate_limiter_shared_by_several_functions(fake_clock, events):
+    limiter = RateLimiter(2, 10, name="api")
+
+    @limiter
+    def a():
+        return "a"
+
+    @limiter
+    def b():
+        return "b"
+
+    assert a() == "a"
+    assert b() == "b"
+    with pytest.raises(RateLimitExceeded) as info:
+        a()
+    assert "api rate limit of 2 calls per 10s" in str(info.value)
+    assert info.value.retry_after == pytest.approx(10)
+    assert [(e.name, e.function) for e in events] == [("rate_limit.rejected", "api")]
+    assert events[0].fields == {"retry_after": pytest.approx(10)}
+
+
+def test_rate_limiter_try_acquire_and_acquire(fake_clock, events):
+    limiter = RateLimiter(1, 5)
+    assert limiter.try_acquire()
+    assert not limiter.try_acquire()
+    assert not limiter.acquire(block=False)
+    assert not limiter.acquire(timeout=1)  # next slot is 5s away: give up at once
+    assert fake_clock.sleeps == []
+    start = fake_clock.now
+    assert limiter.acquire()
+    assert fake_clock.now == start + 5
+    assert limiter.acquire(timeout=10)
+    assert fake_clock.now == start + 10
+    names = [e.name for e in events]
+    assert names == ["rate_limit.rejected"] * 3 + ["rate_limit.waited"] * 2
+    assert events[-1].fields == {"seconds": pytest.approx(5)}
+    assert events[-1].function == "rate_limiter"
+
+
+def test_rate_limiter_with_block(fake_clock):
+    raising = RateLimiter(1, 5)
+    with raising as entered:
+        assert entered is raising
+    with pytest.raises(RateLimitExceeded), raising:
+        pass
+    waiting = RateLimiter(1, 5, block=True)
+    with waiting:
+        pass
+    with waiting:
+        pass
+    assert fake_clock.sleeps == [5]
+
+
+async def test_rate_limiter_async(fake_clock, events):
+    limiter = RateLimiter(1, 3, block=True, name="svc")
+
+    @limiter
+    async def f():
+        return fake_clock.now
+
+    assert inspect.iscoroutinefunction(f)
+    start = fake_clock.now
+    assert await f() == start
+    async with limiter as entered:
+        assert entered is limiter
+        assert fake_clock.now == start + 3
+    assert not await limiter.acquire_async(block=False)
+    assert not await limiter.acquire_async(timeout=1)
+    assert await limiter.acquire_async()
+    assert fake_clock.now == start + 6
+    strict = RateLimiter(1, 3)
+    async with strict:
+        pass
+    with pytest.raises(RateLimitExceeded):
+        async with strict:
+            pass
+    assert "rate_limit.waited" in [e.name for e in events]
+
+
+def test_multiple_limits_all_must_allow(fake_clock):
+    @rate_limit(limits=[(2, 1.0), (3, 10.0)])
+    def f():
+        return fake_clock.now
+
+    f()
+    f()
+    with pytest.raises(RateLimitExceeded) as info:
+        f()  # the 1-second limit is full
+    assert info.value.retry_after == pytest.approx(1)
+    assert "2 calls per 1s and 3 calls per 10s" in str(info.value)
+    fake_clock.advance(1)
+    f()
+    with pytest.raises(RateLimitExceeded) as info:
+        f()  # now the 10-second limit is full
+    assert info.value.retry_after == pytest.approx(9)
+    fake_clock.advance(9)
+    f()
+
+
+def test_multiple_limits_rejected_call_is_not_recorded(fake_clock):
+    limiter = RateLimiter(5, 1.0, limits=[(1, 10.0)])
+    assert limiter.try_acquire()
+    for _ in range(10):
+        assert not limiter.try_acquire()
+    fake_clock.advance(10)
+    assert limiter.try_acquire()  # rejected tries did not use up the 1-second limit
+
+
+def test_multiple_limits_block_waits_for_longest(fake_clock):
+    @rate_limit(1, 1.0, limits=[(2, 10.0)], block=True)
+    def f():
+        return fake_clock.now
+
+    start = fake_clock.now
+    assert [f(), f(), f()] == [start, start + 1, start + 10]
+
+
+def test_rate_limit_key_with_multiple_limits(fake_clock):
+    @rate_limit(limits=[(1, 5.0)], key=lambda user: user)
+    def send(user):
+        return user
+
+    assert send("a") == "a"
+    assert send("b") == "b"
+    with pytest.raises(RateLimitExceeded):
+        send("a")
+
+
+def test_rate_limits_disabled_override(fake_clock):
+    limiter = RateLimiter(1, 100)
+
+    @rate_limit(1, 100)
+    def f():
+        return 1
+
+    @rate_limit(1, 100, block=True)
+    async def g():
+        return 2
+
+    @throttle(100)
+    def t():
+        return fake_clock.now
+
+    assert f() == 1
+    assert t() == fake_clock.now
+    assert limiter.try_acquire()
+    with disable_rate_limits():
+        assert [f() for _ in range(5)] == [1] * 5
+        assert all(limiter.try_acquire() for _ in range(5))
+        with limiter:
+            pass
+        assert asyncio.run(g()) == 2
+        assert asyncio.run(g()) == 2
+        fake_clock.advance(1)
+        assert t() == fake_clock.now  # throttle lets every call run
+    assert fake_clock.sleeps == []
+    with pytest.raises(RateLimitExceeded):
+        f()
+    assert not limiter.try_acquire()
+
+
+def test_rate_limit_override_flipped_while_waiting(fake_clock, monkeypatch):
+    limiter = RateLimiter(1, 100, block=True)
+    limiter.try_acquire()
+
+    def sleep(seconds):
+        _core.overrides.disable_rate_limits = True
+
+    monkeypatch.setattr(_core, "sleep", sleep)
+    try:
+        with limiter:
+            pass
+    finally:
+        _core.overrides.disable_rate_limits = False
+
+
+async def test_rate_limit_override_flipped_while_waiting_async(fake_clock, monkeypatch):
+    limiter = RateLimiter(1, 100, block=True)
+    limiter.try_acquire()
+
+    async def async_sleep(seconds):
+        _core.overrides.disable_rate_limits = True
+
+    monkeypatch.setattr(_core, "async_sleep", async_sleep)
+    try:
+        assert await limiter.acquire_async()
+    finally:
+        _core.overrides.disable_rate_limits = False
+
+
+def test_rate_limiter_thread_safe_shared_budget(fake_clock):
+    limiter = RateLimiter(30, 100)
+    hits = []
+
+    @limiter
+    def a():
+        hits.append("a")
+
+    @limiter
+    def b():
+        hits.append("b")
+
+    barrier = threading.Barrier(6)
+
+    def worker(fn):
+        barrier.wait()
+        for _ in range(20):
+            with contextlib.suppress(RateLimitExceeded):
+                fn()
+
+    threads = [threading.Thread(target=worker, args=(a if i % 2 else b,)) for i in range(6)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+    assert len(hits) == 30
+
+
+def test_throttle_skipped_event(fake_clock, events):
+    @throttle(10)
+    def f():
+        return 1
+
+    f()
+    f()
+    f()
+    assert [e.name for e in events] == ["throttle.skipped"] * 2
+    assert events[0].function.endswith("f")

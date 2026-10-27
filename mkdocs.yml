@@ -112,6 +112,7 @@ nav:
       - Errors: api/errors.md
       - Retry and fallback: api/retry.md
       - Circuit breaker: api/circuit.md
+      - Deadline: api/deadline.md
       - Caching: api/caching.md
       - Concurrency: api/concurrency.md
       - Async helpers: api/aio.md

@@ -272,7 +272,8 @@ assert db.active == 0
 
 `BulkheadFull` is a `PythonWrapError`, so it composes with the other decorators, for
 example `fallback` to serve a degraded answer when the bulkhead is full, or `retry` to
-try again a little later.
+try again a little later. Every rejection also emits the `bulkhead.rejected` event, with
+the `active` and `waiting` counts at that moment (see [Observability](observability.md)).
 
 ## `limit_concurrency`
 
@@ -297,6 +298,8 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
+It works on methods too, including under a `@classmethod` stacked above it, and type
+checkers (mypy and pyright) keep the signature and the `.bulkhead` attribute there.
 On a method, the limit is shared by every instance (it belongs to the function). For a
 limit shared by several functions, or for `max_waiting` / `timeout`, create a `Bulkhead`
 yourself.

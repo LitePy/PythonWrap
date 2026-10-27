@@ -6,9 +6,10 @@ Everything is importable from the top-level `python_wrap` package. These pages a
 | --- | --- |
 | [errors](errors.md) | `PythonWrapError`, `TimeoutExpired`, `RateLimitExceeded`, `CircuitOpenError`, `ValidationError`, `ArgumentTypeError`, `BulkheadFull` |
 | [retry](retry.md) | `retry`, `fallback`, `suppress`, `retry_on_exception` |
-| [circuit](circuit.md) | `CircuitBreaker`, `circuit_breaker`, `CircuitState` |
+| [circuit](circuit.md) | `CircuitBreaker`, `circuit_breaker`, `CircuitState`, `CircuitStats` |
+| [deadline](deadline.md) | `deadline`, `remaining`, `check`, `Deadline` |
 | [caching](caching.md) | `memoize`, `cache`, `once` |
-| [concurrency](concurrency.md) | `timeout`, `rate_limit`, `throttle`, `debounce`, `singleflight`, `run_in_thread` |
+| [concurrency](concurrency.md) | `timeout`, `Timeout`, `rate_limit`, `RateLimiter`, `throttle`, `debounce`, `singleflight`, `run_in_thread` |
 | [aio](aio.md) | `gather_limit`, `map_async`, `amap_iter`, `race`, `RaceFailed`, `run_sync` |
 | [bulkhead](bulkhead.md) | `Bulkhead`, `limit_concurrency`, `Limited` |
 | [timing](timing.md) | `timing`, `benchmark`, `benchmark_async`, `measure_memory`, `profile` |
