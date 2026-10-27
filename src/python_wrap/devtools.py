@@ -1,0 +1,274 @@
+"""Developer tools: deprecation warnings, mock data and decorator composition."""
+
+from __future__ import annotations
+
+import functools
+import warnings
+from collections.abc import Awaitable, Callable
+from typing import Any, TypeVar, cast, overload
+
+from python_wrap import _core
+from python_wrap._core import P, R
+
+F = TypeVar("F", bound=Callable[..., Any])
+T = TypeVar("T")
+
+__all__ = ["compose", "deprecate", "mock_data", "no_debug"]
+
+
+def _mark(obj: T, text: str) -> T:
+    """Set the PEP 702 style ``__deprecated__`` attribute."""
+    obj.__deprecated__ = text  # type: ignore[attr-defined]
+    return obj
+
+
+def _message_for(
+    target: Any,
+    message: str | None,
+    since: str | None,
+    removed_in: str | None,
+    alternative: str | None,
+) -> str:
+    """Return an explicit message, or build one from the parts that were given."""
+    if message is not None:
+        return message
+    func = target.__func__ if isinstance(target, (staticmethod, classmethod)) else target
+    text = f"{_core.qualname(func)} is deprecated"
+    if since:
+        text += f" since {since}"
+    if removed_in:
+        text += f" and will be removed in {removed_in}"
+    if alternative:
+        text += f"; use {alternative} instead"
+    return text + "."
+
+
+def _wrap_class(cls: type, text: str, category: type[Warning]) -> type:
+    """Wrap ``__init__`` in place, so the class stays the same object."""
+    original_init: Any = cls.__init__  # type: ignore[misc]
+
+    @functools.wraps(original_init)
+    def warned_init(self: Any, *args: Any, **kwargs: Any) -> None:
+        warnings.warn(text, category, stacklevel=2)
+        original_init(self, *args, **kwargs)
+
+    cls.__init__ = warned_init  # type: ignore[misc]
+    return _mark(cls, text)
+
+
+def _wrap_callable(func: Any, text: str, category: type[Warning]) -> Any:
+    """Wrap a plain or async function so each call (or await) warns."""
+    if _core.is_async(func):
+
+        @functools.wraps(func)
+        async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+            warnings.warn(text, category, stacklevel=2)
+            return await func(*args, **kwargs)
+
+        return _mark(async_wrapper, text)
+
+    @functools.wraps(func)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        warnings.warn(text, category, stacklevel=2)
+        return func(*args, **kwargs)
+
+    return _mark(wrapper, text)
+
+
+def _wrap(target: Any, text: str, category: type[Warning]) -> Any:
+    """Dispatch on the kind of object being deprecated."""
+    if isinstance(target, (staticmethod, classmethod)):
+        # Keep the descriptor type so the method still binds the same way.
+        return type(target)(_wrap(target.__func__, text, category))
+    if isinstance(target, type):
+        return _wrap_class(target, text, category)
+    return _wrap_callable(target, text, category)
+
+
+@overload
+def deprecate(target: F, /) -> F: ...
+@overload
+def deprecate(
+    message: str | None = None,
+    *,
+    since: str | None = None,
+    removed_in: str | None = None,
+    alternative: str | None = None,
+    category: type[Warning] = DeprecationWarning,
+) -> Callable[[F], F]: ...
+def deprecate(
+    message: str | Callable[..., Any] | None = None,
+    *,
+    since: str | None = None,
+    removed_in: str | None = None,
+    alternative: str | None = None,
+    category: type[Warning] = DeprecationWarning,
+) -> Any:
+    """Mark a function, method, or class as deprecated.
+
+    Every call (or, for ``async def``, every await) emits a warning that points at
+    the caller's line. Classes are changed in place: their ``__init__`` warns, and
+    they stay classes, so ``isinstance`` keeps working.
+
+    Works bare, with a message (the v0.1 form), or with structured parts. The parts
+    are combined into ``"<name> is deprecated since ... and will be removed in ...;
+    use ... instead."``. An explicit ``message`` replaces that generated text.
+
+    Args:
+        message: Full warning text. Replaces the generated text when given.
+        since: Version in which the deprecation started.
+        removed_in: Version in which the target will be removed.
+        alternative: Name of the replacement to use instead.
+        category: Warning class to emit.
+
+    Returns:
+        The decorated object when used bare, otherwise a decorator.
+
+    Example:
+        ```python
+        @deprecate(since="0.2", removed_in="1.0", alternative="new_func")
+        def old_func() -> None: ...
+
+        @deprecate("Use Widget2 instead")
+        class Widget: ...
+        ```
+    """
+    if callable(message):
+        text = _message_for(message, None, since, removed_in, alternative)
+        return _wrap(message, text, category)
+
+    def decorate(target: Any) -> Any:
+        text = _message_for(target, message, since, removed_in, alternative)
+        return _wrap(target, text, category)
+
+    return decorate
+
+
+def mock_data(
+    data: Any, *, enabled: bool | Callable[[], bool] = True
+) -> Callable[[Callable[P, R]], Callable[P, R]]:
+    """Replace a function's result with fixed data, for tests and local runs.
+
+    When enabled, the wrapped function is not called and ``data`` is returned. If
+    ``data`` is callable it is called on each call and its result is returned, so use
+    ``lambda: fn`` to return a callable itself. When disabled, the real function runs.
+
+    Args:
+        data: Value to return, or a zero-argument callable producing it.
+        enabled: ``True``/``False``, or a zero-argument callable that returns one.
+            It is evaluated on every call, so it can read an environment variable.
+
+    Returns:
+        A decorator that works on plain and ``async def`` functions.
+
+    Example:
+        ```python
+        @mock_data({"id": 1}, enabled=lambda: os.environ.get("MOCK") == "1")
+        def fetch_user(user_id: int) -> dict[str, int]: ...
+        ```
+    """
+
+    def decorate(func: Callable[P, R]) -> Callable[P, R]:
+        if _core.is_async(func):
+            async_func = cast("Callable[P, Awaitable[Any]]", func)
+
+            @functools.wraps(func)
+            async def async_wrapper(*args: P.args, **kwargs: P.kwargs) -> Any:
+                if _is_enabled(enabled):
+                    return _mock_value(data)
+                return await async_func(*args, **kwargs)
+
+            return cast("Callable[P, R]", async_wrapper)
+
+        @functools.wraps(func)
+        def wrapper(*args: P.args, **kwargs: P.kwargs) -> Any:
+            if _is_enabled(enabled):
+                return _mock_value(data)
+            return func(*args, **kwargs)
+
+        return cast("Callable[P, R]", wrapper)
+
+    return decorate
+
+
+def _is_enabled(enabled: bool | Callable[[], bool]) -> bool:
+    return enabled() if callable(enabled) else enabled
+
+
+def _mock_value(data: Any) -> Any:
+    return data() if callable(data) else data
+
+
+@overload
+def no_debug(func: F, /) -> F: ...
+@overload
+def no_debug(func: None = None, /) -> Callable[[F], F]: ...
+def no_debug(func: Callable[..., Any] | None = None, /) -> Any:
+    """Deprecated no-op, kept only so v0.1 code keeps importing.
+
+    It returns the function unchanged and emits a ``DeprecationWarning`` when applied.
+    It will be removed in 0.3. To hide debug output, configure logging levels instead.
+
+    Args:
+        func: The function to return unchanged. Omit it to get a decorator.
+
+    Returns:
+        ``func`` itself, or an identity decorator when ``func`` is omitted.
+
+    Example:
+        ```python
+        @no_debug  # warns: removed in 0.3, use logging levels instead
+        def compute() -> int:
+            return 1
+        ```
+    """
+    warnings.warn(
+        "no_debug() does nothing and will be removed in 0.3; "
+        "configure logging levels instead (see logging.Logger.setLevel).",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    if func is None:
+
+        def decorate(target: F) -> F:
+            return target
+
+        return decorate
+    return func
+
+
+def compose(*decorators: Callable[[Any], Any]) -> Callable[[F], F]:
+    """Combine decorators into one, applied as if stacked from top to bottom.
+
+    ``compose(a, b, c)(f)`` is the same as ``a(b(c(f)))``. With no decorators it
+    returns the function unchanged.
+
+    Args:
+        *decorators: Decorators to combine, outermost first.
+
+    Returns:
+        A single decorator that applies all of them.
+
+    Raises:
+        TypeError: If any argument is not callable.
+
+    Example:
+        ```python
+        @compose(deprecate("old api"), mock_data(7))
+        def value() -> int:
+            return 1
+        ```
+    """
+    for index, decorator in enumerate(decorators):
+        if not callable(decorator):
+            raise TypeError(
+                f"compose() arguments must be callable; argument {index} is {decorator!r}"
+            )
+
+    def decorate(func: F) -> F:
+        result: Any = func
+        for decorator in reversed(decorators):
+            result = decorator(result)
+        return cast(F, result)
+
+    return decorate
