@@ -202,21 +202,44 @@ def test_quick(pw_fast_mode):
 
 To switch a feature off for a whole test (not to test it, but because it is in the way), use the `disable_*` helpers:
 
-<!-- TODO(lead): the disable_* switches are not read by retry/memoize/rate_limit on this branch yet; remove the skip marker after the override wiring is merged. -->
-<!-- skip -->
 ```python
-from myapp.billing import charge_with_retry, exchange_rate
+from python_wrap import memoize, rate_limit, retry
 from python_wrap.testing import disable_caching, disable_rate_limits, disable_retries
 
+calls = {"charge": 0, "rate": 0}
 
-def test_error_path_makes_one_call():
+
+@retry(max_attempts=5, delay=0)
+def charge() -> None:
+    calls["charge"] += 1
+    raise ConnectionError("card network down")
+
+
+@rate_limit(1, 60)
+@memoize
+def exchange_rate() -> float:
+    calls["rate"] += 1
+    return 1.08
+
+
+def test_error_path_makes_one_call() -> None:
     with disable_retries():  # retry makes a single attempt
-        ...
+        try:
+            charge()
+        except ConnectionError:
+            pass
+    assert calls["charge"] == 1
 
 
-def test_each_call_hits_the_backend():
+def test_each_call_hits_the_backend() -> None:
     with disable_caching(), disable_rate_limits():  # memoize and limiters pass through
-        ...
+        exchange_rate()
+        exchange_rate()
+    assert calls["rate"] == 2
+
+
+test_error_path_makes_one_call()
+test_each_call_hits_the_backend()
 ```
 
 `disable_caching()` is the right tool when the cache is incidental. When the test is *about* the cache, use `fake_clock` and `cache_clear()` as above.
