@@ -71,6 +71,12 @@ It restores attribute values from a copy. In-place mutation of a container (`sel
 
 If your function has a `tx` parameter, it is passed as the keyword `tx=`. Put `tx` **last or keyword-only** so callers cannot supply it positionally by accident. A rollback callback that raises is logged, and the remaining callbacks still run; a commit callback that raises propagates and skips the remaining commit callbacks.
 
+## Pickling and process pools
+
+Decorated functions pickle by reference, so the rules are those of plain functions: the function must be reachable by its module and qualified name. Functions defined inside another function, lambdas, and functions defined in `__main__` of an interactive session cannot be sent to a `"spawn"` worker.
+
+State does not cross processes. Each worker has its own cache, rate limiter, circuit breaker, bulkhead and counters; there is no pool-wide limit. `CircuitBreaker`, `RateLimiter`, `Bulkhead`, `RetryBudget`, `Transaction`, `Policy` and `testing.FakeClock` raise `TypeError` when pickled or copied. A `cached_property` value is not pickled with its instance and is computed again after unpickling. See [Process pools and pickling](../get-started/async-and-methods.md#process-pools-and-pickling).
+
 ## Other things to know
 
 - **`debounce`** (sync) runs the function on a daemon timer thread, so it may be abandoned at interpreter exit with a call still pending. Call `.flush()` before shutting down if the last call matters.

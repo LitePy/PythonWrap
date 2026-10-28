@@ -7,7 +7,7 @@ import functools
 import threading
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
-from typing import Any, Concatenate, ParamSpec, Protocol, TypeVar, cast, overload
+from typing import Any, Concatenate, NoReturn, ParamSpec, Protocol, TypeVar, cast, overload
 
 from python_wrap import _core
 from python_wrap._core import F, LoggerLike, P, R
@@ -128,6 +128,9 @@ class CircuitBreaker:
         assert breaker.stats.failures == 2
         ```
     """
+
+    def __reduce__(self) -> NoReturn:
+        _core.refuse_pickle(self)
 
     def __init__(
         self,

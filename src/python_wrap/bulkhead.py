@@ -17,7 +17,7 @@ import threading
 import weakref
 from collections.abc import Callable
 from types import TracebackType
-from typing import Any, Concatenate, ParamSpec, Protocol, TypeVar, cast, overload
+from typing import Any, Concatenate, NoReturn, ParamSpec, Protocol, TypeVar, cast, overload
 
 from python_wrap import _core
 from python_wrap._core import F, P, R
@@ -129,6 +129,9 @@ class Bulkhead:
         asyncio.run(main())
         ```
     """
+
+    def __reduce__(self) -> NoReturn:
+        _core.refuse_pickle(self)
 
     def __init__(
         self,

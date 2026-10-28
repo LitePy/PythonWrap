@@ -10,7 +10,7 @@ import inspect
 import threading
 from collections.abc import Callable, Iterable
 from types import TracebackType
-from typing import Any, Final, ParamSpec, TypeVar, cast, overload
+from typing import Any, Final, NoReturn, ParamSpec, TypeVar, cast, overload
 
 from python_wrap import _core
 from python_wrap._core import F, LoggerLike
@@ -273,6 +273,9 @@ class Transaction:
         >>> with Transaction() as tx:
         ...     tx.on_rollback(print, "undo")
     """
+
+    def __reduce__(self) -> NoReturn:
+        _core.refuse_pickle(self, "Open the transaction inside the process that runs the work.")
 
     def __init__(self, logger: LoggerLike = None) -> None:
         self._logger = _core.get_logger(logger)
