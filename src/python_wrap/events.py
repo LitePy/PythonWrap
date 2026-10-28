@@ -25,11 +25,18 @@ EVENT_NAMES: Mapping[str, str] = MappingProxyType(
     {
         "retry.attempt_failed": (
             "An attempt failed and another will follow. Fields: attempt (int, 1-based), "
-            "exception (BaseException), next_delay (float seconds before the next attempt)."
+            "exception (BaseException, or None for a value rejected by retry_if_result), "
+            "next_delay (float seconds before the next attempt)."
         ),
         "retry.succeeded": "The call finally succeeded. Fields: attempts (int, total made).",
+        "retry.budget_exhausted": (
+            "A shared RetryBudget refused another retry; the call stops (retry.gave_up "
+            "follows). Fields: attempts (int), exception (BaseException, or None when "
+            "the last attempt returned a value rejected by retry_if_result)."
+        ),
         "retry.gave_up": (
-            "Attempts were exhausted. Fields: attempts (int), exception (BaseException)."
+            "Attempts were exhausted. Fields: attempts (int), exception (BaseException, or "
+            "None when the last attempt returned a value rejected by retry_if_result)."
         ),
         "timeout.expired": "A call exceeded its time limit. Fields: seconds (float, the limit).",
         "circuit.state_changed": (

@@ -105,9 +105,10 @@ unsubscribe()
 
 | Event | Fields |
 | --- | --- |
-| `retry.attempt_failed` | `attempt` (int, 1-based), `exception`, `next_delay` (seconds) |
+| `retry.attempt_failed` | `attempt` (int, 1-based), `exception` (`None` for a rejected result), `next_delay` (seconds) |
 | `retry.succeeded` | `attempts` (total made) |
-| `retry.gave_up` | `attempts`, `exception` |
+| `retry.gave_up` | `attempts`, `exception` (`None` for a rejected result) |
+| `retry.budget_exhausted` | `attempts`, `exception`: a shared `RetryBudget` refused the retry (`retry.gave_up` follows) |
 | `timeout.expired` | `seconds` (the limit) |
 | `circuit.state_changed` | `old`, `new` (`closed`, `open`, `half_open`) |
 | `circuit.rejected` | `retry_after` (seconds) |

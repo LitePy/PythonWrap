@@ -31,6 +31,7 @@ _RETRY_KEYS = (
     "jitter",
     "max_time",
     "log_level",
+    "budget",
 )
 
 _lock = threading.RLock()
@@ -63,8 +64,11 @@ def _validate(key: str, value: Any) -> Any:
         for name in value:
             if name not in _RETRY_KEYS:
                 raise _hint(str(name), _RETRY_KEYS, "retry default")
-        from python_wrap.retry import _validate as validate_retry  # avoids an import cycle
+        # Imported here to avoid an import cycle.
+        from python_wrap.retry import _check_budget
+        from python_wrap.retry import _validate as validate_retry
 
+        _check_budget(value.get("budget"))
         validate_retry(
             value.get("max_attempts", 3),
             value.get("delay", 1.0),
@@ -93,14 +97,16 @@ def configure(**defaults: Any) -> None:
             - `logger`: logger (or name) used by every decorator that logs when it
               is not given `logger=`. `None` restores the package logger.
             - `retry`: dict of defaults for `retry`/`retrying`; keys `max_attempts`,
-              `delay`, `backoff`, `max_delay`, `jitter`, `max_time`, `log_level`.
+              `delay`, `backoff`, `max_delay`, `jitter`, `max_time`, `log_level`,
+              `budget` (a `RetryBudget` shared by every retry applied afterwards).
             - `redact`: default redaction fragments for `log_args` and `audit`
               (replaces `DEFAULT_REDACT`); `None` restores it.
             - `redact_extra`: fragments added to the redaction list (the built-ins
               stay), for `log_args` and `audit`.
 
     Raises:
-        TypeError: For an unknown key (with a "did you mean" hint) or a wrongly typed value.
+        TypeError: For an unknown key (with a "did you mean" hint) or a wrongly typed value
+            (including a `budget` that is not a `RetryBudget`).
         ValueError: If a retry default is out of range.
 
     Example:

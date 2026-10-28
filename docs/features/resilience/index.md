@@ -8,7 +8,7 @@ Calls to networks, disks and other services fail, stall or get slow. These decor
 
     ---
 
-    Call again when it raises, with backoff, jitter, `Retry-After` and a time budget.
+    Call again when it raises or returns a bad value, with backoff, jitter, `Retry-After`, a time budget and a shared retry budget.
 
 -   :material-electric-switch:{ .lg .middle } **[Circuit breaker](circuit-breaker.md)**
 
