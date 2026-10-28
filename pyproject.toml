@@ -63,7 +63,7 @@ dev = [
 docs = [
     "mkdocs-material>=9.5",
     "mkdocs-redirects>=1.2.3",
-    "mkdocstrings[python]>=0.27",
+    "mkdocstrings[python]>=1.0.6",
 ]
 release = ["build>=1.2", "twine>=6.0"]
 
