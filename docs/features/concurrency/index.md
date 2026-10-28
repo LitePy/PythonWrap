@@ -34,6 +34,12 @@ Control how often a function runs, how many calls run at once, and how you run m
 
     Start a blocking call in a thread and get a `Future` back.
 
+-   :material-update:{ .lg .middle } **[Periodic tasks](periodic.md)**
+
+    ---
+
+    `periodic`: run a function every N seconds in the background, with clean shutdown.
+
 </div>
 
 ## Which one?
@@ -48,6 +54,7 @@ Control how often a function runs, how many calls run at once, and how you run m
 | Run many awaitables or items with a bound | [Async helpers](async-helpers.md) |
 | Take the first successful result of several awaitables | [`race`](async-helpers.md#race) |
 | Call blocking code without waiting for it | [`run_in_thread`](run-in-thread.md) |
+| Run something every N seconds in the background | [`periodic`](periodic.md) |
 | Make identical concurrent calls share one execution | [`singleflight`](../caching/singleflight.md) |
 
 A rate limit counts calls over **time**; a bulkhead counts calls **in flight**. Use both when a dependency has a quota and a connection limit.

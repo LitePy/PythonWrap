@@ -168,6 +168,7 @@ nav:
           - Bulkheads: features/concurrency/bulkheads.md
           - Async helpers: features/concurrency/async-helpers.md
           - Run in a thread: features/concurrency/run-in-thread.md
+          - Periodic tasks: features/concurrency/periodic.md
       - Observability:
           - features/observability/index.md
           - Logging: features/observability/logging.md
@@ -206,6 +207,7 @@ nav:
           - Concurrency: api/concurrency.md
           - Async helpers: api/aio.md
           - Bulkhead: api/bulkhead.md
+          - Periodic: api/periodic.md
       - Observability:
           - Logging and audit: api/logs.md
           - Timing and profiling: api/timing.md

@@ -118,6 +118,8 @@ unsubscribe()
 | `cache.miss` | none |
 | `cache.evicted` | `reason` (`lru` or `ttl`) |
 | `bulkhead.rejected` | `active`, `waiting` |
+| `periodic.run` | `run` (1-based), `seconds` (how long the run took) |
+| `periodic.failed` | `run`, `exception` |
 
 ```python
 from python_wrap.events import EVENT_NAMES

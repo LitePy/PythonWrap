@@ -86,4 +86,4 @@ def test_unsubscribe_during_emit_is_safe() -> None:
 def test_event_names_catalogue() -> None:
     assert "retry.attempt_failed" in EVENT_NAMES
     assert all(isinstance(v, str) and v for v in EVENT_NAMES.values())
-    assert len(EVENT_NAMES) == 13
+    assert len(EVENT_NAMES) == 15
