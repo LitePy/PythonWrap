@@ -228,6 +228,14 @@ Core:
 
 ### Fixed
 
+- `AsyncPeriodic.stop()` no longer swallows a cancellation aimed at the task awaiting it, and
+  ends a loop whose run swallows the cancel; `stop()` called inside a run ends the loop as soon
+  as that run returns.
+- `timeout(..., cleanup_grace=...)` lets an outside cancellation propagate as `CancelledError`
+  (matching `asyncio.timeout`), and waits for and retrieves the child task when the caller is
+  cancelled instead of logging "Task exception was never retrieved".
+- `periodic(on_error="raise")` logs an error that `stop()` never collected when `start()` is
+  called again, instead of dropping it silently.
 - `revert_on_failure` never restored anything because its snapshot was always empty.
 - `transactional` was a no-op; it now commits and rolls back through a `Transaction`.
 - `memoize` and `cache` built keys from `str(args)`, which collided and ignored keyword
