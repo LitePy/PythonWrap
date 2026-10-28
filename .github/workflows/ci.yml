@@ -1,6 +1,7 @@
 # Continuous integration.
 #
-# Four jobs: lint (seconds), the test matrix, mypy, and a packaging check.
+# Five jobs: lint (seconds), the test matrix, free-threaded Python with the stress
+# suite, mypy, and a packaging check.
 #
 # python-wrap is pure Python with no dependencies, so the matrix is wide rather than
 # deep: every interpreter the classifiers name, on all three operating systems. Time and
@@ -83,6 +84,36 @@ jobs:
           name: coverage
           path: coverage.xml
           if-no-files-found: warn
+
+  free-threaded:
+    # CPython 3.14t with the GIL off, plus the thread-safety stress suite, which only
+    # runs when PW_STRESS=1. This is where real data races show up.
+    name: py3.14t (free-threaded) · ubuntu-latest
+    runs-on: ubuntu-latest
+    env:
+      PYTHON_GIL: "0"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.2
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          python-version: "3.14t"
+
+      - run: uv sync --group dev --frozen
+
+      - name: The GIL must really be off
+        run: uv run --no-sync python -c "import sys; assert not sys._is_gil_enabled()"
+
+      - name: pytest
+        run: uv run --no-sync pytest -q
+
+      - name: Thread-safety stress suite
+        run: uv run --no-sync pytest -q tests/stress
+        env:
+          PW_STRESS: "1"
 
   typecheck:
     name: mypy
