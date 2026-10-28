@@ -21,7 +21,7 @@ assert square.cache_info().hits == 1
 ## When to use it
 
 - A function is pure (or close enough) and called repeatedly with the same arguments.
-- An answer is good for a while: add `ttl`.
+- An answer is good for a while: add `ttl`; add `stale_ttl` to keep serving it while it refreshes in the background.
 - Not for one result regardless of arguments: use [`once`](once.md).
 - Not for a per-object attribute: use [`cached_property`](cached-property.md).
 - Not when you only want to merge calls that are running right now: use [`singleflight`](singleflight.md).
@@ -94,6 +94,10 @@ assert calls == ["a", "b", "c", "c"]
 | `key` | Custom `key(*args, **kwargs)` returning a hashable key. |
 | `cache_exceptions` | Exception class (or tuple) to cache like a result. |
 | `exception_ttl` | Seconds a cached exception stays valid (defaults to `ttl`). |
+| `stale_ttl` | Seconds after `ttl` during which a stale value is still served while it is refreshed in the background. See [Serving stale values](#serving-stale-values-while-refreshing). |
+| `store` | A [`CacheStore`](#custom-stores) to keep entries in instead of the built-in dict. |
+| `per_instance` | For methods: one cache per instance, without keeping instances alive. See [Per-instance method caches](#per-instance-method-caches). |
+| `logger` | Logger (or name) for failed background refreshes. |
 
 ### Per-item TTL
 
@@ -169,6 +173,192 @@ assert triple.cache_parameters()["maxsize"] == 8
 
 `cache_get` is typed `Any` because for `async def` functions it returns the awaited result, not a coroutine.
 
+## Serving stale values while refreshing
+
+With `stale_ttl`, an entry older than `ttl` is *stale* but not gone. For `stale_ttl` more seconds a call still returns it immediately, and the call that finds it stale starts **one** background refresh. Once a value has been loaded, callers never wait for a slow backend again; after the refresh lands they get the new value.
+
+```python
+import time
+from python_wrap import memoize
+
+version = 1
+
+@memoize(ttl=0.05, stale_ttl=60)
+def settings() -> int:
+    return version                # imagine a slow HTTP call
+
+assert settings() == 1            # miss: computed in the caller
+version = 2
+time.sleep(0.06)                  # older than ttl: now stale
+assert settings() == 1            # served at once; a refresh starts in the background
+time.sleep(0.05)
+assert settings() == 2            # the refreshed value
+```
+
+- **Sync functions** refresh in a daemon thread, at most one per key, running in a copy of the caller's `contextvars` context (so request ids and similar context reach it).
+- **`async def` functions** refresh in a task on the running event loop. It shares the in-flight bookkeeping, so concurrent stale hits and misses of one key start a single task.
+- **A failed refresh keeps the stale value.** It is logged at `WARNING` (on `logger`, default `python_wrap`), emits `cache.refresh_failed`, and the next call starts another refresh.
+- **Past `ttl + stale_ttl`** the entry is dropped and the next call is an ordinary miss, computed in the caller.
+- `stale_ttl` requires `ttl` (a number, a `timedelta` or a [function of the result](#per-item-ttl)). Cached exceptions are never served stale.
+
+Refresh decisions read the package clock, so `fake_clock` drives them in tests without waiting:
+
+```python
+import threading
+from python_wrap import memoize
+from python_wrap.testing import fake_clock
+
+calls = []
+
+@memoize(ttl=10, stale_ttl=50)
+def rates() -> int:
+    calls.append(1)
+    return len(calls)
+
+with fake_clock() as clock:
+    assert rates() == 1
+    clock.advance(15)
+    assert rates() == 1           # stale: served, refresh started
+    for t in threading.enumerate():
+        if t.name.startswith("python_wrap-refresh-"):
+            t.join()
+    assert rates() == 2
+```
+
+## Custom stores
+
+By default entries live in a dict inside the decorator. Pass `store=` to keep them somewhere else: a dict you own, a shared registry, Redis. A store is any object with these five methods (the `CacheStore` protocol; no base class needed):
+
+| Method | Contract |
+| --- | --- |
+| `get(key)` | The entry stored under `key`, or `None`. |
+| `set(key, entry, ttl)` | Store `entry`. `ttl` is the number of seconds after which it is useless and may be discarded (`None`: keep it). |
+| `delete(key)` | Remove the entry; return `True` if there was one. |
+| `clear()` | Remove every entry. |
+| `__len__()` | The number of stored entries (`cache_info().currsize`). |
+
+```python
+from python_wrap import memoize
+
+class DictStore:
+    def __init__(self) -> None:
+        self.data = {}
+
+    def get(self, key):
+        return self.data.get(key)
+
+    def set(self, key, entry, ttl):
+        self.data[key] = entry
+
+    def delete(self, key):
+        return self.data.pop(key, None) is not None
+
+    def clear(self):
+        self.data.clear()
+
+    def __len__(self):
+        return len(self.data)
+
+store = DictStore()
+
+@memoize(store=store, ttl=300)
+def price(sku: str) -> float:
+    return 9.99
+
+price("A-1"); price("A-1")
+assert len(store) == 1
+assert price.cache_info().hits == 1
+assert price.cache_get("A-1") == 9.99   # the cache_* helpers all work
+price.cache_clear()
+assert len(store) == 0
+```
+
+What a store can rely on, and what it must do:
+
+- **Entries are opaque.** Return exactly what was stored and never look inside. A store that serialises (Redis, files) must round-trip entries, for example with `pickle`. Entries are never `None`.
+- **Entries carry their own deadlines**, as Unix timestamps, and `memoize` checks them. A store may forget an entry at any time (that is just a miss) and does not have to implement expiry, though honouring `ttl` keeps it from filling up. Processes sharing a store agree on expiry as long as their clocks agree.
+- **Keys are hashable, but not strings.** They are tuples of the normalised arguments (or whatever `key=` returns). A store that needs `str` or `bytes` keys must serialise them itself, with a prefix per function when several functions share one backend.
+- **The store must be thread-safe.** `memoize` does not hold its lock while calling the store, so a network round trip never blocks other callers. Single `dict` operations are atomic in CPython, so the store above qualifies.
+- **Methods are synchronous.** For `async def` functions they run on the event loop, so keep them fast.
+- Exceptions raised by the store propagate to the caller.
+- `maxsize` (LRU) only applies to the built-in store: passing both `store=` and `maxsize=` raises `TypeError`.
+
+A sketch of a Redis adapter, using the `redis` package (not a python-wrap dependency):
+
+<!-- skip -->
+```python
+import pickle
+import redis
+from python_wrap import memoize
+
+class RedisStore:
+    def __init__(self, client: redis.Redis, prefix: str) -> None:
+        self.client, self.prefix = client, prefix
+
+    def _key(self, key) -> bytes:
+        return self.prefix.encode() + pickle.dumps(key)  # keys are tuples, not strings
+
+    def get(self, key):
+        raw = self.client.get(self._key(key))
+        return None if raw is None else pickle.loads(raw)
+
+    def set(self, key, entry, ttl):
+        expire = None if ttl is None else max(1, int(ttl) + 1)
+        self.client.set(self._key(key), pickle.dumps(entry), ex=expire)
+
+    def delete(self, key):
+        return bool(self.client.delete(self._key(key)))
+
+    def clear(self):
+        for k in self.client.scan_iter(match=self.prefix + "*"):
+            self.client.delete(k)
+
+    def __len__(self):
+        return sum(1 for _ in self.client.scan_iter(match=self.prefix + "*"))
+
+@memoize(store=RedisStore(redis.Redis(), prefix="pricing:"), ttl=300)
+def price(sku: str) -> float: ...
+```
+
+`pickle.dumps` of a key is only stable when the arguments pickle deterministically (strings, numbers, tuples of them), so prefer simple arguments or a `key=` that returns a string. Only unpickle data from a store you trust.
+
+## Per-instance method caches
+
+On a plain `@memoize` method, `self` is part of the key: the cache holds a strong reference to every instance, keeping it alive, and instances must be hashable. `per_instance=True` fixes both. Each instance gets its own cache, found through a weak reference and keyed by the arguments after `self`:
+
+```python
+import dataclasses
+import gc
+import weakref
+from python_wrap import memoize
+
+@dataclasses.dataclass          # eq=True: instances are unhashable
+class Account:
+    id: int
+
+    @memoize(per_instance=True, maxsize=100)
+    def balance(self, currency: str) -> float:
+        return 100.0
+
+a, b = Account(1), Account(1)   # equal, but two objects: two caches
+a.balance("EUR"); a.balance("EUR"); b.balance("EUR")
+assert Account.balance.cache_info().hits == 1
+assert Account.balance.cache_info().currsize == 2   # summed over live instances
+
+ref = weakref.ref(a)
+del a
+gc.collect()
+assert ref() is None                                # the cache did not keep it alive
+assert Account.balance.cache_info().currsize == 1   # its entries went with it
+```
+
+- **Identity, not equality.** Caches belong to objects, so two equal instances never share results, and unhashable classes (an `eq=True` dataclass) work. When an instance is garbage-collected its cache is dropped, so a later object that gets the same `id()` starts empty.
+- **Instances must be weak-referenceable.** A class with `__slots__` must list `"__weakref__"`; otherwise the call raises `TypeError`.
+- `maxsize` applies to each instance. `cache_info()` adds up hits, misses and sizes over every live instance and `cache_clear()` clears them all. `cache_delete`, `cache_get` and `cache_contains` take the instance first, as on any method: `obj.balance.cache_get(obj, "EUR")`.
+- A custom `key=` still receives `self`; leave it out of the key, since the cache is already per instance.
+- A cached result that references its own instance (returning `self`, a bound method, a closure over `self`) keeps that instance alive.
+- `per_instance` uses the built-in store and cannot be combined with `store=`.
+
 ## Async and methods
 
 **Async.** Concurrent awaits of a missing key share one in-flight task per event loop, so the function runs once.
@@ -229,11 +419,11 @@ Unlike v0.1, every decorated function gets its own store, even when one `cache(.
 
 ## Events
 
-`memoize` (and `cache`) emit `cache.hit`, `cache.miss` and `cache.evicted` (field `reason`: `"lru"` or `"ttl"`) to `python_wrap.events` listeners, with the function's qualified name. With no listener registered this costs one list check. See [Metrics](../observability/metrics.md) for recipes.
+`memoize` (and `cache`) emit `cache.hit`, `cache.miss` and `cache.evicted` (field `reason`: `"lru"` or `"ttl"`) to `python_wrap.events` listeners, with the function's qualified name. With `stale_ttl` they also emit `cache.stale` (a stale value was served and a background refresh started; the hit itself is reported as `cache.hit`) and `cache.refresh_failed` (field `exception`). With no listener registered this costs one list check. See [Metrics](../observability/metrics.md) for recipes.
 
 ## Testing
 
-Use `python_wrap.testing.disable_caching()` to bypass every cache in tests.
+Use `python_wrap.testing.disable_caching()` to bypass every cache in tests: nothing is read, written or refreshed. `ttl` and `stale_ttl` run on the package clock, so `python_wrap.testing.fake_clock()` makes entries expire or turn stale without waiting (see the example under [Serving stale values](#serving-stale-values-while-refreshing)).
 
 ## Gotchas
 
@@ -241,10 +431,10 @@ Use `python_wrap.testing.disable_caching()` to bypass every cache in tests.
     The cache is guarded by a lock, but the function is never called while holding it. For sync functions, two threads that miss on the same key at the same moment may both compute the value, and the last result stored wins. If that is not acceptable, stack [`singleflight`](singleflight.md) under `memoize`.
 
 !!! warning "Methods keep instances alive"
-    `self` is part of the key and the cache holds a strong reference to every instance it has seen, which keeps them alive. Use `maxsize` or `ttl` (or a `key=` that ignores `self`) on methods of many short-lived objects. See [Limitations](../../project/limitations.md).
+    `self` is part of the key and the cache holds a strong reference to every instance it has seen, which keeps them alive. Use [`per_instance=True`](#per-instance-method-caches) on methods of many short-lived objects (or `maxsize`, `ttl`, or a `key=` that ignores `self`). See [Limitations](../../project/limitations.md).
 
 !!! warning "Unhashable instances"
-    A method of a class whose instances are unhashable (for example an `eq=True` dataclass) fails with a `TypeError` naming `self`. `id(self)` is deliberately not used as a fallback because ids are reused after garbage collection. Pass `key=` or use [`cached_property`](cached-property.md) instead.
+    A method of a class whose instances are unhashable (for example an `eq=True` dataclass) fails with a `TypeError` naming `self`. `id(self)` is deliberately not used as a fallback because ids are reused after garbage collection. Use [`per_instance=True`](#per-instance-method-caches) (keyed by identity through a weak reference), pass `key=`, or use [`cached_property`](cached-property.md) instead.
 
 ## See also
 

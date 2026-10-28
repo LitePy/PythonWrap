@@ -8,7 +8,7 @@ These decorators avoid doing the same work twice: remembering a result, running 
 
     ---
 
-    Cache a function's result per argument values, with LRU size limits, TTL and cache control.
+    Cache a function's result per argument values, with LRU size limits, TTL, stale-while-revalidate, pluggable stores and cache control.
 
 -   :material-numeric-1-circle-outline:{ .lg .middle } **[Once](once.md)**
 
@@ -42,6 +42,8 @@ These decorators avoid doing the same work twice: remembering a result, running 
 | --- | --- |
 | Same arguments give the same answer (a pure function) | [`@memoize`](memoize.md) (add `maxsize` so it cannot grow without bound) |
 | The answer goes stale after a while | [`@memoize(ttl=...)`](memoize.md#expiry-and-size) |
+| Never make callers wait for a refresh | [`@memoize(ttl=..., stale_ttl=...)`](memoize.md#serving-stale-values-while-refreshing) |
+| Cache a method without keeping objects alive | [`@memoize(per_instance=True)`](memoize.md#per-instance-method-caches) |
 | One result regardless of arguments (init, setup, config load) | [`@once`](once.md) |
 | An expensive attribute of one object | [`@cached_property`](cached-property.md) |
 | Collapse duplicate concurrent calls (no cache) | [`@singleflight`](singleflight.md) |
@@ -52,4 +54,4 @@ They combine: for example, stack `singleflight` under `memoize` so that two thre
 ## See also
 
 - [API reference](../../api/caching.md)
-- [Metrics and events](../observability/metrics.md): `cache.hit`, `cache.miss` and `cache.evicted`
+- [Metrics and events](../observability/metrics.md): `cache.hit`, `cache.miss`, `cache.evicted`, `cache.stale` and `cache.refresh_failed`

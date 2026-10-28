@@ -118,6 +118,8 @@ unsubscribe()
 | `cache.hit` | none |
 | `cache.miss` | none |
 | `cache.evicted` | `reason` (`lru` or `ttl`) |
+| `cache.stale` | none (a stale value was served and a background refresh started) |
+| `cache.refresh_failed` | `exception` (the stale value is kept) |
 | `bulkhead.rejected` | `active`, `waiting` |
 | `periodic.run` | `run` (1-based), `seconds` (how long the run took) |
 | `periodic.failed` | `run`, `exception` |

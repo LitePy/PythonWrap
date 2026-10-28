@@ -481,13 +481,10 @@ def test_memoize_ttl_without_maxsize_sweeps_expired_entries(fake_clock: FakeCloc
     for i in range(1000):
         f(i)
         fake_clock.advance(2)
-    sweep = next(
+    store = next(
         c.cell_contents
         for c in f.cache_info.__closure__  # type: ignore[attr-defined]
-        if getattr(c.cell_contents, "__name__", "") == "sweep"
-    )
-    store = next(
-        c.cell_contents for c in sweep.__closure__ if hasattr(c.cell_contents, "move_to_end")
+        if type(c.cell_contents).__name__ == "_LocalStore"
     )
     assert len(store) <= 130
 
@@ -722,6 +719,9 @@ def test_cache_parameters() -> None:
         "typed": True,
         "cache_exceptions": (),
         "exception_ttl": 2.0,
+        "stale_ttl": None,
+        "store": None,
+        "per_instance": False,
     }
 
 
