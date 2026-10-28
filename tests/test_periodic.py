@@ -367,21 +367,32 @@ def test_jitter_bounds_and_scale(monkeypatch: pytest.MonkeyPatch) -> None:
     assert seen == [(-0.1, 0.1)]
 
 
-def test_loop_real_time_start_to_start_without_drift() -> None:
-    starts: list[float] = []
+def test_loop_real_time_start_to_start_without_drift(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Check the ticks the loop schedules rather than measured gaps: CI runners can
+    # overshoot sleeps by tens of milliseconds, but the schedule must stay on the grid.
     interval = 0.04
+    dues: list[float] = []
+    real_delay_until = periodic_module._delay_until
+
+    def recording(due: float, now: float, interval: float, jitter: float) -> float:
+        dues.append(due)
+        return real_delay_until(due, now, interval, jitter)
+
+    monkeypatch.setattr(periodic_module, "_delay_until", recording)
 
     @periodic(interval, max_runs=5)
     def work() -> None:
-        starts.append(time.monotonic())
         time.sleep(0.015)  # work time must not stretch the period
 
     work.start()
     wait_for(lambda: not work.running)
-    gaps = [b - a for a, b in itertools.pairwise(starts)]
-    assert len(gaps) == 4
-    # Drift would add the 0.015 s of work to every gap (4 * 0.055 total).
-    assert starts[-1] - starts[0] < 4 * interval + 0.03
+    assert len(dues) == 4
+    assert all(b > a for a, b in itertools.pairwise(dues))
+    # Drift would shift every tick by the work time; on the grid each is a whole
+    # number of intervals after the first (ticks may be skipped on a slow machine).
+    for due in dues:
+        steps = (due - dues[0]) / interval
+        assert abs(steps - round(steps)) < 1e-6
 
 
 def test_overrun_skips_missed_ticks_instead_of_bursting() -> None:
