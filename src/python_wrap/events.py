@@ -52,6 +52,14 @@ EVENT_NAMES: Mapping[str, str] = MappingProxyType(
         "bulkhead.rejected": (
             "A call was refused because the bulkhead is full. Fields: active (int), waiting (int)."
         ),
+        "periodic.run": (
+            "A background run of a periodic function finished. function is its name. "
+            "Fields: run (int, 1-based), seconds (float, how long it took)."
+        ),
+        "periodic.failed": (
+            "A background run of a periodic function raised. Fields: run (int), "
+            "exception (BaseException)."
+        ),
     }
 )
 
