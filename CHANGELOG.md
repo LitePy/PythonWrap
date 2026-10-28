@@ -70,6 +70,16 @@ path.
 
 Resilience:
 
+- `RetryBudget` (with `RetryBudgetStats`): one Finagle/Envoy-style retry allowance shared
+  across functions, threads and event loops via `retry(budget=...)`, `retrying(budget=...)` or
+  `configure(retry={"budget": ...})`. When it is spent, retrying stops at once and emits
+  `retry.budget_exhausted`, which prevents retry storms against a failing dependency.
+- `retry_if_result=` on `retry`/`retrying` retries when the function returns a matching value;
+  once retries run out the last value is returned. `retrying` blocks set `attempt.result`.
+- For `async def` functions, `retry_if`, `retry_if_result` and `on_retry` may be async and are
+  awaited; `async with attempt:` is supported in `retrying`.
+- `timeout(..., cleanup_grace=)` bounds async cleanup after the limit: the call is cancelled,
+  given the grace to finish its cleanup, then `TimeoutExpired` is raised.
 - `retry`: `delay_from=` (with the `retry_after_header` helper for `Retry-After`), `max_time=`,
   `log_level=` and `log_exc_info=`; `retry_stats(func)` and `RetryStats`; `retrying(...)` /
   `Retrying` for retrying an inline block (`for` / `async for` with `with attempt`); retries
@@ -85,6 +95,11 @@ Resilience:
 
 Async toolkit and concurrency:
 
+- `periodic(interval, *, jitter=, initial_delay=, max_runs=, on_error=)` runs a sync function in
+  a daemon thread, or an async function as a task, every N seconds without drift (missed ticks
+  are skipped). The function stays callable and gains `start()`, `stop()`, `running`, `runs`,
+  `last_error` and `running_in_background()` for clean shutdown. Events `periodic.run` and
+  `periodic.failed`.
 - `python_wrap.aio`: `gather_limit`, `map_async` and `amap_iter` (bounded concurrency, lazy
   input, ordered results; everything is cancelled and awaited on error, cancellation or early
   exit), `race` (first success wins; `RaceFailed`) and `run_sync` (refuses to run inside a running
@@ -104,6 +119,10 @@ Caching:
 
 Observability, configuration and testing:
 
+- `trace(otel=True, span_name=...)` wraps calls in an OpenTelemetry span (sync and async) with
+  `code.function`, `code.namespace` and `python_wrap.context.*` attributes and exception
+  recording. `opentelemetry-api` is imported lazily and only when asked for; python-wrap still
+  has no runtime dependencies.
 - `count_calls`: calls, errors, in-flight, mean, p50, p95 and p99 per function.
 - `python_wrap.events`: `subscribe()`, `listening()`, `filter_events()` and `EVENT_NAMES`, one hook
   for retry, cache, circuit, limiter, bulkhead and timeout events (Prometheus, OpenTelemetry and
@@ -153,14 +172,19 @@ Core:
 - `revert_on_failure(attrs=, deep=, target=)`.
 - `deprecate(since=, removed_in=, alternative=, category=)`, which also works on classes;
   `mock_data(enabled=bool | callable)`; `compose(*decorators)`.
-- Exceptions in `python_wrap.errors`, each subclassing the closest builtin: `PythonWrapError`,
-  `TimeoutExpired` (`TimeoutError`), `RateLimitExceeded`, `CircuitOpenError`, `ValidationError`
-  (`ValueError`) and `ArgumentTypeError` (`TypeError`).
+- Exceptions in `python_wrap.errors`, all subclassing `PythonWrapError`: `TimeoutExpired`
+  (also a `TimeoutError`), `RateLimitExceeded`, `CircuitOpenError`, `ValidationError` (also a
+  `ValueError`) and `ArgumentTypeError` (also a `TypeError`).
 - `once` gained `.reset()` and `.called`.
 - A `py.typed` marker, and a `NullHandler` on the `python_wrap` logger.
 
 ### Changed
 
+- `RetryState.exception` can be `None` (when a returned value was rejected by
+  `retry_if_result`), and `RetryState` has a new `result` field. A sync function given an async
+  retry hook raises `TypeError` when decorated.
+- On free-threaded Python 3.14t new threads inherit the caller's context, so `log_context`
+  fields carry over into them (`sys.flags.thread_inherit_context`).
 - The project uses a `src/` layout and Hatchling, and requires Python 3.10 or newer.
 - The runtime dependencies `wrapt` and `typing-extensions` were unused and have been removed.
 - `retry` waits with `asyncio.sleep` for `async def` functions, and re-raises the final
@@ -240,7 +264,8 @@ Core:
 ### Infrastructure
 
 - CI runs ruff, `mypy --strict`, the test suite on Linux, macOS and Windows across Python 3.10 to
-  3.14, and a wheel check.
+  3.14, the test and thread-safety stress suites on free-threaded Python 3.14t, and a wheel
+  check.
 - Tag-driven releases publish to PyPI through Trusted Publishing, with no stored token.
 - The documentation build is checked in CI and hosted on Read the Docs.
 - Added Dependabot, issue and pull request templates, `CONTRIBUTING.md`, `SECURITY.md`,
