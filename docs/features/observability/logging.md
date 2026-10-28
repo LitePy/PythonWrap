@@ -166,6 +166,23 @@ assert handler() == 1
 
 Use it to answer "who is calling this?" while debugging. It defaults to `DEBUG`, so it is silent unless you enable that level.
 
+### OpenTelemetry spans
+
+`trace(otel=True)` also opens an OpenTelemetry span around each call, named after the function (`span_name=` overrides it), using `opentelemetry.trace.get_tracer("python_wrap")`. The span is current for the whole call, also across `await`; it carries `code.function`, `code.namespace` and the fields of the active `log_context` as `python_wrap.context.<name>` attributes, and on an exception it records the exception and sets the error status.
+
+python-wrap stays dependency-free: `opentelemetry-api` is imported only when `otel=True`, and a missing package raises `ImportError` when the function is decorated. Configure the SDK and exporter yourself, as for any OpenTelemetry code.
+
+<!-- skip -->
+```python
+from python_wrap import log_context, trace
+
+@trace(otel=True, span_name="charge-card")
+def charge(amount: int) -> None: ...
+
+with log_context(request_id="r-42"):
+    charge(5)   # span "charge-card", attribute python_wrap.context.request_id = "r-42"
+```
+
 ## `log_context`
 
 Bind fields such as a request id once, and have every python-wrap log line made underneath carry them. It works as a context manager (`with` and `async with`) and as a decorator, and blocks nest.

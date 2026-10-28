@@ -59,6 +59,8 @@ dev = [
     "hypothesis>=6.100",
     "ruff>=0.8",
     "mypy>=1.13",
+    "opentelemetry-api>=1.45.1",
+    "opentelemetry-sdk>=1.45.1",
 ]
 docs = [
     "mkdocs-material>=9.5",
