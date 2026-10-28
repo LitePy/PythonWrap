@@ -4,5 +4,5 @@ contact_links:
     url: https://github.com/LitePy/PythonWrap/security/advisories/new
     about: Please report security issues privately, not in a public issue.
   - name: Documentation
-    url: https://python-wrap.readthedocs.io
+    url: https://pythonwrap.readthedocs.io
     about: Check the docs first; most questions are answered there.

@@ -1,7 +1,7 @@
 site_name: python-wrap
 site_description: Everyday Python decorators that just work. Retry, cache, time out, rate limit and more. Typed, async-aware, zero dependencies.
 site_author: Mahmoud Ahmed
-site_url: https://python-wrap.readthedocs.io/
+site_url: https://pythonwrap.readthedocs.io/
 repo_url: https://github.com/LitePy/PythonWrap
 repo_name: LitePy/PythonWrap
 edit_uri: edit/main/docs/

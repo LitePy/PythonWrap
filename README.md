@@ -1,6 +1,6 @@
 <div align="center">
 
-<a href="https://python-wrap.readthedocs.io">
+<a href="https://pythonwrap.readthedocs.io">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/LitePy/PythonWrap/main/docs/assets/logo-dark.svg">
     <img alt="python-wrap" src="https://raw.githubusercontent.com/LitePy/PythonWrap/main/docs/assets/logo-light.svg" height="64">
@@ -14,13 +14,13 @@ Retry (with `Retry-After`), circuit breaker, timeout, cache, rate limit, bulkhea
 [![PyPI](https://img.shields.io/pypi/v/python-wrap?logo=pypi&logoColor=white)](https://pypi.org/project/python-wrap/)
 [![Python](https://img.shields.io/pypi/pyversions/python-wrap?logo=python&logoColor=white)](https://pypi.org/project/python-wrap/)
 [![License: MIT](https://img.shields.io/pypi/l/python-wrap)](https://github.com/LitePy/PythonWrap/blob/main/LICENSE)
-[![Docs](https://readthedocs.org/projects/python-wrap/badge/?version=latest)](https://python-wrap.readthedocs.io)
+[![Docs](https://readthedocs.org/projects/pythonwrap/badge/?version=latest)](https://pythonwrap.readthedocs.io)
 [![Typed: mypy strict](https://img.shields.io/badge/typed-mypy%20strict-2a6db2)](https://mypy.readthedocs.io/en/stable/command_line.html#cmdoption-mypy-strict)
 
-[**Documentation**](https://python-wrap.readthedocs.io) ·
-[Cookbook](https://python-wrap.readthedocs.io/en/latest/cookbook/) ·
-[Performance](https://python-wrap.readthedocs.io/en/latest/project/performance/) ·
-[Migration guide](https://python-wrap.readthedocs.io/en/latest/project/migration/) ·
+[**Documentation**](https://pythonwrap.readthedocs.io) ·
+[Cookbook](https://pythonwrap.readthedocs.io/en/latest/cookbook/) ·
+[Performance](https://pythonwrap.readthedocs.io/en/latest/project/performance/) ·
+[Migration guide](https://pythonwrap.readthedocs.io/en/latest/project/migration/) ·
 [Changelog](https://github.com/LitePy/PythonWrap/blob/main/CHANGELOG.md)
 
 </div>
@@ -33,7 +33,7 @@ Retry (with `Retry-After`), circuit breaker, timeout, cache, rate limit, bulkhea
 - **Zero dependencies.** Pure Python, nothing to audit or pin.
 - **Typed.** Decorators preserve the wrapped signature (`ParamSpec`), and stacking keeps the exact type (`@retry` over `@memoize` still has `.cache_info()`). Ships `py.typed`, checked with `mypy --strict`.
 - **Sync and async, one API.** Works on `def`, `async def` and methods. Async wrappers stay coroutine functions and never block the event loop.
-- **Fast.** Cache hits and validation skip signature binding on the hot path ([numbers](https://python-wrap.readthedocs.io/en/latest/project/performance/)).
+- **Fast.** Cache hits and validation skip signature binding on the hot path ([numbers](https://pythonwrap.readthedocs.io/en/latest/project/performance/)).
 - **Observable and testable.** One event stream for retries, cache, circuit, limiters and timeouts; `python_wrap.testing` makes tests instant and deterministic.
 - **Never configures your logging**, is thread-safe, and is tested on Python 3.10 to 3.14 on Linux, macOS and Windows.
 
@@ -113,7 +113,7 @@ print(f"{time.monotonic() - start:.2f}s")
 
 ## What is in the box
 
-Everything below is importable from `python_wrap` unless a module is shown. [Choose a decorator](https://python-wrap.readthedocs.io/en/latest/get-started/choosing/) is the quick way in.
+Everything below is importable from `python_wrap` unless a module is shown. [Choose a decorator](https://pythonwrap.readthedocs.io/en/latest/get-started/choosing/) is the quick way in.
 
 | Area | Name | What it does |
 |---|---|---|
@@ -232,7 +232,7 @@ except TimeoutExpired:
     print("out of time")
 ```
 
-After `recovery_timeout` the breaker goes half-open and lets a trial call through. Share one `CircuitBreaker` across functions for one dependency, or use `@circuit_breaker(...)` for a private one (`func.breaker`). `timeout` interrupts sync code with `SIGALRM` on the Unix main thread, cancels `async def` with `asyncio.wait_for`, and elsewhere falls back to a thread that cannot stop the work (see [Limitations](https://python-wrap.readthedocs.io/en/latest/project/limitations/)).
+After `recovery_timeout` the breaker goes half-open and lets a trial call through. Share one `CircuitBreaker` across functions for one dependency, or use `@circuit_breaker(...)` for a private one (`func.breaker`). `timeout` interrupts sync code with `SIGALRM` on the Unix main thread, cancels `async def` with `asyncio.wait_for`, and elsewhere falls back to a thread that cannot stop the work (see [Limitations](https://pythonwrap.readthedocs.io/en/latest/project/limitations/)).
 
 ### Caching
 
@@ -359,7 +359,7 @@ print(names)                          # retry.attempt_failed, ..., retry.succeed
 print(work.stats.calls, work.stats.p95)
 ```
 
-Subscribe once and forward events to Prometheus, OpenTelemetry or statsd (recipes in the [guide](https://python-wrap.readthedocs.io/en/latest/features/observability/metrics/)). Listeners cannot break the decorated function.
+Subscribe once and forward events to Prometheus, OpenTelemetry or statsd (recipes in the [guide](https://pythonwrap.readthedocs.io/en/latest/features/observability/metrics/)). Listeners cannot break the decorated function.
 
 ### Validation and logging with redaction
 
@@ -411,7 +411,7 @@ Decorators are applied bottom-up and run top-down, so order matters:
 | `log_args`, `timing`, `audit` | everything | They observe what callers actually experience |
 | `enforce_types`, `validate_args` | the rest | Reject bad input before doing any work |
 
-You do not have to memorise this. `policy(observe=, validate=, fallback=, cache=, limiter=, bulkhead=, breaker=, retry=, timeout=, guard=)` takes each decorator by role and applies them in the recommended order, whatever order you wrote them in. Policies are immutable (`.with_(timeout=timeout(30))`), work on methods and `async def`, and `wrap_methods(policy)` protects a whole class. `compose(a, b, c)(f)` is `a(b(c(f)))` when you just want a named stack. Details: [Stacking](https://python-wrap.readthedocs.io/en/latest/get-started/stacking/) and [Policies](https://python-wrap.readthedocs.io/en/latest/features/resilience/policies/).
+You do not have to memorise this. `policy(observe=, validate=, fallback=, cache=, limiter=, bulkhead=, breaker=, retry=, timeout=, guard=)` takes each decorator by role and applies them in the recommended order, whatever order you wrote them in. Policies are immutable (`.with_(timeout=timeout(30))`), work on methods and `async def`, and `wrap_methods(policy)` protects a whole class. `compose(a, b, c)(f)` is `a(b(c(f)))` when you just want a named stack. Details: [Stacking](https://pythonwrap.readthedocs.io/en/latest/get-started/stacking/) and [Policies](https://pythonwrap.readthedocs.io/en/latest/features/resilience/policies/).
 
 ## How it compares
 
@@ -432,15 +432,15 @@ None of them cover bounded `gather`, bulkheads, batching, hedging, policies or t
 
 ## Learn more
 
-- [Cookbook](https://python-wrap.readthedocs.io/en/latest/cookbook/): resilient HTTP client, async crawler, FastAPI, Django, CLI tools, DataLoader batching, testing, observability.
-- [Performance](https://python-wrap.readthedocs.io/en/latest/project/performance/): per-call overhead and how to benchmark it yourself.
-- [Testing](https://python-wrap.readthedocs.io/en/latest/testing/): `fast_mode`, `FakeClock`, `spy` and pytest fixtures.
-- [Migration guide](https://python-wrap.readthedocs.io/en/latest/project/migration/) and [CHANGELOG](https://github.com/LitePy/PythonWrap/blob/main/CHANGELOG.md).
+- [Cookbook](https://pythonwrap.readthedocs.io/en/latest/cookbook/): resilient HTTP client, async crawler, FastAPI, Django, CLI tools, DataLoader batching, testing, observability.
+- [Performance](https://pythonwrap.readthedocs.io/en/latest/project/performance/): per-call overhead and how to benchmark it yourself.
+- [Testing](https://pythonwrap.readthedocs.io/en/latest/testing/): `fast_mode`, `FakeClock`, `spy` and pytest fixtures.
+- [Migration guide](https://pythonwrap.readthedocs.io/en/latest/project/migration/) and [CHANGELOG](https://github.com/LitePy/PythonWrap/blob/main/CHANGELOG.md).
 - Runnable [examples](https://github.com/LitePy/PythonWrap/tree/main/examples).
 
 ## Upgrading from 0.1
 
-0.2.0 fixes decorators that did not do what their names promised (`transactional`, `revert_on_failure`, async `timing`) and makes a few breaking changes: `run_in_thread` returns a `Future`, `benchmark` is a function, `retry_on_exception` is deprecated and bounded, `rate_limit` raises `RateLimitExceeded`, and the logging decorators default to `DEBUG`. Python 3.8 and 3.9 are no longer supported. `from python_wrap.decorators import ...` still works. See the [migration guide](https://python-wrap.readthedocs.io/en/latest/project/migration/).
+0.2.0 fixes decorators that did not do what their names promised (`transactional`, `revert_on_failure`, async `timing`) and makes a few breaking changes: `run_in_thread` returns a `Future`, `benchmark` is a function, `retry_on_exception` is deprecated and bounded, `rate_limit` raises `RateLimitExceeded`, and the logging decorators default to `DEBUG`. Python 3.8 and 3.9 are no longer supported. `from python_wrap.decorators import ...` still works. See the [migration guide](https://pythonwrap.readthedocs.io/en/latest/project/migration/).
 
 ## Contributing
 
