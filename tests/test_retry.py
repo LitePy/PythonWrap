@@ -10,13 +10,17 @@ import random
 import threading
 import time
 import warnings
+from collections.abc import Iterator
 from typing import Any
 
 import pytest
 
 from conftest import FakeClock
 from python_wrap import _core
+from python_wrap.config import configure, configured
 from python_wrap.retry import (
+    RetryBudget,
+    RetryBudgetStats,
     RetryState,
     RetryStats,
     fallback,
@@ -27,6 +31,7 @@ from python_wrap.retry import (
     retrying,
     suppress,
 )
+from python_wrap.testing import disable_retries, fast_mode
 
 
 class Flaky:
@@ -822,3 +827,508 @@ def test_events_emitted(fake_clock: FakeClock) -> None:
     assert seen[1].fields == {"attempts": 2}
     assert seen[3].fields["attempts"] == 2
     assert seen[4].function == "block" and seen[4].fields == {"attempts": 1}
+
+
+# ======================================================= budgets, results, async hooks
+
+
+@pytest.fixture
+def events() -> Iterator[list[_core.Event]]:
+    seen: list[_core.Event] = []
+    _core.listeners.append(seen.append)
+    try:
+        yield seen
+    finally:
+        _core.listeners.remove(seen.append)
+
+
+def always_fails(counter: list[int]) -> Any:
+    def f() -> None:
+        counter.append(1)
+        raise ConnectionError("down")
+
+    return f
+
+
+# --------------------------------------------------------------------------- budget
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"ratio": -0.1},
+        {"ratio": float("nan")},
+        {"ratio": float("inf")},
+        {"min_per_second": -1},
+        {"window": 0},
+        {"window": float("inf")},
+    ],
+)
+def test_budget_validation(kwargs: dict[str, float]) -> None:
+    with pytest.raises(ValueError):
+        RetryBudget(**kwargs)
+
+
+def test_budget_ratio_and_reserve(fake_clock: FakeClock) -> None:
+    budget = RetryBudget(ratio=0.5, min_per_second=0.2, window=10)  # reserve = 2 retries
+    assert budget.stats == RetryBudgetStats(requests=0, retries=0, rejected=0, allowed=2)
+    for _ in range(4):
+        budget.deposit()
+    assert budget.stats.allowed == 4  # 0.5 * 4 + 2
+    assert [budget.try_withdraw() for _ in range(5)] == [True] * 4 + [False]
+    assert budget.stats == RetryBudgetStats(requests=4, retries=4, rejected=1, allowed=0)
+    assert "ratio=0.5" in repr(budget)
+
+
+def test_budget_window_slides(fake_clock: FakeClock) -> None:
+    budget = RetryBudget(ratio=1.0, min_per_second=0, window=10)
+    budget.deposit()
+    assert budget.try_withdraw()
+    assert not budget.try_withdraw()
+    fake_clock.advance(5)
+    budget.deposit()
+    assert budget.try_withdraw()
+    assert budget.stats.requests == 2
+    fake_clock.advance(6)  # the first deposit and retry are now older than the window
+    assert budget.stats == RetryBudgetStats(requests=1, retries=1, rejected=1, allowed=0)
+    fake_clock.advance(10)
+    assert budget.stats.requests == 0
+    budget.reset()
+    assert budget.stats == RetryBudgetStats(0, 0, 0, 0)
+
+
+def test_budget_exhaustion_stops_retrying_at_once(
+    fake_clock: FakeClock, events: list[_core.Event]
+) -> None:
+    budget = RetryBudget(ratio=0, min_per_second=0.1, window=10)  # one retry per window
+    calls: list[int] = []
+    f = retry(always_fails(calls), max_attempts=5, delay=1, budget=budget)
+    with pytest.raises(ConnectionError):
+        f()
+    assert len(calls) == 2  # first attempt + the one retry the budget allowed
+    assert fake_clock.sleeps == [1]  # no sleep after the refusal
+    names = [e.name for e in events]
+    assert names == ["retry.attempt_failed", "retry.budget_exhausted", "retry.gave_up"]
+    assert events[1].fields["attempts"] == 2
+    assert isinstance(events[1].fields["exception"], ConnectionError)
+    stats = retry_stats(f)
+    assert stats is not None
+    assert (stats.retries, stats.gave_up, stats.budget_exhausted) == (1, 1, 1)
+    assert stats.snapshot()["budget_exhausted"] == 1
+    assert "budget_exhausted=1" in repr(stats)
+    stats.reset()
+    assert stats.budget_exhausted == 0
+    assert budget.stats.rejected == 1
+
+
+def test_budget_shared_between_functions_and_retrying(fake_clock: FakeClock) -> None:
+    budget = RetryBudget(ratio=0, min_per_second=0.2, window=10)  # two retries
+    a_calls: list[int] = []
+    b_calls: list[int] = []
+    a = retry(always_fails(a_calls), max_attempts=3, delay=0, budget=budget)
+    b = retry(always_fails(b_calls), max_attempts=3, delay=0, budget=budget)
+    with pytest.raises(ConnectionError):
+        a()
+    with pytest.raises(ConnectionError):
+        b()
+    assert (len(a_calls), len(b_calls)) == (3, 1)
+    tries: list[int] = []
+    with pytest.raises(ConnectionError):
+        for attempt in retrying(max_attempts=3, delay=0, budget=budget):
+            with attempt:
+                tries.append(attempt.number)
+                raise ConnectionError
+    assert tries == [1]
+    assert budget.stats.requests == 3
+
+
+def test_budget_does_not_touch_success_or_non_retryable(fake_clock: FakeClock) -> None:
+    budget = RetryBudget(ratio=0, min_per_second=0, window=1)
+
+    @retry(budget=budget, on=ConnectionError)
+    def ok() -> int:
+        return 1
+
+    @retry(budget=budget, on=ConnectionError)
+    def wrong() -> None:
+        raise KeyError("x")
+
+    assert ok() == 1
+    with pytest.raises(KeyError):
+        wrong()
+    assert budget.stats == RetryBudgetStats(requests=2, retries=0, rejected=0, allowed=0)
+
+
+def test_budget_async(fake_clock: FakeClock, events: list[_core.Event]) -> None:
+    budget = RetryBudget(ratio=0, min_per_second=0.1, window=10)
+    calls: list[int] = []
+
+    @retry(max_attempts=4, delay=0.5, budget=budget)
+    async def f() -> None:
+        calls.append(1)
+        raise ConnectionError
+
+    with pytest.raises(ConnectionError):
+        asyncio.run(f())
+    assert len(calls) == 2
+    assert fake_clock.sleeps == [0.5]
+    assert "retry.budget_exhausted" in [e.name for e in events]
+
+
+def test_budget_thread_safe() -> None:
+    budget = RetryBudget(ratio=0.5, min_per_second=0, window=1000)
+    granted: list[bool] = []
+    lock = threading.Lock()
+
+    def worker() -> None:
+        for _ in range(200):
+            budget.deposit()
+            ok = budget.try_withdraw()
+            ok2 = budget.try_withdraw()
+            with lock:
+                granted.extend([ok, ok2])
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    stats = budget.stats
+    assert stats.requests == 1600
+    assert sum(granted) == stats.retries == 800  # never more than ratio * requests
+    assert stats.rejected == 3200 - 800
+
+
+def test_budget_with_fast_mode_and_disable_retries() -> None:
+    budget = RetryBudget(ratio=0, min_per_second=0.1, window=10)
+    calls: list[int] = []
+    f = retry(always_fails(calls), max_attempts=5, delay=60, budget=budget)
+    with fast_mode(), pytest.raises(ConnectionError):
+        f()
+    assert len(calls) == 2
+    budget.reset()
+    calls.clear()
+    with disable_retries(), pytest.raises(ConnectionError):
+        f()
+    assert len(calls) == 1
+    assert budget.stats.retries == 0  # no retry was attempted, so nothing withdrawn
+
+
+def test_budget_type_checked_and_configurable(fake_clock: FakeClock) -> None:
+    with pytest.raises(TypeError, match="RetryBudget"):
+        retry(budget="lots")  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="RetryBudget"):
+        retrying(budget=3)  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="RetryBudget"):
+        configure(retry={"budget": 0.1})
+    budget = RetryBudget(ratio=0, min_per_second=0, window=1)
+    with configured(retry={"budget": budget, "delay": 0}):
+        calls: list[int] = []
+        f = retry(always_fails(calls))
+        g = retry(always_fails([]), budget=None)  # explicit None opts out
+    with pytest.raises(ConnectionError):
+        f()
+    assert len(calls) == 1 and budget.stats.rejected == 1
+    with pytest.raises(ConnectionError):
+        g()
+    assert budget.stats.requests == 1
+
+
+# ------------------------------------------------------------------ retry_if_result
+
+
+def test_retry_if_result_sync(fake_clock: FakeClock, events: list[_core.Event]) -> None:
+    replies = iter([None, None, 7])
+    seen: list[RetryState] = []
+
+    @retry(max_attempts=5, delay=1, retry_if_result=lambda r: r is None, on_retry=seen.append)
+    def poll() -> int | None:
+        return next(replies)
+
+    assert poll() == 7
+    assert fake_clock.sleeps == [1, 1]
+    assert [(s.attempt, s.exception, s.result) for s in seen] == [(1, None, None), (2, None, None)]
+    assert [e.name for e in events] == [
+        "retry.attempt_failed",
+        "retry.attempt_failed",
+        "retry.succeeded",
+    ]
+    assert events[0].fields["exception"] is None
+    assert events[2].fields == {"attempts": 3}
+
+
+def test_retry_if_result_exhausted_returns_last_value(
+    fake_clock: FakeClock, events: list[_core.Event], caplog: pytest.LogCaptureFixture
+) -> None:
+    replies = iter(["busy-1", "busy-2", "busy-3"])
+    seen: list[RetryState] = []
+
+    @retry(
+        max_attempts=3,
+        delay=0,
+        retry_if_result=lambda r: r.startswith("busy"),
+        on_retry=seen.append,
+    )
+    def status() -> str:
+        return next(replies)
+
+    with caplog.at_level(logging.WARNING, logger="python_wrap"):
+        assert status() == "busy-3"
+    assert [s.result for s in seen] == ["busy-1", "busy-2"]
+    assert "returned 'busy-1'" in caplog.text
+    assert [e.name for e in events][-1] == "retry.gave_up"
+    assert events[-1].fields == {"attempts": 3, "exception": None}
+    stats = retry_stats(status)
+    assert stats is not None
+    assert (stats.calls, stats.attempts_total, stats.retries, stats.gave_up) == (1, 3, 2, 1)
+    assert stats.last_exception is None
+
+
+def test_retry_if_result_mixed_with_exceptions(fake_clock: FakeClock) -> None:
+    replies: Iterator[Any] = iter([ValueError("x"), -1, 5])
+
+    @retry(max_attempts=4, delay=0, on=ValueError, retry_if_result=lambda r: r < 0)
+    def f() -> int:
+        value = next(replies)
+        if isinstance(value, Exception):
+            raise value
+        return int(value)
+
+    assert f() == 5
+    assert retry_stats(f).retries == 2  # type: ignore[union-attr]
+
+
+def test_retry_if_result_predicate_error_propagates(fake_clock: FakeClock) -> None:
+    def bad(_: object) -> bool:
+        raise RuntimeError("predicate bug")
+
+    with pytest.raises(RuntimeError, match="predicate bug"):
+        retry(lambda: 1, retry_if_result=bad)()
+
+
+def test_retry_if_result_budget_exhausted_returns_value(fake_clock: FakeClock) -> None:
+    budget = RetryBudget(ratio=0, min_per_second=0, window=1)
+    calls: list[int] = []
+
+    @retry(max_attempts=5, delay=0, retry_if_result=lambda r: r is None, budget=budget)
+    def f() -> None:
+        calls.append(1)
+
+    assert f() is None
+    assert len(calls) == 1
+    assert retry_stats(f).budget_exhausted == 1  # type: ignore[union-attr]
+
+
+def test_retry_if_result_under_disable_retries_and_fast_mode() -> None:
+    calls: list[int] = []
+
+    @retry(max_attempts=4, delay=30, retry_if_result=lambda r: r is None)
+    def f() -> None:
+        calls.append(1)
+
+    with fast_mode():
+        assert f() is None
+    assert len(calls) == 4
+    calls.clear()
+    with disable_retries():
+        f()
+    assert len(calls) == 1
+
+
+def test_retry_if_result_async_sync_and_async_predicates(fake_clock: FakeClock) -> None:
+    async def is_none(value: object) -> bool:
+        await asyncio.sleep(0)
+        return value is None
+
+    for predicate in (lambda v: v is None, is_none):
+        replies = iter([None, "ok"])
+
+        @retry(max_attempts=3, delay=0.25, retry_if_result=predicate)
+        async def f() -> str | None:
+            return next(replies)  # noqa: B023  # called inside this iteration
+
+        assert asyncio.run(f()) == "ok"
+    assert fake_clock.sleeps == [0.25, 0.25]
+
+
+def test_retry_if_result_async_exhausted(fake_clock: FakeClock) -> None:
+    seen: list[RetryState] = []
+
+    async def note(state: RetryState) -> None:
+        seen.append(state)
+
+    @retry(max_attempts=2, delay=0, retry_if_result=lambda v: v == 0, on_retry=note)
+    async def f() -> int:
+        return 0
+
+    assert asyncio.run(f()) == 0
+    assert [s.result for s in seen] == [0]
+    assert retry_stats(f).gave_up == 1  # type: ignore[union-attr]
+
+
+def test_retrying_with_result_sync(fake_clock: FakeClock, events: list[_core.Event]) -> None:
+    replies = iter([None, None, "done"])
+    value = None
+    for attempt in retrying(max_attempts=5, delay=1, retry_if_result=lambda r: r is None):
+        with attempt:
+            value = next(replies)
+            attempt.result = value
+    assert value == "done" and attempt.result == "done"
+    assert fake_clock.sleeps == [1, 1]
+    assert [e.name for e in events][-1] == "retry.succeeded"
+
+    events.clear()
+    numbers = []
+    for attempt in retrying(max_attempts=2, delay=0, retry_if_result=lambda r: r is None):
+        with attempt:
+            numbers.append(attempt.number)
+            assert attempt.result is None  # unset reads as None
+            attempt.result = None
+    assert numbers == [1, 2]  # loop ended normally with the last (bad) value
+    assert [e.name for e in events] == ["retry.attempt_failed", "retry.gave_up"]
+
+    # Not setting attempt.result means the predicate is not consulted.
+    for attempt in retrying(max_attempts=3, retry_if_result=lambda r: True):
+        with attempt:
+            numbers.append(0)
+    assert numbers[-1] == 0 and len(numbers) == 3
+
+
+def test_retrying_with_result_async(fake_clock: FakeClock) -> None:
+    async def is_none(value: object) -> bool:
+        return value is None
+
+    async def main() -> list[int]:
+        numbers: list[int] = []
+        replies = iter([None, 1])
+        async for attempt in retrying(max_attempts=3, delay=0.5, retry_if_result=is_none):
+            async with attempt:
+                numbers.append(attempt.number)
+                attempt.result = next(replies)
+        replies = iter([None, None])
+        async for attempt in retrying(max_attempts=2, delay=0, retry_if_result=is_none):
+            async with attempt:
+                numbers.append(attempt.number)
+                attempt.result = next(replies)
+        return numbers
+
+    assert asyncio.run(main()) == [1, 2, 1, 2]
+    assert fake_clock.sleeps == [0.5, 0]
+
+
+# ------------------------------------------------------------------------ async hooks
+
+
+def test_async_retry_if_and_on_retry_are_awaited(fake_clock: FakeClock) -> None:
+    seen: list[int] = []
+
+    async def transient(exc: BaseException) -> bool:
+        await asyncio.sleep(0)
+        return "transient" in str(exc)
+
+    async def note(state: RetryState) -> None:
+        await asyncio.sleep(0)
+        seen.append(state.attempt)
+
+    errors = iter([ConnectionError("transient"), ConnectionError("transient")])
+
+    @retry(max_attempts=5, delay=0, retry_if=transient, on_retry=note)
+    async def f() -> str:
+        err = next(errors, None)
+        if err is not None:
+            raise err
+        return "ok"
+
+    assert asyncio.run(f()) == "ok"
+    assert seen == [1, 2]
+
+    @retry(max_attempts=5, delay=0, retry_if=transient)
+    async def fatal() -> None:
+        raise ConnectionError("fatal")
+
+    with pytest.raises(ConnectionError, match="fatal"):
+        asyncio.run(fatal())
+    assert retry_stats(fatal).attempts_total == 1  # type: ignore[union-attr]
+
+
+def test_async_function_still_accepts_sync_hooks(fake_clock: FakeClock) -> None:
+    seen: list[int] = []
+    errors = iter([ValueError("a")])
+
+    @retry(delay=0, retry_if=lambda e: True, on_retry=lambda s: seen.append(s.attempt))
+    async def f() -> int:
+        err = next(errors, None)
+        if err is not None:
+            raise err
+        return 1
+
+    assert asyncio.run(f()) == 1
+    assert seen == [1]
+
+
+@pytest.mark.parametrize("hook", ["retry_if", "retry_if_result", "on_retry"])
+def test_sync_function_rejects_async_hooks_at_decoration(hook: str) -> None:
+    async def cb(_: object) -> bool:
+        return True
+
+    deco = retry(**{hook: cb})
+    with pytest.raises(TypeError, match=f"{hook}= is an async function"):
+
+        @deco
+        def f() -> None: ...
+
+
+def test_retrying_async_hooks_need_async_with(fake_clock: FakeClock) -> None:
+    async def yes(_: object) -> bool:
+        return True
+
+    with pytest.raises(TypeError, match="async with attempt"):
+        for attempt in retrying(retry_if=yes, delay=0):
+            with attempt:
+                raise ValueError
+    with pytest.raises(TypeError, match="retry_if_result="):
+        for attempt in retrying(retry_if_result=yes, delay=0):
+            with attempt:
+                attempt.result = 1
+
+    async def main() -> list[int]:
+        seen: list[int] = []
+
+        async def note(state: RetryState) -> None:
+            seen.append(state.attempt)
+
+        async for attempt in retrying(max_attempts=3, delay=0, retry_if=yes, on_retry=note):
+            async with attempt:
+                if attempt.number < 3:
+                    raise ValueError
+        with pytest.raises(KeyError):
+            async for attempt in retrying(on=ValueError, retry_if=yes):
+                async with attempt:
+                    raise KeyError
+        with pytest.raises(ValueError):
+            async for attempt in retrying(max_attempts=2, delay=0, retry_if=yes):
+                async with attempt:
+                    raise ValueError
+        return seen
+
+    assert asyncio.run(main()) == [1, 2]
+
+
+def test_async_hooks_do_not_retry_cancellation(fake_clock: FakeClock) -> None:
+    async def yes(_: object) -> bool:
+        return True
+
+    @retry(on=BaseException, retry_if=yes, delay=0)
+    async def f() -> None:
+        raise asyncio.CancelledError
+
+    async def main() -> None:
+        with pytest.raises(asyncio.CancelledError):
+            await f()
+        with pytest.raises(asyncio.CancelledError):
+            async for attempt in retrying(on=BaseException, retry_if=yes):
+                async with attempt:
+                    raise asyncio.CancelledError
+
+    asyncio.run(main())
+    assert retry_stats(f).attempts_total == 1  # type: ignore[union-attr]
