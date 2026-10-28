@@ -113,6 +113,14 @@ Async toolkit and concurrency:
 
 Caching:
 
+- `memoize(ttl=..., stale_ttl=...)`: stale-while-revalidate. After `ttl` a stale value is served
+  at once while one background refresh runs (a task for async functions, a daemon thread for
+  sync ones); a failed refresh keeps the stale value and is logged. Events `cache.stale` and
+  `cache.refresh_failed`.
+- `memoize(store=...)` and the `CacheStore` protocol: keep entries in any store (a dict, Redis,
+  ...); the `cache_*` helpers work against it.
+- `memoize(per_instance=True)`: per-instance method caches held through weak references, so
+  instances stay collectable and need not be hashable.
 - `cached_property(ttl=)` (thread-safe, `async def` getters, `invalidate()`).
 - `memoize`: `cache_exceptions=` / `exception_ttl=`, a per-item `ttl=` callable, and
   `cache_contains()`, `cache_get()` and `cache_parameters()`.
@@ -239,6 +247,7 @@ Core:
 
 ### Performance
 
+- Async `memoize` and `cache` hits are about 30-35% faster (one lock instead of two).
 - The `memoize` hit path is about 9x faster.
 - `validate_args`, `check_type`, `enforce_types`, `log_args` and `audit` skip signature binding on
   plain positional calls (5x to 40x faster).

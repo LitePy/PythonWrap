@@ -30,6 +30,7 @@ from .bulkhead import (
 from .caching import (
     CachedProperty,
     CacheInfo,
+    CacheStore,
     Memoized,
     Once,
     cache,
@@ -175,6 +176,7 @@ __all__ = [
     "Bulkhead",
     "BulkheadFull",
     "CacheInfo",
+    "CacheStore",
     "CachedProperty",
     "CallStats",
     "CircuitBreaker",

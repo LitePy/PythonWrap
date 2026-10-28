@@ -129,7 +129,8 @@ Everything below is importable from `python_wrap` unless a module is shown. [Cho
 | **Async toolkit** | `gather_limit`, `map_async`, `amap_iter` | Bounded concurrency, lazy input, ordered results; everything is cancelled and awaited on error |
 | | `race`, `RaceFailed` | First success wins, the rest are cancelled |
 | | `run_sync` | Call async code from sync code (refuses inside a running loop) |
-| **Caching** | `memoize` | LRU + TTL, `typed`, `key=`, per-item `ttl=`, `cache_exceptions=`, `cache_info/clear/delete/contains/get`; async in-flight dedupe |
+| **Caching** | `memoize` | LRU + TTL, `typed`, `key=`, per-item `ttl=`, `cache_exceptions=`, `stale_ttl=` (serve stale while refreshing), `per_instance=True`, `cache_info/clear/delete/contains/get`; async in-flight dedupe |
+| | `CacheStore` | Protocol to keep `memoize` entries in your own store (dict, Redis, ...) |
 | | `cached_property`, `invalidate` | `functools.cached_property` plus `ttl`, locking and `async def` getters |
 | | `once`, `cache` | Run once and reuse (thread-safe, `.reset()`); `cache` is the v0.1 name for `memoize(ttl=...)` |
 | **Concurrency & limits** | `rate_limit`, `RateLimiter` | Sliding window, `block=True`, `key=`, several limits, one budget shared across functions |
