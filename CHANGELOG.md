@@ -158,6 +158,9 @@ Observability, configuration and testing:
 
 Core:
 
+- Decorated functions, including `periodic` objects and `wrap_methods` classes, pickle by
+  reference, so they work with `multiprocessing` and `ProcessPoolExecutor` under the "spawn"
+  start method. Cache, limiter and breaker state is per worker process.
 - `retry`: `backoff`, `max_delay`, `jitter`, `on=` exception filter, `retry_if=` predicate,
   `on_retry=` hook receiving a `RetryState`, unlimited attempts (`max_attempts=None`), and bare
   `@retry` usage.
@@ -188,6 +191,9 @@ Core:
 
 ### Changed
 
+- `CircuitBreaker`, `RateLimiter`, `Bulkhead`, `RetryBudget`, `Transaction`, `Policy` and
+  `testing.FakeClock` raise a clear `TypeError` when pickled or copied (their state belongs to
+  one process), instead of an error about a thread lock or a copy that silently shares a lock.
 - `RetryState.exception` can be `None` (when a returned value was rejected by
   `retry_if_result`), and `RetryState` has a new `result` field. A sync function given an async
   retry hook raises `TypeError` when decorated.
