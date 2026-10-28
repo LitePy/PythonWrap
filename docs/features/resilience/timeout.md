@@ -130,9 +130,11 @@ except TimeoutExpired:
 assert cleaned == ["released"]
 ```
 
-As a **decorator**, the call runs as a child task. At the limit it is cancelled and given `cleanup_grace` more seconds to finish; then `TimeoutExpired` is raised (also when the cleanup finished in time). A task still running after the grace is **abandoned**: a warning is logged on the package logger and the task keeps running until it ends by itself, its result discarded.
+As a **decorator**, the call runs as a child task. At the limit it is cancelled and given `cleanup_grace` more seconds to finish; then `TimeoutExpired` is raised (also when the cleanup finished in time). A task still running after the grace is **abandoned**: a warning is logged on the package logger and the task keeps running until it ends by itself, its result discarded. If the caller is cancelled from outside, the child is cancelled too and given the same grace before the caller's `CancelledError` propagates.
 
-As **`async with timeout(5, cleanup_grace=1)`**, the block runs in your own task and cannot be moved, so it is not abandoned: after the grace the cleanup is cancelled a **second time** (with a warning). Cleanup that swallows cancellation cannot be stopped.
+Because the decorated call runs in a **separate task**, `contextvars` it sets are not visible to the caller afterwards, and `asyncio.current_task()` inside it is the child task, not the caller's. Without `cleanup_grace` the call runs in the caller's own task as usual.
+
+As **`async with timeout(5, cleanup_grace=1)`**, the block runs in your own task and cannot be moved, so it is not abandoned: after the grace the cleanup is cancelled a **second time** (with a warning). Cleanup that swallows cancellation cannot be stopped. Only the timer's own cancellations become `TimeoutExpired`: if your task is cancelled from outside during the grace, the block raises `CancelledError`, as `asyncio.timeout` does.
 
 Sync functions and plain `with` blocks do not support it and raise `TypeError`: signals and worker threads cannot give cleanup a bounded grace. The grace uses real time and is not changed by the test overrides.
 

@@ -586,3 +586,109 @@ def test_fast_mode_does_not_shorten_schedule() -> None:
         time.sleep(0.05)
         assert work.runs == 0
         work.stop()
+
+
+# ------------------------------------------------------------------ review regressions
+
+
+async def test_async_stop_does_not_swallow_the_callers_cancellation() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    @periodic(TICK)
+    async def work() -> None:
+        started.set()
+        try:
+            await asyncio.sleep(30)
+        finally:
+            await release.wait()  # slow cleanup keeps stop() waiting
+
+    work.start()
+    await started.wait()
+    stopper = asyncio.ensure_future(work.stop())
+    await asyncio.sleep(0.01)
+    assert not stopper.done()
+    stopper.cancel()  # aimed at the task awaiting stop(), not at the loop
+    with pytest.raises(asyncio.CancelledError):
+        await stopper
+    assert work.running  # the loop is still finishing its cleanup
+    release.set()
+    await spin_until(lambda: not work.running)
+    assert await work.stop() is True
+
+
+class Fatal(BaseException):
+    """Not an Exception, so the loop does not handle it: it ends the loop task."""
+
+
+async def test_async_stop_reraises_what_ended_the_loop_task() -> None:
+    started = asyncio.Event()
+
+    @periodic(TICK)
+    async def work() -> None:
+        started.set()
+        try:
+            await asyncio.sleep(30)
+        finally:
+            raise Fatal
+
+    work.start()
+    await started.wait()
+    with pytest.raises(Fatal):
+        await work.stop()
+
+
+@pytest.mark.parametrize("swallow", ["return", "raise"])
+async def test_async_stop_ends_a_loop_whose_run_swallows_the_cancel(swallow: str) -> None:
+    started = asyncio.Event()
+
+    @periodic(TICK)
+    async def work() -> None:
+        started.set()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            if swallow == "raise":
+                raise ValueError("turned the cancel into an error") from None
+
+    work.start()
+    await started.wait()
+    assert await asyncio.wait_for(work.stop(), 2) is True
+    assert work.runs == 1
+
+
+async def test_async_stop_from_inside_ends_loop_without_waiting_a_tick() -> None:
+    @periodic(30)
+    async def work() -> None:
+        await work.stop()
+
+    work.start()
+    await spin_until(lambda: not work.running, timeout=0.5)
+    assert work.runs == 1
+
+
+def test_sync_stop_from_inside_ends_loop_without_waiting_a_tick() -> None:
+    @periodic(30)
+    def work() -> None:
+        work.stop()
+
+    work.start()
+    wait_for(lambda: not work.running, timeout=0.5)
+    assert work.runs == 1
+
+
+def test_restart_logs_an_uncollected_raise_error(caplog: pytest.LogCaptureFixture) -> None:
+    @periodic(TICK, on_error="raise")
+    def work() -> None:
+        raise ValueError("lost?")
+
+    work.start()
+    wait_for(lambda: not work.running)
+    with caplog.at_level(logging.ERROR, logger="python_wrap"):
+        work.start()  # stop() never collected the error
+        wait_for(lambda: not work.running)
+    record = next(r for r in caplog.records if "restarted before stop()" in r.getMessage())
+    assert record.levelno == logging.ERROR
+    assert record.exc_info is not None and isinstance(record.exc_info[1], ValueError)
+    with pytest.raises(ValueError):  # the second loop's own error is still surfaced
+        work.stop()
