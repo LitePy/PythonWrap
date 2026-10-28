@@ -43,7 +43,7 @@ heartbeat()                      # still an ordinary function
 
 A plain function runs in a **daemon thread** (named `python-wrap-periodic:<name>`), so it never keeps the interpreter alive. The caller's `contextvars` are copied into it.
 
-An `async def` function runs as a **task on the current event loop**, so `start()` must be called from inside a running loop; anywhere else it raises a `RuntimeError` saying so. `stop()` is a coroutine: it cancels the task, including a run in progress, and waits for it.
+An `async def` function runs as a **task on the current event loop**, so `start()` must be called from inside a running loop; anywhere else it raises a `RuntimeError` saying so. `stop()` is a coroutine: it cancels the task, including a run in progress, and waits for it. If the task awaiting `stop()` is itself cancelled (or an `asyncio.timeout` around it expires), that `CancelledError` propagates at once while the loop finishes its cleanup in the background. Called from inside the function, `stop()` ends the loop as soon as that run returns, without waiting for the next tick.
 
 ```python
 import asyncio
@@ -77,7 +77,7 @@ A thread cannot be interrupted, so `stop()` on a plain function lets the run in 
 | --- | --- |
 | `"log"` (default) | Logged through the package logger, loop continues. |
 | `"stop"` | Logged, loop ends. |
-| `"raise"` | Loop ends and the exception is re-raised once from `stop()` (or on leaving the `with` block), so it is never lost in a background thread. |
+| `"raise"` | Loop ends and the exception is re-raised once from `stop()` (or on leaving the `with` block), so it is never lost in a background thread. If `start()` is called again before `stop()` collected it, the old exception is logged at `ERROR` (with its traceback) and then dropped. |
 
 In every mode the exception is kept in `last_error` and published as a `periodic.failed` event. `logger=` and `level=` (default `logging.ERROR`) control the log line.
 

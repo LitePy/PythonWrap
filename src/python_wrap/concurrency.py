@@ -284,6 +284,18 @@ def _call_in_worker(
     return cast(R, job.result)
 
 
+# Message of the cancellations a timer sends itself. Python 3.10 has no
+# ``Task.cancelling()`` counter, so there the message is how a timer tells its own
+# cancellation apart from one sent by someone else (best effort: two cancellations that
+# arrive before the task resumes are delivered as one, as in the 3.10 stdlib).
+_TIMER_CANCEL = "python_wrap.timeout expired"
+
+
+def _is_timer_cancel(exc: BaseException | None) -> bool:
+    """True if ``exc`` is the CancelledError a timer sent (3.10 path only)."""
+    return isinstance(exc, asyncio.CancelledError) and exc.args[:1] == (_TIMER_CANCEL,)
+
+
 if sys.version_info >= (3, 11):
     _async_timer = asyncio.timeout
 
@@ -310,7 +322,7 @@ else:  # pragma: no cover - exercised by the Python 3.10 CI job
 
             def fire() -> None:
                 self._fired = True
-                task.cancel()
+                task.cancel(_TIMER_CANCEL)
 
             self._handle = asyncio.get_running_loop().call_later(self._seconds, fire)
             return self
@@ -322,7 +334,7 @@ else:  # pragma: no cover - exercised by the Python 3.10 CI job
             tb: TracebackType | None,
         ) -> None:
             self._handle.cancel()
-            if self._fired and exc_type is asyncio.CancelledError:
+            if self._fired and _is_timer_cancel(exc):
                 raise TimeoutError from exc
 
     _async_timer = _CancelTimer
@@ -343,6 +355,7 @@ class _GraceTimer:
         self._label = label
         self._fired = False
         self._cancels = 0
+        self._cancelling = 0
         self._handles: list[asyncio.TimerHandle] = []
 
     def expired(self) -> bool:
@@ -361,15 +374,19 @@ class _GraceTimer:
                 self._label,
                 self._grace,
             )
-            task.cancel()
+            task.cancel(_TIMER_CANCEL)
 
         def fire() -> None:
             self._fired = True
             self._cancels += 1
-            task.cancel()
+            task.cancel(_TIMER_CANCEL)
             self._handles.append(loop.call_later(self._grace, second))
 
         self._task = task
+        # Like asyncio.timeout: remember the cancel requests already pending on entry, so
+        # on exit only the timer's own ones are converted (3.11+).
+        cancelling = getattr(task, "cancelling", None)
+        self._cancelling = cancelling() if cancelling is not None else 0
         self._handles.append(loop.call_later(self._seconds, fire))
         return self
 
@@ -381,11 +398,18 @@ class _GraceTimer:
     ) -> None:
         for handle in self._handles:
             handle.cancel()
-        if self._fired and hasattr(self._task, "uncancel"):
+        if not self._fired or exc_type is not asyncio.CancelledError:
+            return
+        uncancel = getattr(self._task, "uncancel", None)
+        if uncancel is not None:  # 3.11+: withdraw our own requests, then count the rest
+            remaining: int = getattr(self._task, "cancelling")()  # noqa: B009 - 3.11+ only
             for _ in range(self._cancels):
-                if self._task.uncancel() == 0:
+                if remaining <= self._cancelling:
                     break
-        if self._fired and exc_type is asyncio.CancelledError:
+                remaining = uncancel()
+            if remaining <= self._cancelling:
+                raise TimeoutError from exc
+        elif _is_timer_cancel(exc):  # pragma: no cover - exercised by the 3.10 CI job
             raise TimeoutError from exc
 
 
@@ -395,7 +419,13 @@ async def _await_with_grace(awaitable: Awaitable[T], label: str, seconds: float,
     try:
         await asyncio.wait({task}, timeout=seconds)
     except BaseException:
-        task.cancel()  # we were cancelled from outside: do not leave the child running
+        # Cancelled from outside: cancel the child too, give its cleanup the same grace,
+        # then re-raise the caller's cancellation. Never leave its outcome unretrieved.
+        task.cancel()
+        try:
+            await asyncio.wait({task}, timeout=grace)
+        finally:
+            _consume_when_done(task)
         raise
     if task.done():
         return task.result()
@@ -403,15 +433,22 @@ async def _await_with_grace(awaitable: Awaitable[T], label: str, seconds: float,
     try:
         await asyncio.wait({task}, timeout=grace)
     except BaseException:
+        _consume_when_done(task)  # cancelled from outside during the grace period
         raise
     if not task.done():
         _core.get_logger(None).warning(
             "%s: still running %ss after the timeout; abandoning it", label, grace
         )
-        task.add_done_callback(_consume_result)
-    else:
-        _consume_result(task)
+    _consume_when_done(task)
     raise _expired(label, seconds)
+
+
+def _consume_when_done(task: asyncio.Future[Any]) -> None:
+    """Retrieve ``task``'s outcome now if it is done, otherwise once it is."""
+    if task.done():
+        _consume_result(task)
+    else:
+        task.add_done_callback(_consume_result)
 
 
 def _consume_result(task: asyncio.Future[Any]) -> None:

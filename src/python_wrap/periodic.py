@@ -139,6 +139,14 @@ class _Base(Generic[P, R]):
             raise exc
 
     def _reset(self) -> None:
+        if self._pending is not None:
+            # on_error="raise", but stop() never collected it: do not let a restart lose it.
+            _core.get_logger(self._logger).error(
+                "periodic %s: restarted before stop() raised the error that ended the "
+                "previous loop; dropping it",
+                self._name,
+                exc_info=self._pending,
+            )
         self._runs = 0
         self._last_error = None
         self._pending = None
@@ -247,7 +255,7 @@ class Periodic(_Base[P, R]):
                     return
             else:
                 self._ran(_clock() - began)
-            if self._done():
+            if self._done() or stop.is_set():
                 return
             now = _clock()
             due = _next_tick(due, now, self._interval)
@@ -306,7 +314,9 @@ class AsyncPeriodic(_Base[P, R]):
         """Cancel the task (including a run in progress) and wait for it to end.
 
         Calling it again, or on a loop that never started, is harmless. Called from
-        inside the function itself it ends the loop after that run returns.
+        inside the function itself it ends the loop as soon as that run returns. If the
+        task awaiting it is cancelled, the cancellation propagates at once and the loop
+        task finishes in the background.
 
         Returns:
             True once the task has ended.
@@ -320,9 +330,17 @@ class AsyncPeriodic(_Base[P, R]):
             if task is asyncio.current_task():
                 self._stopping = True
                 return True
+            self._stopping = True  # also ends a loop whose run swallows the cancel
             task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+            try:
+                # Not ``await task``: a CancelledError from it could not be told apart
+                # from one aimed at the caller, so the caller's would be swallowed.
+                await asyncio.wait({task})
+            except BaseException:
+                task.add_done_callback(_retrieve)  # the caller was cancelled: re-raise
+                raise
+            if not task.cancelled():
+                task.result()  # an exception the loop itself raised (not a cancel)
         self._surface()
         return True
 
@@ -350,11 +368,17 @@ class AsyncPeriodic(_Base[P, R]):
                     return
             else:
                 self._ran(_clock() - began)
-            if self._done():
+            if self._done() or self._stopping:
                 return
             now = _clock()
             due = _next_tick(due, now, self._interval)
             await asyncio.sleep(_delay_until(due, now, self._interval, self._jitter))
+
+
+def _retrieve(task: asyncio.Task[None]) -> None:
+    """Mark a finished loop task's outcome as retrieved so asyncio does not log it."""
+    if not task.cancelled():
+        task.exception()
 
 
 class _Decorator(Protocol):
@@ -401,7 +425,8 @@ def periodic(
         max_runs: Stop by itself after this many runs (failed runs count). Default: forever.
         on_error: What an exception in a run does. ``"log"`` logs it and carries on;
             ``"stop"`` logs it and ends the loop; ``"raise"`` ends the loop and re-raises
-            the exception, once, from `stop()` (so it never vanishes in a thread). In every
+            the exception, once, from `stop()` (so it never vanishes in a thread; if
+            `start()` is called again first, it is logged at ``ERROR`` instead). In every
             mode it is kept in ``last_error`` and published as a ``periodic.failed`` event.
         name: Name for logs, events and the thread. Default: the function's qualified name.
         logger: Logger, logger name or ``None`` for the package logger.

@@ -412,7 +412,7 @@ Subscribe with `python_wrap.events`; see [Metrics](../observability/metrics.md).
 
 ## Testing
 
-`fast_mode()` makes the backoff waits instant, and `fake_clock()` turns them into clock advances you can assert on. A `RetryBudget` reads time from the same clock, so `fake_clock.advance()` slides its window. `disable_retries()` makes `retry` a single attempt (and so never touches a budget), and the `max_attempts` override from `python_wrap.testing` caps the attempts of every `retry` and `retrying` at call time. See [Testing](../../testing/index.md).
+`fast_mode()` makes the backoff waits instant, and `fake_clock()` turns them into clock advances you can assert on. A `RetryBudget` reads time from the same clock, so `fake_clock.advance()` slides its window. `disable_retries()` makes `retry` a single attempt (a budget still receives its per-call deposit, but nothing is withdrawn because no retry happens), and the `max_attempts` override from `python_wrap.testing` caps the attempts of every `retry` and `retrying` at call time. See [Testing](../../testing/index.md).
 
 ## Gotchas
 
