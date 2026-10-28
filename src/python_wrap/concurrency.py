@@ -36,6 +36,7 @@ from typing import (
     Concatenate,
     Final,
     Generic,
+    NoReturn,
     ParamSpec,
     Protocol,
     TypeVar,
@@ -848,6 +849,9 @@ class RateLimiter:
         assert not github.try_acquire()  # 4 calls in the last second
         ```
     """
+
+    def __reduce__(self) -> NoReturn:
+        _core.refuse_pickle(self)
 
     def __init__(
         self,

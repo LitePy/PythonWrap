@@ -86,6 +86,47 @@ Decorators work on instance methods; `self` is an ordinary first argument. Two t
 
 Both are explained, with workarounds, in [Limitations](../project/limitations.md#shared-state-on-methods). To apply one decorator to every method of a class, see [`wrap_methods`](../features/devtools.md).
 
+## Process pools and pickling
+
+Decorated functions pickle **by reference**, like plain functions: `pickle` stores the module and qualified name, and loading it finds the same object again. You can submit a decorated module-level function to a `multiprocessing` pool or a `ProcessPoolExecutor`, including with the `"spawn"` start method (the default on macOS and Windows). This also covers objects that are not functions, such as `periodic`, and classes decorated with `wrap_methods`.
+
+```python
+import pickle
+from python_wrap import count_calls, memoize, periodic, retry
+
+@memoize
+@retry(max_attempts=3, delay=0.01)
+def load(key: str) -> str:
+    return key.upper()
+
+@periodic(60)
+def refresh() -> None: ...
+
+assert pickle.loads(pickle.dumps(load)) is load
+assert pickle.loads(pickle.dumps(refresh)) is refresh
+```
+
+<!-- skip -->
+```python
+# jobs.py: workers re-import this module by name, so the function must live at module level
+import concurrent.futures
+import multiprocessing
+from python_wrap import rate_limit, retry
+
+@retry(max_attempts=3, delay=0.1)
+@rate_limit(10, 1)
+def fetch(url: str) -> int: ...
+
+if __name__ == "__main__":
+    ctx = multiprocessing.get_context("spawn")
+    with concurrent.futures.ProcessPoolExecutor(4, mp_context=ctx) as pool:
+        sizes = list(pool.map(fetch, ["https://a.example", "https://b.example"]))
+```
+
+**Limiter, breaker and cache state is per process.** Each worker imports the module and builds its own decorated function, so it has its own cache, rate limiter, circuit breaker, bulkhead and call counters. Above, `rate_limit(10, 1)` allows 10 calls per second *in each worker*, not across the pool. Nothing is shared or sent back to the parent.
+
+Objects that hold that state refuse to pickle with a clear `TypeError`: `CircuitBreaker`, `RateLimiter`, `Bulkhead`, `RetryBudget`, `Transaction`, `Policy` and `testing.FakeClock`. Create them at module level so each process builds its own. Instances whose class uses `cached_property` pickle normally, but the cached values are not pickled: the copy computes them again on first access. See [Limitations](../project/limitations.md#pickling-and-process-pools).
+
 ## Gotchas
 
 - **One event loop per `debounce` and `singleflight` burst.** Their state is tracked per loop; do not share a debounced coroutine across loops and expect them to coordinate.

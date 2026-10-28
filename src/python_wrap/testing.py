@@ -30,7 +30,7 @@ import types
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Generic, ParamSpec, TypeVar, overload
+from typing import Any, Generic, NoReturn, ParamSpec, TypeVar, overload
 
 from python_wrap import _core
 
@@ -263,6 +263,9 @@ class FakeClock:
     _lock: threading.Lock = field(
         default_factory=threading.Lock, init=False, repr=False, compare=False
     )
+
+    def __reduce__(self) -> NoReturn:
+        _core.refuse_pickle(self, "Install a fake clock in each process that needs one.")
 
     def __post_init__(self) -> None:
         self.now = self.start
