@@ -91,6 +91,11 @@ class _Base(Generic[P, R]):
         self._lock = threading.Lock()
         functools.update_wrapper(self, func)  # type: ignore[arg-type]
 
+    def __reduce__(self) -> str:
+        # Pickle by reference, like a function: the object at ``module.qualname`` is
+        # this one. The background loop and its counters stay in this process.
+        return str(self.__dict__["__qualname__"])  # set by update_wrapper
+
     @property
     def runs(self) -> int:
         """How many times the function has been run since `start` (failed runs count)."""

@@ -16,6 +16,11 @@ Rules every module follows:
   and ``time.monotonic()``), so the test overrides and the fake clock never shorten
   it, and sync and async code behave the same.
 * Honour the process-wide test overrides (see below).
+* Decorated functions pickle by reference (``module.qualname``), so they can be sent to
+  process pools. A decorator that returns an object instead of a function gives it a
+  ``__reduce__`` returning its ``__qualname__``. Objects holding shared runtime state
+  (locks, counters, timers) refuse to pickle through `refuse_pickle`: that state is
+  per process.
 
 Test overrides contract
 -----------------------
@@ -50,7 +55,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, fields
-from typing import Any, ParamSpec, TypeVar
+from typing import Any, NoReturn, ParamSpec, TypeVar
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -149,6 +154,25 @@ def is_async(func: Callable[..., Any]) -> bool:
 def qualname(func: Callable[..., Any]) -> str:
     """A readable name for log messages."""
     return getattr(func, "__qualname__", None) or getattr(func, "__name__", None) or repr(func)
+
+
+def refuse_pickle(obj: object, advice: str | None = None) -> NoReturn:
+    """Raise a clear ``TypeError`` from ``__reduce__`` of an object with per-process state.
+
+    Locks, counters and timers cannot be shared with another process, so pickling (and
+    copying) such an object fails here instead of deep inside ``pickle``. ``advice``
+    replaces the default hint for objects that are not used as decorators.
+    """
+    name = type(obj).__name__
+    if advice is None:
+        advice = (
+            f"Create one {name} per process instead (e.g. at module level, so each worker "
+            "builds its own); functions decorated with it pickle by reference."
+        )
+    raise TypeError(
+        f"cannot pickle {name!r} object: its state (locks, counters, timers) belongs to "
+        f"one process. {advice}"
+    )
 
 
 # ---------------------------------------------------------------------------- events

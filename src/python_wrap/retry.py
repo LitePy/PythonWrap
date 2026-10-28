@@ -16,7 +16,7 @@ import warnings
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator
 from dataclasses import dataclass
 from types import TracebackType
-from typing import Any, Protocol, TypeVar, cast, overload
+from typing import Any, NoReturn, Protocol, TypeVar, cast, overload
 
 from python_wrap import _core, config
 from python_wrap._core import F, LoggerLike, P, R
@@ -244,6 +244,9 @@ class RetryBudget:
         assert budget.stats.requests == 1
         ```
     """
+
+    def __reduce__(self) -> NoReturn:
+        _core.refuse_pickle(self)
 
     def __init__(
         self, ratio: float = 0.1, min_per_second: float = 10, window: float = 10.0
