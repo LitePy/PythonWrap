@@ -117,12 +117,13 @@ Everything below is importable from `python_wrap` unless a module is shown. [Cho
 
 | Area | Name | What it does |
 |---|---|---|
-| **Resilience** | `retry` | Backoff, jitter, `max_delay`, `max_time`, `retry_if`, `on_retry`; `delay_from=retry_after_header` honours `Retry-After`; never retries cancellation |
+| **Resilience** | `retry` | Backoff, jitter, `max_delay`, `max_time`, `retry_if`, `retry_if_result`, `on_retry` (async hooks too); `delay_from=retry_after_header` honours `Retry-After`; never retries cancellation |
+| | `RetryBudget` | One retry allowance shared across functions, so a failing dependency does not trigger a retry storm |
 | | `retrying`, `Retrying` | Retry an inline block (`for attempt in retrying(...)`, sync and `async for`) |
 | | `retry_stats`, `RetryStats` | Attempts, successes and failures per retried function |
 | | `fallback`, `suppress` | Return a default (or handler result), or swallow chosen exceptions |
 | | `circuit_breaker`, `CircuitBreaker` | Fail fast while a dependency is down; `success_threshold`, `exclude`, `on_state_change`, `.stats`; one breaker can guard many functions |
-| | `timeout`, `Timeout` | Decorator or `with timeout(5):` / `async with`; raises `TimeoutExpired` |
+| | `timeout`, `Timeout` | Decorator or `with timeout(5):` / `async with`; raises `TimeoutExpired`; `cleanup_grace=` bounds async cleanup |
 | | `deadline`, `Deadline` | A shared time budget; `retry` and `timeout` clamp to it |
 | | `hedge` | Fire a backup call when the first is slow and take the first success (idempotent calls only) |
 | **Async toolkit** | `gather_limit`, `map_async`, `amap_iter` | Bounded concurrency, lazy input, ordered results; everything is cancelled and awaited on error |
@@ -135,10 +136,11 @@ Everything below is importable from `python_wrap` unless a module is shown. [Cho
 | | `Bulkhead`, `limit_concurrency` | Cap concurrent calls, bound the queue, raise `BulkheadFull` |
 | | `throttle`, `debounce` | At most once per interval; run after calls stop (`.cancel()`, `.flush()`) |
 | | `singleflight`, `run_in_thread` | Share one execution between identical concurrent calls; run in a thread, get a `Future` |
+| | `periodic` | Run a function every N seconds in the background, without drift, with clean `start()`/`stop()` |
 | **Batching** | `batch_calls` | DataLoader pattern: many single-item calls become one bulk call; sync and async, deduped |
 | **Observability & metrics** | `count_calls` | `.stats`: calls, errors, in-flight, mean, p50, p95, p99 |
 | | `subscribe`, `listening` | One event hook for retry, cache, circuit, limiter, bulkhead and timeout events (`python_wrap.events` also has `filter_events`, `EVENT_NAMES`) |
-| | `log_args`, `log_return`, `trace`, `audit` | Structured, redacted logging; `AuditRecord` to a sink |
+| | `log_args`, `log_return`, `trace`, `audit` | Structured, redacted logging; `AuditRecord` to a sink; `trace(otel=True)` opens an OpenTelemetry span |
 | | `log_context`, `current_log_context` | Contextvar fields in every log line and audit record |
 | | `timing`, `profile`, `measure_memory`, `benchmark` | Duration with `threshold=`/`callback=`, `cProfile`, `tracemalloc`, `benchmark_async` |
 | **Validation** | `enforce_types`, `validate_args`, `check_type` | Check from annotations, with predicates, or with explicit types |
