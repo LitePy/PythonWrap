@@ -336,7 +336,9 @@ def log_context(**fields: Any) -> _LogContext:
     and ``async def`` functions. Blocks nest: inner fields add to, and override, outer ones.
     The fields live in a `contextvars.ContextVar`, so each thread and asyncio task sees its
     own; a new thread starts empty unless you run it in a copied context
-    (``contextvars.copy_context().run(...)``; `run_in_thread` does this for you).
+    (``contextvars.copy_context().run(...)``; `run_in_thread` does this for you), or
+    unless ``sys.flags.thread_inherit_context`` is set (the default on free-threaded
+    builds).
 
     `log_args`, `log_return`, `audit`, `trace` and `timing` append `` [key=value ...]`` to
     their message and attach the dict as ``LogRecord.context``; `AuditRecord.context`

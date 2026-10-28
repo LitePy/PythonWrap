@@ -4,6 +4,7 @@ import asyncio
 import functools
 import inspect
 import logging
+import sys
 from datetime import timedelta, timezone
 from typing import Any
 
@@ -482,7 +483,9 @@ def test_log_context_is_isolated_per_task_and_thread() -> None:
         t = threading.Thread(target=lambda: seen.update(copied=ctx.run(current_log_context)))
         t.start()
         t.join()
-    assert seen == {"plain": {}, "copied": {"a": 1}}
+    # Free-threaded 3.14 builds start threads in a copy of the caller's context.
+    inherits = getattr(sys.flags, "thread_inherit_context", 0)
+    assert seen == {"plain": {"a": 1} if inherits else {}, "copied": {"a": 1}}
 
 
 def test_log_context_restores_on_error() -> None:

@@ -217,8 +217,8 @@ async def run() -> dict[str, object]:
 assert asyncio.run(run()) == {"job": "nightly"}
 ```
 
-!!! note "Threads start empty"
-    The fields live in a `contextvars.ContextVar`: every asyncio task and thread sees its own. A new thread starts **empty**; to carry the fields over, start it in a copied context with `contextvars.copy_context().run(...)` (`run_in_thread` and `asyncio.to_thread` already do this).
+!!! note "New threads and the context"
+    The fields live in a `contextvars.ContextVar`: every asyncio task and thread sees its own. On a regular CPython build a new thread starts **empty**; to carry the fields over, start it in a copied context with `contextvars.copy_context().run(...)` (`run_in_thread` and `asyncio.to_thread` already do this). Free-threaded builds (3.14t) start threads in a copy of the caller's context by default (`sys.flags.thread_inherit_context`), so the fields carry over on their own.
 
 ## See also
 
