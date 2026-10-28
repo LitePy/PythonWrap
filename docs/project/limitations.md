@@ -51,6 +51,7 @@ What to do:
 
 Mitigations:
 
+- Use `per_instance=True`: each instance gets its own cache through a weak reference, so instances stay collectable (they must be weak-referenceable). See [Per-instance method caches](../features/caching/memoize.md#per-instance-method-caches).
 - Set `maxsize` and/or `ttl` so entries (and the instances they pin) are eventually dropped.
 - Use `key=` that ignores `self` (for results that do not depend on the instance), so the instance is not stored.
 - Call `cache_clear()` when a long-lived cache has served its purpose.

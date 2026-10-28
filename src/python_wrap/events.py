@@ -49,6 +49,14 @@ EVENT_NAMES: Mapping[str, str] = MappingProxyType(
         "cache.hit": "A cached value was returned. No fields.",
         "cache.miss": "No cached value; the function ran. No fields.",
         "cache.evicted": "An entry left the cache. Fields: reason (str): 'lru' or 'ttl'.",
+        "cache.stale": (
+            "A stale value was served (stale-while-revalidate) and a background refresh "
+            "started. No fields."
+        ),
+        "cache.refresh_failed": (
+            "A background refresh failed; the stale value is kept. "
+            "Fields: exception (BaseException)."
+        ),
         "bulkhead.rejected": (
             "A call was refused because the bulkhead is full. Fields: active (int), waiting (int)."
         ),

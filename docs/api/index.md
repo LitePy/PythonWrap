@@ -21,7 +21,7 @@ For explanations and examples, start from the matching [feature page](../feature
 
 | Module | Contents |
 | --- | --- |
-| [caching](caching.md) | `memoize`, `cache`, `once`, `cached_property`, `invalidate`, `CacheInfo`, `Memoized`, `Once`, `CachedProperty` |
+| [caching](caching.md) | `memoize`, `cache`, `once`, `cached_property`, `invalidate`, `CacheInfo`, `CacheStore`, `Memoized`, `Once`, `CachedProperty` |
 | [batching](batching.md) | `batch_calls`, `Batched`, `AsyncBatched` |
 
 ## Concurrency and limits

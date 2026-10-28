@@ -4,19 +4,33 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import contextlib
+import contextvars
 import datetime
 import functools
 import inspect
 import threading
+import time
 import weakref
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Coroutine, Hashable
-from typing import Any, Concatenate, Generic, NamedTuple, ParamSpec, Protocol, TypeVar, overload
+from typing import (
+    Any,
+    Concatenate,
+    Generic,
+    NamedTuple,
+    ParamSpec,
+    Protocol,
+    TypeVar,
+    overload,
+    runtime_checkable,
+)
 
 from python_wrap import _core
 
 __all__ = [
     "CacheInfo",
+    "CacheStore",
     "CachedProperty",
     "Memoized",
     "Once",
@@ -214,8 +228,12 @@ def _freeze_arg(name: str, value: Any) -> Hashable:
 
 
 def _make_key_builder(
-    func: Callable[..., Any], typed: bool, key: Callable[..., Hashable] | None
+    func: Callable[..., Any],
+    typed: bool,
+    key: Callable[..., Hashable] | None,
+    skip_first: bool = False,
 ) -> Callable[[tuple[Any, ...], dict[str, Any]], Hashable]:
+    """Build cache keys; ``skip_first`` leaves the first argument (``self``) out."""
     if key is not None:
         user_key = key
 
@@ -229,14 +247,16 @@ def _make_key_builder(
     except (TypeError, ValueError):
         sig = None
 
+    skip = 1 if skip_first else 0
+
     def build(args: tuple[Any, ...], kwargs: dict[str, Any]) -> Hashable:
         if sig is not None:
             bound = sig.bind(*args, **kwargs)
             bound.apply_defaults()
-            named = list(bound.arguments.items())
+            named = list(bound.arguments.items())[skip:]
             frozen = tuple(_freeze_arg(n, v) for n, v in named)
         else:
-            named = [(f"#{i}", v) for i, v in enumerate(args)]
+            named = [(f"#{i}", v) for i, v in enumerate(args)][skip:]
             frozen = tuple(_freeze_arg(n, v) for n, v in named)
             if kwargs:
                 # Keep the names (and a marker), or f(1, b=2) would equal f(1, 2).
@@ -305,7 +325,7 @@ def _start(
     coro: Coroutine[Any, Any, Any],
     shared: asyncio.Future[Any],
     on_done: Callable[[asyncio.Future[Any] | None], None],
-) -> None:
+) -> asyncio.Future[Any]:
     """Run ``coro`` as a task and copy its outcome into ``shared``.
 
     Call it WITHOUT holding a lock: under an eager task factory (Python 3.12+) the
@@ -330,6 +350,7 @@ def _start(
             _copy_outcome(t, shared)
 
     task.add_done_callback(finish)
+    return task
 
 
 def _ttl_seconds(ttl: float | datetime.timedelta | None) -> float | None:
@@ -369,9 +390,136 @@ def _fast_arity(func: Callable[..., Any], typed: bool, key: Callable[..., Hashab
     return len(params)
 
 
-# lookup() returns a stored entry ``(value, expires, is_exception)``, ``None`` (absent) or
-# this falsy marker (the entry had expired and was just removed).
+# fetch() returns a stored entry, ``None`` (absent) or this falsy marker (the entry had
+# expired and was just removed). An entry is ``(value, expires, is_exception, fresh_until)``:
+# ``expires`` is when it is dropped (None: never), ``fresh_until`` when it turns stale
+# (equal to ``expires`` unless ``stale_ttl`` is set).
 _EXPIRED: Any = ()
+
+# Deadlines in entries given to a custom `CacheStore` are Unix-epoch seconds, so processes
+# sharing one store agree on them. They are still read through ``_core.monotonic()`` (plus
+# this constant offset) so ``fake_clock`` drives them too.
+_WALL_OFFSET = time.time() - time.monotonic()
+
+
+@runtime_checkable
+class CacheStore(Protocol):
+    """Where `memoize` keeps its entries when given ``store=...``.
+
+    Implement these five methods on any object (no base class needed):
+
+    * ``get(key)`` returns the entry stored under ``key``, or ``None`` if there is none.
+    * ``set(key, entry, ttl)`` stores ``entry``. ``ttl`` is the number of seconds after
+      which the entry is useless and may be discarded (``None``: keep it until deleted).
+    * ``delete(key)`` removes the entry and returns True if there was one.
+    * ``clear()`` removes every entry.
+    * ``__len__()`` is the number of stored entries (``cache_info().currsize``).
+
+    Contract:
+
+    * Entries are opaque: return exactly what was stored (a store that serialises, such
+      as a Redis adapter, must round-trip them, e.g. with `pickle`). They are never None.
+      They hold their own deadlines, as Unix timestamps, and `memoize` checks them, so a
+      store may forget entries at any time (that is just a miss) and need not expire them.
+    * Keys are hashable: normally tuples of the (normalised) arguments, or whatever
+      ``key=`` returns. They are **not** strings, so a store that needs strings or bytes
+      must serialise them itself (``repr`` or ``pickle`` plus a per-function prefix).
+    * The store must be thread-safe: `memoize` does not hold its lock while calling it,
+      so a slow store (a network round trip) never blocks other cached functions. Plain
+      ``dict`` operations are atomic in CPython, so a dict-backed store qualifies.
+    * Methods are synchronous; for ``async def`` functions they run on the event loop,
+      so keep them fast.
+    * Exceptions raised by the store propagate to the caller.
+
+    Example:
+        >>> class DictStore:
+        ...     def __init__(self): self.data = {}
+        ...     def get(self, key): return self.data.get(key)
+        ...     def set(self, key, entry, ttl): self.data[key] = entry
+        ...     def delete(self, key): return self.data.pop(key, None) is not None
+        ...     def clear(self): self.data.clear()
+        ...     def __len__(self): return len(self.data)
+        >>> @memoize(store=DictStore())
+        ... def double(n):
+        ...     return n * 2
+        >>> double(2)
+        4
+    """
+
+    def get(self, key: Hashable, /) -> Any:
+        """Return the entry stored under ``key``, or None."""
+
+    def set(self, key: Hashable, entry: Any, ttl: float | None, /) -> None:
+        """Store ``entry`` under ``key``; it may be discarded after ``ttl`` seconds."""
+
+    def delete(self, key: Hashable, /) -> bool:
+        """Remove the entry under ``key``; True if there was one."""
+
+    def clear(self) -> None:
+        """Remove every entry."""
+
+    def __len__(self) -> int:
+        """The number of stored entries."""
+
+
+class _LocalStore:
+    """The built-in store: an ordered dict with an optional LRU limit and TTL sweeps.
+
+    Not thread-safe by itself: the decorator holds its lock around every call.
+    """
+
+    __slots__ = ("data", "expiring", "inserts", "live", "maxsize")
+
+    def __init__(self, maxsize: int | None, expiring: bool) -> None:
+        self.data: OrderedDict[Hashable, tuple[Any, float | None, bool, float | None]] = (
+            OrderedDict()
+        )
+        self.maxsize = maxsize
+        self.expiring = expiring
+        self.inserts = 0
+        self.live = 0
+
+    def get(self, k: Hashable) -> Any:
+        return self.data.get(k)
+
+    def delete(self, k: Hashable) -> bool:
+        return self.data.pop(k, _MISSING) is not _MISSING
+
+    def clear(self) -> None:
+        self.data.clear()
+        self.inserts = self.live = 0
+
+    def __len__(self) -> int:
+        return len(self.data)
+
+    def sweep(self) -> int:
+        """Drop every expired entry; returns how many."""
+        now = _core.monotonic()
+        data = self.data
+        dead = [k for k, e in data.items() if e[1] is not None and now >= e[1]]
+        for k in dead:
+            del data[k]
+        return len(dead)
+
+    def put(self, k: Hashable, entry: tuple[Any, float | None, bool, float | None]) -> int:
+        """Store an entry; returns ``ttl_evicted * 2**32 + lru_evicted`` (cheap to pass)."""
+        data = self.data
+        data[k] = entry
+        ttl_evicted = lru_evicted = 0
+        if self.maxsize is not None:
+            data.move_to_end(k)
+        if self.expiring:
+            # Amortised O(1): a full sweep only after at least
+            # max(64, entries left by the previous sweep) inserts.
+            self.inserts += 1
+            if self.inserts >= max(64, self.live):
+                ttl_evicted = self.sweep()
+                self.inserts, self.live = 0, len(data)
+        if self.maxsize is not None:
+            while len(data) > self.maxsize:
+                data.popitem(last=False)
+                lru_evicted += 1
+        return (ttl_evicted << 32) | lru_evicted
 
 
 @overload
@@ -383,10 +531,14 @@ def memoize(
     *,
     maxsize: int | None = None,
     ttl: float | datetime.timedelta | Callable[[Any], float | None] | None = None,
+    stale_ttl: float | datetime.timedelta | None = None,
     typed: bool = False,
     key: Callable[..., Hashable] | None = None,
     cache_exceptions: type[BaseException] | tuple[type[BaseException], ...] = (),
     exception_ttl: float | datetime.timedelta | None = None,
+    store: CacheStore | None = None,
+    per_instance: bool = False,
+    logger: _core.LoggerLike = None,
 ) -> Callable[[Callable[P, R]], Memoized[P, R]]: ...
 def memoize(
     func: Callable[..., Any] | None = None,
@@ -394,10 +546,14 @@ def memoize(
     *,
     maxsize: int | None = None,
     ttl: float | datetime.timedelta | Callable[[Any], float | None] | None = None,
+    stale_ttl: float | datetime.timedelta | None = None,
     typed: bool = False,
     key: Callable[..., Hashable] | None = None,
     cache_exceptions: type[BaseException] | tuple[type[BaseException], ...] = (),
     exception_ttl: float | datetime.timedelta | None = None,
+    store: CacheStore | None = None,
+    per_instance: bool = False,
+    logger: _core.LoggerLike = None,
 ) -> Any:
     """Cache a function's results per argument values.
 
@@ -415,14 +571,22 @@ def memoize(
     result is cached and concurrent awaits of the same missing key share a single
     in-flight task per event loop, so it runs once.
 
-    A method of a class whose instances are unhashable (for example an ``eq=True``
-    dataclass) fails with a ``TypeError`` naming ``self``: ``id(self)`` is deliberately not
-    used as a fallback because ids are reused after garbage collection. Pass ``key=`` or
-    use `cached_property` instead.
+    Stale-while-revalidate: with ``stale_ttl`` an entry older than ``ttl`` is *stale* but
+    still served, immediately, for ``stale_ttl`` more seconds; the call that finds it
+    stale starts one background refresh (``async def``: a task on the running event
+    loop, shared with concurrent misses; sync: a daemon thread running in a copy of the
+    caller's `contextvars` context, at most one per key). A failed refresh keeps the
+    stale value, is logged at WARNING and lets the next call try again. Cached
+    exceptions are never served stale.
 
-    Methods: ``self`` is part of the key, so results are per instance. The cache holds a
-    strong reference to every instance it has seen, keeping it alive; use ``maxsize`` or
-    ``ttl`` (or ``key=`` ignoring ``self``) on methods of many short-lived objects.
+    Methods: ``self`` is part of the key, so results are per instance, and the cache
+    holds a strong reference to every instance it has seen, keeping it alive. A class
+    whose instances are unhashable (for example an ``eq=True`` dataclass) fails with a
+    ``TypeError`` naming ``self``. ``per_instance=True`` solves both: each instance gets
+    its own cache, found by identity through a weak reference, so instances stay
+    collectable (their entries go with them) and need not be hashable. They must be
+    weak-referenceable (a ``__slots__`` class must list ``'__weakref__'``), and a cached
+    result that references its instance keeps it alive.
 
     The wrapper has ``cache_clear()``, ``cache_info()`` (a `CacheInfo`),
     ``cache_delete(*args, **kwargs)``, ``cache_contains(*args, **kwargs)``,
@@ -433,28 +597,42 @@ def memoize(
 
     While ``python_wrap.testing.disable_caching()`` is active the cache is neither read
     nor written. Listeners registered with `python_wrap.events` receive ``cache.hit``,
-    ``cache.miss`` and ``cache.evicted`` (field ``reason``: ``"lru"`` or ``"ttl"``).
+    ``cache.miss``, ``cache.evicted`` (field ``reason``: ``"lru"`` or ``"ttl"``),
+    ``cache.stale`` (a stale value was served and a refresh started) and
+    ``cache.refresh_failed`` (field ``exception``).
 
     Args:
         func: The function (when used bare).
         maxsize: Maximum entries; least recently used are evicted. None is unbounded.
+            With ``per_instance`` the limit applies to each instance.
         ttl: Seconds (or a ``timedelta``) an entry stays valid. None never expires. May
             also be a callable ``ttl(result) -> float | None`` evaluated when a result
             is stored (None: never expires; zero or negative: not stored).
+        stale_ttl: Seconds (or a ``timedelta``) after ``ttl`` during which the stale
+            value is still served while a background refresh runs. Requires ``ttl``.
         typed: If True, ``f(1)`` and ``f(1.0)`` are cached separately.
-        key: Custom ``key(*args, **kwargs)`` returning a hashable cache key.
+        key: Custom ``key(*args, **kwargs)`` returning a hashable cache key. It receives
+            every argument (``self`` too; with ``per_instance`` it should leave it out).
         cache_exceptions: Exception class (or tuple of classes) whose instances are
             cached and re-raised like results. ``asyncio.CancelledError`` never is.
         exception_ttl: Seconds a cached exception stays valid. Defaults to ``ttl``; it
             must be given when ``ttl`` is a callable and ``cache_exceptions`` is set.
+        store: A `CacheStore` to keep entries in instead of the built-in LRU dict.
+        per_instance: For methods: one cache per instance, held through a weak
+            reference, keyed by the arguments after ``self``.
+        logger: Logger (or name) for failed background refreshes.
 
     Returns:
         The wrapped function, or a decorator when called with options.
 
     Raises:
-        ValueError: If ``maxsize`` is below 1 or a ttl is not positive.
-        TypeError: For a non-exception in ``cache_exceptions``; at call time, for an
-            unhashable argument (see above).
+        ValueError: If ``maxsize`` is below 1, a ttl is not positive, or ``stale_ttl``
+            is given without ``ttl``.
+        TypeError: For a non-exception in ``cache_exceptions``, an object that is not a
+            `CacheStore`, ``store`` combined with ``maxsize`` or ``per_instance``, or
+            ``per_instance`` on a function without parameters. At call time, for an
+            unhashable argument (see above) or, with ``per_instance``, an instance that
+            cannot be weakly referenced.
 
     Example:
         >>> @memoize(maxsize=128, ttl=60)
@@ -467,75 +645,141 @@ def memoize(
     """
     if maxsize is not None and maxsize < 1:
         raise ValueError("maxsize must be a positive integer or None")
+    if store is not None:
+        if maxsize is not None:
+            raise TypeError("maxsize only applies to the built-in store; not with store=")
+        if per_instance:
+            raise TypeError("per_instance=True uses the built-in store; not with store=")
+        if not isinstance(store, CacheStore):
+            raise TypeError("store must implement CacheStore: get, set, delete, clear and __len__")
     ttl_fn: Callable[[Any], float | None] | None = None
     ttl_s: float | None = None
     if callable(ttl):
         ttl_fn = ttl
     else:
         ttl_s = _ttl_seconds(ttl)
+    if stale_ttl is not None and ttl is None:
+        raise ValueError("stale_ttl requires ttl")
+    stale_s = _ttl_seconds(stale_ttl)
     exc_types = _exception_types(cache_exceptions)
     exc_ttl_s = _ttl_seconds(exception_ttl) if exception_ttl is not None else ttl_s
     if exc_types and ttl_fn is not None and exception_ttl is None:
         raise ValueError("exception_ttl is required when ttl is a callable")
     lru = maxsize is not None
+    expiring = ttl_s is not None or ttl_fn is not None or exc_ttl_s is not None
+    builtin = store is None
     ov = _core.overrides
 
+    if builtin:
+
+        def now() -> float:
+            return _core.monotonic()
+    else:
+
+        def now() -> float:
+            return _core.monotonic() + _WALL_OFFSET
+
     def decorate(f: Callable[..., Any]) -> Any:
-        build_key = _make_key_builder(f, typed, key)
+        build_key = _make_key_builder(f, typed, key, skip_first=per_instance)
         fast_n = _fast_arity(f, typed, key)
+        if per_instance and fast_n == 0:
+            raise TypeError("per_instance=True needs a method (a function taking self)")
         name = _core.qualname(f)
-        store: OrderedDict[Hashable, tuple[Any, float | None, bool]] = OrderedDict()
+        main: Any = _LocalStore(maxsize, expiring) if builtin else store
+        # per_instance: id(instance) -> (weak reference, that instance's store)
+        instances: dict[int, tuple[weakref.ref[Any], _LocalStore]] = {}
         # In-flight tasks are per event loop: a task cannot be awaited from another loop.
         inflight: weakref.WeakKeyDictionary[
             asyncio.AbstractEventLoop, dict[Hashable, asyncio.Future[Any]]
         ] = weakref.WeakKeyDictionary()
-        store_get = store.get
+        refreshing: set[Hashable] = set()  # sync keys being refreshed in a thread
+        background: set[asyncio.Future[Any]] = set()  # strong refs to refresh tasks
         lock = threading.Lock()
-        hits = misses = gen = inserts = live = 0
+        guard: Any = lock if builtin else contextlib.nullcontext()
+        hits = misses = gen = 0
 
         def key_of(args: tuple[Any, ...], kwargs: dict[str, Any]) -> Hashable:
             if len(args) == fast_n and not kwargs:
+                k = args[1:] if per_instance else args
                 try:
-                    hash(args)
+                    hash(k)
                 except TypeError:
                     pass
                 else:
-                    return args
+                    return k
             return build_key(args, kwargs)
 
-        def sweep() -> int:
-            # Caller holds the lock. Drop every expired entry; returns how many.
-            now = _core.monotonic()
-            dead = [k for k, (_, exp, _e) in store.items() if exp is not None and now >= exp]
-            for k in dead:
-                del store[k]
-            return len(dead)
+        def bucket_of(args: tuple[Any, ...], create: bool = True) -> Any:
+            if not per_instance:
+                return main
+            if not args:
+                if not create:
+                    return None
+                raise TypeError(
+                    f"memoize(per_instance=True): call {name} with the instance as its "
+                    "first positional argument"
+                )
+            obj = args[0]
+            i = id(obj)
+            slot = instances.get(i)
+            if slot is not None and slot[0]() is obj:
+                return slot[1]
+            if not create:
+                return None
 
-        def lookup(k: Hashable) -> Any:
-            # Caller holds the lock.
-            entry = store.get(k)
+            def forget(ref: weakref.ref[Any], i: int = i) -> None:
+                # Runs while the instance is being destroyed, maybe in a thread that holds
+                # ``lock``: so no locking here (dict operations are atomic). The id cannot
+                # be reused before this callback has run.
+                current = instances.get(i)
+                if current is not None and current[0] is ref:
+                    instances.pop(i, None)
+
+            try:
+                ref = weakref.ref(obj, forget)
+            except TypeError:
+                raise TypeError(
+                    f"memoize(per_instance=True) needs weak-referenceable instances, but "
+                    f"{type(obj).__name__!r} is not (a __slots__ class must also list "
+                    "'__weakref__')"
+                ) from None
+            with lock:
+                slot = instances.get(i)
+                if slot is not None and slot[0]() is obj:
+                    return slot[1]
+                bucket = _LocalStore(maxsize, expiring)
+                instances[i] = (ref, bucket)
+            return bucket
+
+        def live_buckets() -> list[_LocalStore]:
+            # Caller holds the lock. A collected instance may drop its slot meanwhile.
+            while True:
+                try:
+                    slots = list(instances.values())
+                except RuntimeError:  # pragma: no cover - changed size during iteration
+                    continue
+                return [b for ref, b in slots if ref() is not None]
+
+        def fetch(b: Any, k: Hashable) -> Any:
+            # Caller holds ``guard``.
+            entry = b.get(k)
             if entry is None:
                 return None
             expires = entry[1]
-            if expires is not None and _core.monotonic() >= expires:
-                del store[k]
+            if expires is not None and now() >= expires:
+                b.delete(k)
                 return _EXPIRED
             if lru:
-                store.move_to_end(k)
+                b.data.move_to_end(k)
             return entry
 
-        def peek(k: Hashable) -> tuple[Any, float | None, bool] | None:
-            with lock:
-                entry = store.get(k)
-            if entry is None or (entry[1] is not None and _core.monotonic() >= entry[1]):
-                return None
-            return entry
+        def is_stale(entry: Any) -> bool:
+            return entry[1] is not None and not entry[2] and now() >= entry[3]
 
         def report_expired() -> None:
             _core.emit("cache.evicted", name, reason="ttl")
 
-        def save(k: Hashable, value: Any, g: int, is_exc: bool = False) -> None:
-            nonlocal inserts, live
+        def save(b: Any, k: Hashable, value: Any, g: int, is_exc: bool = False) -> None:
             if is_exc:
                 seconds = exc_ttl_s
             elif ttl_fn is not None:
@@ -544,58 +788,157 @@ def memoize(
                     return  # not worth storing
             else:
                 seconds = ttl_s
-            ttl_evicted = lru_evicted = 0
-            with lock:
+            keep = seconds
+            if seconds is not None and stale_s is not None and not is_exc:
+                keep = seconds + stale_s
+            evicted = 0
+            with guard:
                 if g != gen:
                     return  # cache_clear() ran while computing
-                expires = None if seconds is None else _core.monotonic() + seconds
-                store[k] = (value, expires, is_exc)
-                if lru:
-                    store.move_to_end(k)
-                if ttl_s is not None or ttl_fn is not None or exc_ttl_s is not None:
-                    # Amortised O(1): a full sweep only after at least
-                    # max(64, entries left by the previous sweep) inserts.
-                    inserts += 1
-                    if inserts >= max(64, live):
-                        ttl_evicted = sweep()
-                        inserts, live = 0, len(store)
-                if maxsize is not None:
-                    while len(store) > maxsize:
-                        store.popitem(last=False)
-                        lru_evicted += 1
-            if _core.listeners:
-                for _ in range(ttl_evicted):
+                t = now()
+                fresh = None if seconds is None else t + seconds
+                expires = None if keep is None else t + keep
+                entry = (value, expires, is_exc, fresh)
+                if builtin:
+                    evicted = b.put(k, entry)
+                else:
+                    b.set(k, entry, keep)
+            if evicted and _core.listeners:
+                for _ in range(evicted >> 32):
                     report_expired()
-                for _ in range(lru_evicted):
+                for _ in range(evicted & 0xFFFFFFFF):
                     _core.emit("cache.evicted", name, reason="lru")
 
-        def cache_clear() -> None:
-            nonlocal hits, misses, inserts, live, gen
+        def refresh_failed(exc: BaseException) -> None:
+            _core.get_logger(logger).warning(
+                "memoize: background refresh of %s failed; keeping the stale value",
+                name,
+                exc_info=exc,
+            )
+            _core.emit("cache.refresh_failed", name, exception=exc)
+
+        def refresh_in_thread(
+            b: Any, k: Hashable, args: tuple[Any, ...], kwargs: dict[str, Any]
+        ) -> None:
+            rk = (id(b), k) if per_instance else k
             with lock:
-                store.clear()
+                if rk in refreshing:
+                    return
+                refreshing.add(rk)
+                g = gen
+
+            def run() -> None:
+                try:
+                    save(b, k, f(*args, **kwargs), g)
+                except Exception as exc:
+                    refresh_failed(exc)
+                finally:
+                    with lock:
+                        refreshing.discard(rk)
+
+            thread = threading.Thread(
+                target=contextvars.copy_context().run,
+                args=(run,),
+                name=f"python_wrap-refresh-{name}",
+                daemon=True,
+            )
+            try:
+                thread.start()
+            except Exception as exc:  # e.g. "can't start new thread": keep serving stale
+                with lock:
+                    refreshing.discard(rk)
+                refresh_failed(exc)
+                return
+            if _core.listeners:
+                _core.emit("cache.stale", name)
+
+        def refresh_in_task(
+            b: Any, k: Hashable, args: tuple[Any, ...], kwargs: dict[str, Any]
+        ) -> None:
+            rk = (id(b), k) if per_instance else k
+            with lock:
+                loop = asyncio.get_running_loop()
+                loop_inflight = inflight.setdefault(loop, {})
+                if rk in loop_inflight:
+                    return  # a refresh (or a miss) for this key is already running
+                g = gen
+                shared_fut = loop_inflight[rk] = _shared_future()
+
+            async def run() -> Any:
+                try:
+                    result = await f(*args, **kwargs)
+                    save(b, k, result, g)
+                except Exception as exc:
+                    refresh_failed(exc)
+                    raise
+                return result
+
+            def done(_t: asyncio.Future[Any] | None) -> None:
+                with lock:
+                    if loop_inflight.get(rk) is shared_fut:
+                        del loop_inflight[rk]
+
+            task = _start(run(), shared_fut, done)
+            background.add(task)
+            task.add_done_callback(background.discard)
+            if _core.listeners:
+                _core.emit("cache.stale", name)
+
+        def cache_clear() -> None:
+            nonlocal hits, misses, gen
+            with lock:
+                if builtin:
+                    main.clear()
+                    instances.clear()
                 inflight.clear()
-                hits = misses = inserts = live = 0
+                hits = misses = 0
                 gen += 1
+            if not builtin:
+                main.clear()
 
         def cache_info() -> CacheInfo:
+            expired = 0
             with lock:
-                expired = sweep()
-                info = CacheInfo(hits, misses, maxsize, len(store))
+                if per_instance:
+                    buckets = live_buckets()
+                    for b in buckets:
+                        expired += b.sweep()
+                    size = sum(len(b) for b in buckets)
+                elif builtin:
+                    expired = main.sweep()
+                    size = len(main)
+                info = (hits, misses)
+            if not builtin:
+                size = len(main)
             if _core.listeners:
                 for _ in range(expired):
                     report_expired()
-            return info
+            return CacheInfo(info[0], info[1], maxsize, size)
+
+        def peek(args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+            b = bucket_of(args, create=False)
+            if b is None:
+                return None
+            k = key_of(args, kwargs)
+            with guard:
+                entry = b.get(k)
+            if entry is None or (entry[1] is not None and now() >= entry[1]):
+                return None
+            return entry
 
         def cache_delete(*args: Any, **kwargs: Any) -> bool:
+            b = bucket_of(args, create=False)
+            if b is None:
+                return False
             k = key_of(args, kwargs)
-            with lock:
-                return store.pop(k, _MISSING) is not _MISSING
+            with guard:
+                return bool(b.delete(k))
 
         def cache_contains(*args: Any, **kwargs: Any) -> bool:
-            return peek(key_of(args, kwargs)) is not None
+            return peek(args, kwargs) is not None
 
         def cache_get(*args: Any, **kwargs: Any) -> Any:
-            entry = peek(key_of(args, kwargs))
+            entry = peek(args, kwargs)
             if entry is None:
                 raise KeyError("no cached entry for these arguments")
             if entry[2]:
@@ -606,75 +949,130 @@ def memoize(
             return {
                 "maxsize": maxsize,
                 "ttl": ttl_fn if ttl_fn is not None else ttl_s,
+                "stale_ttl": stale_s,
                 "typed": typed,
                 "cache_exceptions": exc_types,
                 "exception_ttl": exc_ttl_s,
+                "store": store,
+                "per_instance": per_instance,
             }
 
-        if _core.is_async(f):
+        data: Any = main.data if builtin else None
+        data_get: Any = data.get if builtin else None
+
+        def fetch_main(k: Hashable) -> Any:
+            # `fetch` for the default store, inlined for speed. Caller holds the lock.
+            entry = data_get(k)
+            if entry is None:
+                return None
+            expires = entry[1]
+            if expires is not None and _core.monotonic() >= expires:
+                del data[k]
+                return _EXPIRED
+            if lru:
+                data.move_to_end(k)
+            return entry
+
+        async def amiss(b: Any, k: Hashable, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+            # The async miss path: share one in-flight task per key and event loop.
+            nonlocal hits, misses
+            rk = (id(b), k) if per_instance else k
+            with lock:
+                loop = asyncio.get_running_loop()
+                loop_inflight = inflight.setdefault(loop, {})
+                shared_fut = loop_inflight.get(rk)
+                if shared_fut is None:
+                    misses += 1
+                    g = gen
+                    shared = False
+                    shared_fut = loop_inflight[rk] = _shared_future()
+                else:
+                    hits += 1
+                    shared = True
+            if not shared:
+
+                async def run() -> Any:
+                    try:
+                        result = await f(*args, **kwargs)
+                    except exc_types as exc:
+                        if not isinstance(exc, asyncio.CancelledError):
+                            save(b, k, exc, g, True)
+                        raise
+                    save(b, k, result, g)
+                    return result
+
+                def done(_t: asyncio.Future[Any] | None) -> None:
+                    with lock:
+                        if loop_inflight.get(rk) is shared_fut:
+                            del loop_inflight[rk]
+
+                _start(run(), shared_fut, done)
+            if _core.listeners:
+                _core.emit("cache.hit" if shared else "cache.miss", name)
+            # one cancelled caller must not cancel the shared computation
+            return await _await_shared(shared_fut)
+
+        if _core.is_async(f) and builtin and not per_instance:
 
             @functools.wraps(f)
             async def awrapper(*args: Any, **kwargs: Any) -> Any:
-                nonlocal hits, misses
+                nonlocal hits
                 if ov.disable_caching:
                     return await f(*args, **kwargs)
                 k = args if len(args) == fast_n and not kwargs else build_key(args, kwargs)
                 try:
                     with lock:
-                        entry = lookup(k)
+                        entry = fetch_main(k)
+                        if entry:
+                            hits += 1
                 except TypeError:
                     if k is not args:
                         raise
                     k = build_key(args, kwargs)
                     with lock:
-                        entry = lookup(k)
+                        entry = fetch_main(k)
+                        if entry:
+                            hits += 1
                 if entry:
-                    with lock:
-                        hits += 1
                     if _core.listeners:
                         _core.emit("cache.hit", name)
+                    if stale_s is not None and is_stale(entry):
+                        refresh_in_task(main, k, args, kwargs)
                     if entry[2]:
                         raise entry[0]
                     return entry[0]
                 if _core.listeners and entry is not None:
                     report_expired()
-                with lock:
-                    loop = asyncio.get_running_loop()
-                    loop_inflight = inflight.setdefault(loop, {})
-                    shared_fut = loop_inflight.get(k)
-                    if shared_fut is None:
-                        misses += 1
-                        g = gen
-                        shared = False
-                        shared_fut = loop_inflight[k] = _shared_future()
-                    else:
-                        hits += 1
-                        shared = True
-                if not shared:
-
-                    async def run() -> Any:
-                        try:
-                            result = await f(*args, **kwargs)
-                        except exc_types as exc:
-                            if not isinstance(exc, asyncio.CancelledError):
-                                save(k, exc, g, True)
-                            raise
-                        save(k, result, g)
-                        return result
-
-                    def done(_t: asyncio.Future[Any] | None, k: Hashable = k) -> None:
-                        with lock:
-                            if loop_inflight.get(k) is shared_fut:
-                                del loop_inflight[k]
-
-                    _start(run(), shared_fut, done)
-                if _core.listeners:
-                    _core.emit("cache.hit" if shared else "cache.miss", name)
-                # one cancelled caller must not cancel the shared computation
-                return await _await_shared(shared_fut)
+                return await amiss(main, k, args, kwargs)
 
             wrapper: Any = awrapper
-        else:
+        elif _core.is_async(f):
+
+            @functools.wraps(f)
+            async def agwrapper(*args: Any, **kwargs: Any) -> Any:
+                nonlocal hits
+                if ov.disable_caching:
+                    return await f(*args, **kwargs)
+                b = bucket_of(args)
+                k = key_of(args, kwargs)
+                with guard:
+                    entry = fetch(b, k)
+                if entry:
+                    with lock:
+                        hits += 1
+                    if _core.listeners:
+                        _core.emit("cache.hit", name)
+                    if stale_s is not None and is_stale(entry):
+                        refresh_in_task(b, k, args, kwargs)
+                    if entry[2]:
+                        raise entry[0]
+                    return entry[0]
+                if _core.listeners and entry is not None:
+                    report_expired()
+                return await amiss(b, k, args, kwargs)
+
+            wrapper = agwrapper
+        elif builtin and not per_instance:
 
             @functools.wraps(f)
             def wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -684,14 +1082,14 @@ def memoize(
                 k = args if len(args) == fast_n and not kwargs else build_key(args, kwargs)
                 try:
                     with lock:
-                        entry = store_get(k)
+                        entry = data_get(k)
                         if entry is not None and entry[1] is None:
                             # hot path: a live entry that never expires
                             if lru:
-                                store.move_to_end(k)
+                                data.move_to_end(k)
                             hits += 1
                         else:
-                            entry = lookup(k)
+                            entry = fetch_main(k)
                             if entry:
                                 hits += 1
                             else:
@@ -702,7 +1100,7 @@ def memoize(
                         raise
                     k = build_key(args, kwargs)
                     with lock:
-                        entry = lookup(k)
+                        entry = fetch_main(k)
                         if entry:
                             hits += 1
                         else:
@@ -711,6 +1109,8 @@ def memoize(
                 if entry:
                     if _core.listeners:
                         _core.emit("cache.hit", name)
+                    if stale_s is not None and is_stale(entry):
+                        refresh_in_thread(main, k, args, kwargs)
                     if entry[2]:
                         raise entry[0]
                     return entry[0]
@@ -721,9 +1121,46 @@ def memoize(
                 try:
                     result = f(*args, **kwargs)
                 except exc_types as exc:
-                    save(k, exc, g, True)
+                    save(main, k, exc, g, True)
                     raise
-                save(k, result, g)
+                save(main, k, result, g)
+                return result
+
+        else:
+
+            @functools.wraps(f)
+            def wrapper(*args: Any, **kwargs: Any) -> Any:
+                nonlocal hits, misses
+                if ov.disable_caching:
+                    return f(*args, **kwargs)
+                b = bucket_of(args)
+                k = key_of(args, kwargs)
+                with guard:
+                    entry = fetch(b, k)
+                with lock:
+                    if entry:
+                        hits += 1
+                    else:
+                        misses += 1
+                    g = gen
+                if entry:
+                    if _core.listeners:
+                        _core.emit("cache.hit", name)
+                    if stale_s is not None and is_stale(entry):
+                        refresh_in_thread(b, k, args, kwargs)
+                    if entry[2]:
+                        raise entry[0]
+                    return entry[0]
+                if _core.listeners:
+                    if entry is not None:
+                        report_expired()
+                    _core.emit("cache.miss", name)
+                try:
+                    result = f(*args, **kwargs)
+                except exc_types as exc:
+                    save(b, k, exc, g, True)
+                    raise
+                save(b, k, result, g)
                 return result
 
         wrapper.cache_clear = cache_clear
