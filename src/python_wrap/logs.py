@@ -632,6 +632,50 @@ def audit(
 # ------------------------------------------------------------------------------ trace
 
 
+def _otel_hooks(
+    f: Callable[..., Any], span_name: str | None
+) -> tuple[Callable[[], Any], Callable[[Any, bool, Any], None]]:
+    """Import OpenTelemetry now and return ``(open_span, close_span)`` hooks for ``trace``."""
+    try:
+        from opentelemetry import context as otel_context
+        from opentelemetry import trace as otel_trace
+    except ImportError as exc:
+        raise ImportError(
+            "trace(otel=True) needs the 'opentelemetry-api' package: pip install opentelemetry-api"
+        ) from exc
+    tracer = otel_trace.get_tracer("python_wrap")
+    name = span_name or _core.qualname(f)
+    module = getattr(f, "__module__", None)
+    qual = getattr(f, "__qualname__", name)
+
+    def open_span() -> Any:
+        attributes: dict[str, Any] = {"code.function": qual.rpartition(".")[2]}
+        if module:
+            attributes["code.namespace"] = module
+        for key, value in current_log_context().items():
+            attributes[f"python_wrap.context.{key}"] = (
+                value if isinstance(value, (str, bool, int, float)) else str(value)
+            )
+        span = tracer.start_span(name, attributes=attributes)
+        token = otel_context.attach(otel_trace.set_span_in_context(span))
+        return span, token
+
+    def close_span(state: Any, ok: bool, value: Any) -> None:
+        span, token = state
+        try:
+            if not ok:
+                if isinstance(value, Exception):
+                    span.record_exception(value)
+                span.set_status(
+                    otel_trace.Status(otel_trace.StatusCode.ERROR, type(value).__name__)
+                )
+        finally:
+            otel_context.detach(token)
+            span.end()
+
+    return open_span, close_span
+
+
 @overload
 def trace(func: F, /) -> F: ...
 @overload
@@ -642,6 +686,8 @@ def trace(
     logger: LoggerLike = None,
     level: int = logging.DEBUG,
     limit: int | None = None,
+    otel: bool = False,
+    span_name: str | None = None,
 ) -> Callable[[F], F]: ...
 def trace(
     func: Callable[..., Any] | None = None,
@@ -650,20 +696,36 @@ def trace(
     logger: LoggerLike = None,
     level: int = logging.DEBUG,
     limit: int | None = None,
+    otel: bool = False,
+    span_name: str | None = None,
 ) -> Any:
     """Log entry, the call stack that led to the call, and exit.
 
     Three messages per call: ``Entering f``, the call stack (python_wrap's own frames are
     left out, outermost first), and ``Exiting f`` (or ``Exiting f (raised ValueError)``).
 
+    With ``otel=True`` the call is also wrapped in an OpenTelemetry span (see Args).
+
     Args:
         func: The function, when used as a bare ``@trace``.
         logger: A ``logging.Logger``, a logger name, or ``None`` for the package logger.
         level: Log level. Defaults to ``DEBUG``.
         limit: Keep only this many innermost frames; ``None`` keeps all.
+        otel: Open an OpenTelemetry span around every call, using the tracer
+            ``opentelemetry.trace.get_tracer("python_wrap")``. The span is current for the
+            whole call (also across ``await``), carries ``code.function``,
+            ``code.namespace`` and the fields of the active `log_context` as
+            ``python_wrap.context.<name>`` attributes, and on an exception records it and
+            sets the error status. ``opentelemetry-api`` is imported only when this is
+            true; python-wrap itself never depends on it.
+        span_name: Span name; defaults to the function's qualified name.
 
     Returns:
         The decorated function, with its signature preserved.
+
+    Raises:
+        ImportError: At decoration time, if ``otel=True`` and ``opentelemetry-api`` is not
+            installed.
 
     Example:
         >>> @trace(limit=5)
@@ -673,10 +735,12 @@ def trace(
     def decorate(f: Callable[P, R]) -> Callable[P, R]:
         lg = _core.get_logger(logger)
         name = _core.qualname(f)
+        open_span, close_span = _otel_hooks(f, span_name) if otel else (None, None)
 
-        def start(args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+        def start(args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+            span_state = open_span() if open_span is not None else None
             if not lg.isEnabledFor(level):
-                return
+                return span_state
             _log(lg, level, "Entering %s", name)
             frame = _external_frame()
             if frame is not None:
@@ -685,12 +749,16 @@ def trace(
                     entries = entries[-limit:] if limit > 0 else []
                 text = "".join(traceback.format_list(entries)).rstrip()
                 _log(lg, level, "Call stack for %s:\n%s", name, text, suffix=False)
+            return span_state
 
-        def finish(state: None, ok: bool, value: Any) -> None:
-            if not lg.isEnabledFor(level):
-                return
-            suffix = "" if ok else f" (raised {type(value).__name__})"
-            _log(lg, level, "Exiting %s%s", name, suffix)
+        def finish(state: Any, ok: bool, value: Any) -> None:
+            try:
+                if lg.isEnabledFor(level):
+                    suffix = "" if ok else f" (raised {type(value).__name__})"
+                    _log(lg, level, "Exiting %s%s", name, suffix)
+            finally:
+                if close_span is not None:
+                    close_span(state, ok, value)
 
         return _instrument(f, start, finish)
 

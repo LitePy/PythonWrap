@@ -105,6 +105,37 @@ The object `timeout(...)` returns is also a context manager, so you can limit a 
 
 The sync `with timeout(...)` form only exists on top of `SIGALRM`: it needs Unix and the main thread. Elsewhere (Windows, worker threads, `use_signals=False`) entering it raises `RuntimeError`, because a block of code cannot be moved to a worker thread. Decorate a function instead, which falls back to the thread strategy.
 
+## Bounded cleanup with `cleanup_grace`
+
+Cancelling an `async def` at the limit lets its `finally` / `except CancelledError` cleanup run, but nothing bounds that cleanup. `cleanup_grace=` gives it a budget.
+
+```python
+import asyncio
+from python_wrap import TimeoutExpired, timeout
+
+cleaned = []
+
+@timeout(0.02, cleanup_grace=0.5)
+async def work() -> None:
+    try:
+        await asyncio.sleep(5)
+    finally:
+        await asyncio.sleep(0.02)   # e.g. release a connection
+        cleaned.append("released")
+
+try:
+    asyncio.run(work())
+except TimeoutExpired:
+    pass
+assert cleaned == ["released"]
+```
+
+As a **decorator**, the call runs as a child task. At the limit it is cancelled and given `cleanup_grace` more seconds to finish; then `TimeoutExpired` is raised (also when the cleanup finished in time). A task still running after the grace is **abandoned**: a warning is logged on the package logger and the task keeps running until it ends by itself, its result discarded.
+
+As **`async with timeout(5, cleanup_grace=1)`**, the block runs in your own task and cannot be moved, so it is not abandoned: after the grace the cleanup is cancelled a **second time** (with a warning). Cleanup that swallows cancellation cannot be stopped.
+
+Sync functions and plain `with` blocks do not support it and raise `TypeError`: signals and worker threads cannot give cleanup a bounded grace. The grace uses real time and is not changed by the test overrides.
+
 ## Deadlines: one budget for many steps
 
 A `timeout` limits one call. A **deadline** limits everything inside a block (several calls, retries, sub-steps) to one shared budget. `deadline(seconds)` stores an absolute expiry in a context variable, so it is visible to every function called inside the block, sync or async, and to tasks started from it. Nested deadlines never extend an outer one: the earliest wins.
