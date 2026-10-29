@@ -30,7 +30,7 @@ was removed; revoke the token it used at <https://pypi.org/manage/account/token/
 ## Every release
 
 1. **Version.** Set `__version__` in `src/python_wrap/__init__.py`. It is the only place
-   the version lives. Use PEP 440 spelling: `0.2.0rc1`, `0.2.0`.
+   the version lives. Use PEP 440 spelling: `0.2.1rc1`, `0.2.1`.
 2. **Changelog.** Move the `Unreleased` entries under `## [<version>] - <date>`. The
    GitHub release notes are taken from this section.
 3. **Check locally.**
@@ -49,8 +49,8 @@ was removed; revoke the token it used at <https://pypi.org/manage/account/token/
    merged commit to pass before creating a release tag. If the repository requires
    PR status checks, a maintainer must align that rule with this post-merge policy;
    new PR commits will not receive CI/docs checks.
-5. **Rehearse (recommended for a big release).** Tag a pre-release such as `v0.2.0rc1`
-   (after setting `__version__ = "0.2.0rc1"`). Every tagged version is published to
+5. **Rehearse (recommended for a big release).** Tag a pre-release such as `v0.2.1rc1`
+   (after setting `__version__ = "0.2.1rc1"`). Every tagged version is published to
    TestPyPI and installed back from that index
    in a clean environment. Pre-releases (`a`, `b`, `rc`, `.dev`) stop there; final
    versions continue to PyPI only after this verification succeeds. A version can never
@@ -58,8 +58,8 @@ was removed; revoke the token it used at <https://pypi.org/manage/account/token/
 6. **Tag and push.**
 
    ```bash
-   git tag -a v0.2.0 -m "python-wrap 0.2.0"
-   git push origin v0.2.0
+   git tag -a v0.2.1 -m "python-wrap 0.2.1"
+   git push origin v0.2.1
    ```
 
    The workflow refuses a tag that disagrees with `__version__`, builds, checks the
@@ -72,8 +72,8 @@ was removed; revoke the token it used at <https://pypi.org/manage/account/token/
 
    ```bash
    uv venv /tmp/python-wrap-smoke
-   uv pip install --python /tmp/python-wrap-smoke --no-deps --index-url https://pypi.org/simple/ python-wrap==0.2.0
-   /tmp/python-wrap-smoke/bin/python -I scripts/check_installed.py 0.2.0
+   uv pip install --python /tmp/python-wrap-smoke --no-deps --index-url https://pypi.org/simple/ python-wrap==0.2.1
+   /tmp/python-wrap-smoke/bin/python -I scripts/check_installed.py 0.2.1
    ```
 
 8. **Open the next cycle.** Add an empty `Unreleased` section to the changelog and bump

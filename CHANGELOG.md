@@ -10,7 +10,10 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
 
 ## [Unreleased]
 
-## [0.2.0] - 2026-10-27
+## [0.2.1] - 2026-10-29
+
+Publishes the completed 0.2 release under a fresh version, preserving the older
+`v0.2.0` tag from the failed publishing attempt.
 
 A ground-up rework and a much larger toolkit. Every decorator works on plain functions,
 `async def` functions and methods, keeps the wrapped signature for type checkers, and never
@@ -314,6 +317,6 @@ Core:
 
 Initial release.
 
-[Unreleased]: https://github.com/LitePy/PythonWrap/compare/v0.2.0...HEAD
-[0.2.0]: https://github.com/LitePy/PythonWrap/compare/v0.1.0...v0.2.0
+[Unreleased]: https://github.com/LitePy/PythonWrap/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/LitePy/PythonWrap/compare/v0.1.0...v0.2.1
 [0.1.0]: https://github.com/LitePy/PythonWrap/releases/tag/v0.1.0
