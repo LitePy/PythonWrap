@@ -1,15 +1,13 @@
 # Build check for the documentation site.
 #
 # Read the Docs does the hosting (see .readthedocs.yaml). This workflow only catches
-# breakage before it gets there: `--strict` turns a broken link, a page missing from the
-# nav or a docstring mkdocstrings cannot render into a failed check on the pull request.
+# breakage after changes land on main: `--strict` turns a broken link, a page missing
+# from the nav or a docstring mkdocstrings cannot render into a failed check.
 name: Docs
 
 on:
   push:
     branches: [main]
-  pull_request:
-  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

@@ -44,7 +44,11 @@ was removed; revoke the token it used at <https://pypi.org/manage/account/token/
    uv build && uvx twine check --strict dist/* && rm -rf dist
    ```
 
-4. **Merge to `main`**, with CI green.
+4. **Merge to `main`**, after the local checks pass. CI and docs run only on pushes
+   to `main`, so PR updates do not start Actions runs. Wait for both workflows on the
+   merged commit to pass before creating a release tag. If the repository requires
+   PR status checks, a maintainer must align that rule with this post-merge policy;
+   new PR commits will not receive CI/docs checks.
 5. **Rehearse (recommended for a big release).** Tag a pre-release such as `v0.2.0rc1`
    (after setting `__version__ = "0.2.0rc1"`). Every tagged version is published to
    TestPyPI and installed back from that index

@@ -1,4 +1,4 @@
-# Continuous integration.
+# Continuous integration after changes land on main.
 #
 # Five jobs: lint (seconds), the test matrix, free-threaded Python with the stress
 # suite, mypy, and a packaging check.
@@ -13,8 +13,6 @@ name: CI
 on:
   push:
     branches: [main]
-  pull_request:
-  workflow_dispatch:
 
 # A force-push should not leave the previous run burning minutes on a dead commit.
 concurrency:
