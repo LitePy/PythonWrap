@@ -250,7 +250,7 @@ def test_audit_bare_and_async_caller(caplog: pytest.LogCaptureFixture) -> None:
     caplog.set_level(logging.INFO, logger="python_wrap")
 
     @audit
-    async def f(session_id: str) -> int:
+    async def f(session_token: str) -> int:
         return 1
 
     async def main() -> int:
@@ -259,7 +259,7 @@ def test_audit_bare_and_async_caller(caplog: pytest.LogCaptureFixture) -> None:
     assert inspect.iscoroutinefunction(f)
     assert asyncio.run(main()) == 1
     record: AuditRecord = caplog.records[0].audit  # type: ignore[attr-defined]
-    assert record.arguments == {"session_id": "***"}
+    assert record.arguments == {"session_token": "***"}
     assert record.caller.startswith(__file__)
 
 

@@ -22,6 +22,8 @@ from typing import Any, TypeVar, cast, overload
 
 from python_wrap import _core, config
 from python_wrap._core import F, LoggerLike, P, R
+from python_wrap.redaction import DEFAULT_REDACT
+from python_wrap.redaction import is_sensitive as _is_sensitive
 
 __all__ = [
     "DEFAULT_REDACT",
@@ -35,21 +37,6 @@ __all__ = [
 ]
 
 S = TypeVar("S")
-
-DEFAULT_REDACT: tuple[str, ...] = (
-    "password",
-    "passwd",
-    "secret",
-    "token",
-    "api_key",
-    "apikey",
-    "authorization",
-    "auth",
-    "credential",
-    "private_key",
-    "cookie",
-    "session",
-)
 
 _MASK = "***"
 _PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -115,12 +102,18 @@ def _instrument(
     return cast("Callable[P, R]", wrapper)
 
 
-def _redact_predicate(redact: Iterable[str] | None) -> Callable[[str], bool]:
-    """Build a case-insensitive "does this name look sensitive" test."""
-    needles = tuple(n.lower() for n in (DEFAULT_REDACT if redact is None else redact) if n)
+def _redact_predicate(
+    redact: Iterable[str] | None, match: str = "segment"
+) -> Callable[[str], bool]:
+    """Build a "does this name look sensitive" test.
+
+    Whole-segment matching is the default so ``author`` and ``session_date`` are not
+    mistaken for secrets; ``match="substring"`` keeps the old, looser behaviour.
+    """
+    needles = tuple(n for n in (DEFAULT_REDACT if redact is None else redact) if n)
     if not needles:
         return lambda name: False
-    return lambda name: any(n in name.lower() for n in needles)
+    return lambda name: _is_sensitive(name, needles, match=match)
 
 
 def _short(value: object, max_length: int) -> str:
@@ -374,6 +367,7 @@ def log_args(
     level: int = logging.DEBUG,
     redact: Iterable[str] | None = None,
     redact_extra: Iterable[str] = (),
+    redact_match: str = "segment",
     max_length: int = 200,
 ) -> Callable[[F], F]: ...
 def log_args(
@@ -384,6 +378,7 @@ def log_args(
     level: int = logging.DEBUG,
     redact: Iterable[str] | None = None,
     redact_extra: Iterable[str] = (),
+    redact_match: str = "segment",
     max_length: int = 200,
 ) -> Any:
     """Log each call's arguments, by parameter name, before running it.
@@ -395,12 +390,16 @@ def log_args(
         func: The function, when used as a bare ``@log_args``.
         logger: A ``logging.Logger``, a logger name, or ``None`` for the package logger.
         level: Log level. Defaults to ``DEBUG`` (v0.1 logged at ``INFO``).
-        redact: Parameter-name fragments whose values are shown as ``'***'``
-            (case-insensitive substring match). ``None`` (default) uses
-            `DEFAULT_REDACT` or the list set by `python_wrap.config.configure`. A list
-            given here **replaces** that; pass ``()`` to disable redaction.
+        redact: Parameter-name fragments whose values are shown as ``'***'``.
+            ``None`` (default) uses `DEFAULT_REDACT` or the list set by
+            `python_wrap.config.configure`. A list given here **replaces** that; pass
+            ``()`` to disable redaction.
         redact_extra: Fragments to mask **in addition** to the list above (never
             replaces it). Added to any `redact_extra` set via `configure`.
+        redact_match: ``"segment"`` (default) masks a name only when a whole word
+            segment matches, so ``author`` and ``session_date`` stay visible while
+            ``auth_token`` and ``session_id`` do not. ``"substring"`` restores the old
+            looser matching.
         max_length: Longest rendering of a single value before it is truncated.
 
     Returns:
@@ -410,7 +409,9 @@ def log_args(
         >>> @log_args(logger="app")
         ... def login(user, password): ...
     """
-    secret = _redact_predicate(config.redaction(redact, DEFAULT_REDACT) + tuple(redact_extra))
+    secret = _redact_predicate(
+        config.redaction(redact, DEFAULT_REDACT) + tuple(redact_extra), redact_match
+    )
 
     def decorate(f: Callable[P, R]) -> Callable[P, R]:
         lg = _core.get_logger(logger)
@@ -527,6 +528,7 @@ def audit(
     level: int = logging.INFO,
     redact: Iterable[str] | None = None,
     redact_extra: Iterable[str] = (),
+    redact_match: str = "segment",
     include_result: bool = False,
     sink: Callable[[AuditRecord], None] | None = None,
 ) -> Callable[[F], F]: ...
@@ -538,6 +540,7 @@ def audit(
     level: int = logging.INFO,
     redact: Iterable[str] | None = None,
     redact_extra: Iterable[str] = (),
+    redact_match: str = "segment",
     include_result: bool = False,
     sink: Callable[[AuditRecord], None] | None = None,
 ) -> Any:
@@ -558,6 +561,7 @@ def audit(
             disables redaction.
         redact_extra: Fragments to mask in addition to the list above (never
             replaces it). Added to any `redact_extra` set via `configure`.
+        redact_match: ``"segment"`` (default) or ``"substring"``; see `log_args`.
         include_result: Store the return value in ``record.result``.
         sink: Callable receiving every record, e.g. to write to a database.
 
@@ -569,7 +573,9 @@ def audit(
         >>> @audit(sink=records.append)
         ... def delete_user(user_id, token): ...
     """
-    secret = _redact_predicate(config.redaction(redact, DEFAULT_REDACT) + tuple(redact_extra))
+    secret = _redact_predicate(
+        config.redaction(redact, DEFAULT_REDACT) + tuple(redact_extra), redact_match
+    )
 
     def decorate(f: Callable[P, R]) -> Callable[P, R]:
         lg = _core.get_logger(logger)
