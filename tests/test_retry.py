@@ -24,6 +24,7 @@ from python_wrap.retry import (
     RetryState,
     RetryStats,
     fallback,
+    http_status,
     retry,
     retry_after_header,
     retry_on_exception,
@@ -1332,3 +1333,119 @@ def test_async_hooks_do_not_retry_cancellation(fake_clock: FakeClock) -> None:
 
     asyncio.run(main())
     assert retry_stats(f).attempts_total == 1  # type: ignore[union-attr]
+
+
+class FakeResult:
+    def __init__(
+        self,
+        status: int,
+        *,
+        headers: dict[str, str] | None = None,
+        body: dict[str, object] | None = None,
+        attr: str = "status_code",
+    ) -> None:
+        setattr(self, attr, status)
+        self.headers = headers or {}
+        self._body = body
+
+    def json(self) -> dict[str, object]:
+        if self._body is None:
+            raise ValueError("no body")
+        return self._body
+
+
+def test_delay_from_receives_rejected_result(fake_clock: FakeClock) -> None:
+    responses = iter(
+        [
+            FakeResult(429, headers={"Retry-After": "7"}),
+            FakeResult(503, headers={"retry-after": "2"}),
+            FakeResult(200),
+        ]
+    )
+
+    @retry(
+        retry_if_result=http_status(429, 503),
+        delay_from=retry_after_header,
+        max_attempts=4,
+        delay=1,
+        backoff=2,
+    )
+    def call() -> FakeResult:
+        return next(responses)
+
+    assert call().status_code == 200
+    assert fake_clock.sleeps == [7.0, 2.0]
+
+
+def test_retry_after_header_reads_json_body_with_json_key() -> None:
+    response = FakeResult(429, body={"retry_after": 12})
+    assert retry_after_header(response) is None
+    assert retry_after_header(response, json_key="retry_after") == 12.0
+
+
+def test_retry_after_header_accepts_response_directly() -> None:
+    response = FakeResult(429, headers={"Retry-After": "5"})
+    assert retry_after_header(response) == 5.0
+    assert retry_after_header(FakeResult(200)) is None
+
+
+def test_http_status_predicate() -> None:
+    match = http_status(429, 503)
+    assert match(FakeResult(429))
+    assert match(FakeResult(503, attr="status"))
+    assert not match(FakeResult(200))
+    assert not match(object())
+    with pytest.raises(ValueError):
+        http_status()
+    with pytest.raises(ValueError):
+        http_status(42)
+
+
+def test_failing_on_retry_hook_keeps_original_error(
+    fake_clock: FakeClock, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.ERROR, logger="python_wrap")
+
+    def boom(state: RetryState) -> None:
+        raise RuntimeError("hook broke")
+
+    with pytest.raises(ValueError, match="fail 2"):
+        retry(Flaky(3), max_attempts=2, delay=1, on_retry=boom)()
+
+    assert "hook broke" not in str(fake_clock.sleeps)
+    assert any("on_retry hook failed" in record.getMessage() for record in caplog.records)
+
+
+def test_failing_async_on_retry_hook_keeps_original_error(
+    fake_clock: FakeClock, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.ERROR, logger="python_wrap")
+
+    async def boom(state: RetryState) -> None:
+        raise RuntimeError("hook broke")
+
+    async def failing() -> None:
+        raise ValueError("original")
+
+    with pytest.raises(ValueError, match="original"):
+        asyncio.run(retry(failing, max_attempts=2, delay=1, on_retry=boom)())
+
+    assert any("on_retry hook failed" in record.getMessage() for record in caplog.records)
+
+
+def test_async_result_retry_honours_retry_after(fake_clock: FakeClock) -> None:
+    responses = iter(
+        [FakeResult(429, headers={"Retry-After": "3"}), FakeResult(200)]
+    )
+
+    @retry(
+        retry_if_result=http_status(429),
+        delay_from=retry_after_header,
+        max_attempts=2,
+        delay=1,
+    )
+    async def call() -> FakeResult:
+        return next(responses)
+
+    assert asyncio.run(call()).status_code == 200
+    assert fake_clock.sleeps == [3.0]

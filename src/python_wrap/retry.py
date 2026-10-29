@@ -35,6 +35,7 @@ __all__ = [
     "RetryStats",
     "Retrying",
     "fallback",
+    "http_status",
     "retry",
     "retry_after_header",
     "retry_on_exception",
@@ -365,16 +366,47 @@ def _parse_seconds(value: Any) -> float | None:
     return max(seconds, 0.0)
 
 
-def retry_after_header(exc: BaseException) -> float | None:
-    """Extract a server-requested wait from an exception, for `delay_from=`.
+def _header(headers: Any, name: str) -> Any:
+    """Read ``name`` from a headers mapping or list of pairs, case-insensitively."""
+    if headers is None:
+        return None
+    try:
+        value = headers.get(name)
+    except AttributeError:
+        try:
+            value = dict(headers).get(name)
+        except (TypeError, ValueError):
+            return None
+    if value is not None:
+        return value
+    try:
+        for key in headers:
+            if str(key).lower() == name.lower():
+                return headers[key]
+    except (TypeError, AttributeError):
+        return None
+    return None
 
-    Looks at `exc.retry_after` first, then at `exc.response.headers["Retry-After"]`
-    (header names are matched case-insensitively). Values may be seconds or an HTTP-date;
-    dates are converted to seconds from now. Works with `httpx`, `requests` and
-    `aiohttp`-style exceptions without importing them, and never raises.
+
+def retry_after_header(value: Any, *, json_key: str | None = None) -> float | None:
+    """Extract a server-requested wait for `delay_from=`, from an error **or a result**.
+
+    Accepts either an exception or a returned response-like object, so result-based
+    retries (``retry_if_result=``) can honour the server's wait too. Looks at:
+
+    * a ``retry_after`` attribute;
+    * a ``Retry-After`` header (case-insensitive), on the object itself or on
+      ``exc.response``;
+    * with ``json_key=``, that key in the response's JSON body (vendor-specific APIs put
+      ``retry_after`` there). A failing ``.json()`` is ignored.
+
+    Values may be seconds or an HTTP-date; dates become seconds from now. Works with
+    ``httpx``, ``requests``, ``aiohttp`` and duck-typed responses without importing them,
+    and never raises.
 
     Args:
-        exc: Any exception.
+        value: An exception or a response-like object.
+        json_key: Optional JSON field holding the wait, e.g. ``"retry_after"``.
 
     Returns:
         Seconds to wait (never negative), or `None` if nothing usable was found.
@@ -386,19 +418,69 @@ def retry_after_header(exc: BaseException) -> float | None:
         3.0
     """
     try:
-        found = _parse_seconds(getattr(exc, "retry_after", None))
+        found = _parse_seconds(getattr(value, "retry_after", None))
         if found is not None:
             return found
-        headers = exc.response.headers  # type: ignore[attr-defined]
-        value = headers.get("Retry-After")
-        if value is None:
-            for key in headers:
-                if str(key).lower() == "retry-after":
-                    value = headers[key]
-                    break
-        return _parse_seconds(value)
+        headers = getattr(value, "headers", None)
+        if headers is None:
+            response = getattr(value, "response", None)
+            headers = getattr(response, "headers", None)
+        found = _parse_seconds(_header(headers, "Retry-After"))
+        if found is not None:
+            return found
+        if json_key:
+            body = getattr(value, "json", None)
+            if callable(body):
+                try:
+                    payload = body()
+                except Exception:
+                    payload = None
+                if isinstance(payload, dict):
+                    return _parse_seconds(payload.get(json_key))
+        return None
     except Exception:
         return None
+
+
+def http_status(*codes: int) -> Callable[[Any], bool]:
+    """Build a ``retry_if_result`` predicate that matches HTTP status codes.
+
+    Reads a duck-typed ``.status_code`` or ``.status`` attribute, so it works with
+    ``requests``, ``httpx``, ``aiohttp`` and simple stubs. A value without either
+    attribute never matches.
+
+    Args:
+        *codes: Status codes to retry, e.g. ``429, 500, 502, 503, 504``.
+
+    Returns:
+        A predicate for ``retry_if_result=``.
+
+    Raises:
+        ValueError: If no code is given or a code is outside 100-599.
+
+    Example:
+        ```python
+        from python_wrap import http_status, retry, retry_after_header
+
+        @retry(retry_if_result=http_status(429, 503), delay_from=retry_after_header)
+        def call(url):
+            return client.get(url)
+        ```
+    """
+    if not codes:
+        raise ValueError("http_status() needs at least one status code")
+    wanted = frozenset(codes)
+    for code in wanted:
+        if not 100 <= code <= 599:
+            raise ValueError(f"not an HTTP status code: {code!r}")
+
+    def matches(result: Any) -> bool:
+        status = getattr(result, "status_code", None)
+        if status is None:
+            status = getattr(result, "status", None)
+        return status in wanted
+
+    return matches
 
 
 # Never retried, even with ``on=BaseException``: retrying these hangs shutdown/cancellation.
@@ -450,7 +532,7 @@ class _Engine:
         retry_if: ExceptionPredicate | None,
         retry_if_result: ResultPredicate | None,
         on_retry: RetryCallback | None,
-        delay_from: Callable[[BaseException], float | None] | None,
+        delay_from: Callable[[Any], float | None] | None,
         budget: RetryBudget | None,
         logger: LoggerLike,
         log_level: int | None,
@@ -521,10 +603,12 @@ class _Engine:
                 "`async for attempt in retrying(...)` with `async with attempt:`"
             )
 
-    def _wait_for(self, attempt: int, exc: BaseException | None) -> float:
-        if self.delay_from is not None and exc is not None:
+    def _wait_for(self, attempt: int, exc: BaseException | None, result: Any = None) -> float:
+        if self.delay_from is not None and (exc is not None or result is not None):
             try:
-                hint = _parse_hint(self.delay_from(exc))
+                # A result-based retry passes the rejected value, so a response-like
+                # object with Retry-After (or retry_after in its JSON) is honoured.
+                hint = _parse_hint(self.delay_from(exc if exc is not None else result))
             except Exception:
                 self.log.debug("%s: delay_from raised; using backoff", self.name, exc_info=True)
                 hint = None
@@ -533,14 +617,19 @@ class _Engine:
         return _compute_delay(attempt, self.delay, self.backoff, self.max_delay, self.jitter)
 
     def _plan(
-        self, attempt: int, exc: BaseException | None, wanted: bool, started: float
+        self,
+        attempt: int,
+        exc: BaseException | None,
+        wanted: bool,
+        started: float,
+        result: Any = None,
     ) -> float | None:
         """The wait before the next attempt, or None to stop (counted and emitted)."""
         wait: float | None = None
         denied = False
         limit = self.limit()
         if wanted and (limit is None or attempt < limit):
-            wait = self._wait_for(attempt, exc)
+            wait = self._wait_for(attempt, exc, result)
             if self.max_time is not None and _core.monotonic() - started + wait > self.max_time:
                 wait = None
             left = _deadline_remaining()
@@ -593,6 +682,28 @@ class _Engine:
         with self.stats._lock:
             self.stats.last_exception = exc
 
+    def _run_hook(self, state: RetryState) -> None:
+        """Run `on_retry`; a failing hook must never replace the original outcome."""
+        if self.on_retry is None:
+            return
+        try:
+            self.on_retry(state)
+        except Exception:
+            self.log.exception(
+                "%s: on_retry hook failed; the original error/result is kept", self.name
+            )
+
+    async def _arun_hook(self, state: RetryState) -> None:
+        """`_run_hook` for async callers: an async hook is awaited, failures swallowed."""
+        if self.on_retry is None:
+            return
+        try:
+            await _maybe_await(self.on_retry(state))
+        except Exception:
+            self.log.exception(
+                "%s: on_retry hook failed; the original error/result is kept", self.name
+            )
+
     # -- sync decisions -------------------------------------------------------------------
     def failure(self, attempt: int, exc: BaseException, started: float) -> float | None:
         """Decide after a failed attempt: the wait in seconds, or None to re-raise."""
@@ -603,8 +714,7 @@ class _Engine:
         wanted = self.retry_if is None or bool(self.retry_if(exc))
         wait = self._plan(attempt, exc, wanted, started)
         if wait is not None:
-            if self.on_retry is not None:
-                self.on_retry(self._state(attempt, exc, None, wait, started))
+            self._run_hook(self._state(attempt, exc, None, wait, started))
             self._announce(attempt, exc, None, wait)
         return wait
 
@@ -618,10 +728,9 @@ class _Engine:
     def result_failure(self, attempt: int, result: Any, started: float) -> float | None:
         """Decide after a rejected result: the wait, or None to return it as is."""
         self.check_sync("on_retry")
-        wait = self._plan(attempt, None, True, started)
+        wait = self._plan(attempt, None, True, started, result)
         if wait is not None:
-            if self.on_retry is not None:
-                self.on_retry(self._state(attempt, None, result, wait, started))
+            self._run_hook(self._state(attempt, None, result, wait, started))
             self._announce(attempt, None, result, wait)
         return wait
 
@@ -634,8 +743,7 @@ class _Engine:
         wanted = self.retry_if is None or bool(await _maybe_await(self.retry_if(exc)))
         wait = self._plan(attempt, exc, wanted, started)
         if wait is not None:
-            if self.on_retry is not None:
-                await _maybe_await(self.on_retry(self._state(attempt, exc, None, wait, started)))
+            await self._arun_hook(self._state(attempt, exc, None, wait, started))
             self._announce(attempt, exc, None, wait)
         return wait
 
@@ -647,11 +755,10 @@ class _Engine:
 
     async def aresult_failure(self, attempt: int, result: Any, started: float) -> float | None:
         """`result_failure` for async callers."""
-        wait = self._plan(attempt, None, True, started)
+        wait = self._plan(attempt, None, True, started, result)
         if wait is not None:
-            if self.on_retry is not None:
-                state = self._state(attempt, None, result, wait, started)
-                await _maybe_await(self.on_retry(state))
+            state = self._state(attempt, None, result, wait, started)
+            await self._arun_hook(state)
             self._announce(attempt, None, result, wait)
         return wait
 
@@ -676,7 +783,7 @@ def retry(
     retry_if: ExceptionPredicate | None = ...,
     retry_if_result: ResultPredicate | None = ...,
     on_retry: RetryCallback | None = ...,
-    delay_from: Callable[[BaseException], float | None] | None = ...,
+    delay_from: Callable[[Any], float | None] | None = ...,
     budget: RetryBudget | None = ...,
     logger: LoggerLike = ...,
     log_level: int | None = ...,
@@ -697,7 +804,7 @@ def retry(
     retry_if: ExceptionPredicate | None = ...,
     retry_if_result: ResultPredicate | None = ...,
     on_retry: RetryCallback | None = ...,
-    delay_from: Callable[[BaseException], float | None] | None = ...,
+    delay_from: Callable[[Any], float | None] | None = ...,
     budget: RetryBudget | None = ...,
     logger: LoggerLike = ...,
     log_level: int | None = ...,
@@ -717,7 +824,7 @@ def retry(
     retry_if: ExceptionPredicate | None = None,
     retry_if_result: ResultPredicate | None = None,
     on_retry: RetryCallback | None = None,
-    delay_from: Callable[[BaseException], float | None] | None = None,
+    delay_from: Callable[[Any], float | None] | None = None,
     budget: RetryBudget | None = _UNSET,
     logger: LoggerLike = None,
     log_level: int | None = _UNSET,
@@ -772,8 +879,10 @@ def retry(
         retry_if_result: Predicate on the return value; True means "retry". When no
             retry is left the last value is returned. May be async for async functions.
         on_retry: Called with a `RetryState` before each wait. May be async for async
-            functions.
-        delay_from: Called with the exception; a number is the exact wait for this
+            functions. An exception raised by the hook is logged and swallowed: it never
+            replaces the original error or rejected result.
+        delay_from: Called with the exception, or with the rejected return value when
+            ``retry_if_result`` scheduled the retry; a number is the exact wait for this
             attempt (no backoff, no jitter; still capped by `max_delay` and `max_time`),
             `None` means use the normal backoff. See `retry_after_header`.
         budget: A `RetryBudget` shared with other retried code. When it refuses a retry
@@ -1040,7 +1149,7 @@ def retrying(
     retry_if: ExceptionPredicate | None = None,
     retry_if_result: ResultPredicate | None = None,
     on_retry: RetryCallback | None = None,
-    delay_from: Callable[[BaseException], float | None] | None = None,
+    delay_from: Callable[[Any], float | None] | None = None,
     budget: RetryBudget | None = _UNSET,
     logger: LoggerLike = None,
     log_level: int | None = _UNSET,
@@ -1073,8 +1182,10 @@ def retrying(
         on: Exception type(s) that trigger a retry.
         retry_if: Extra predicate on the exception; retry only if it returns True.
         retry_if_result: Predicate on `attempt.result`; True means "retry".
-        on_retry: Called with a `RetryState` before each wait.
-        delay_from: Exact wait derived from the exception, or `None` for backoff.
+        on_retry: Called with a `RetryState` before each wait; a failing hook is logged
+            and swallowed.
+        delay_from: Exact wait derived from the exception or rejected result, or `None`
+            for backoff.
         budget: A shared `RetryBudget`; when it refuses, the loop stops retrying.
         logger: Logger (or logger name) for the per-retry message.
         log_level: Level of the per-retry message, or `None` to not log.
