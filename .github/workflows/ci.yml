@@ -44,10 +44,10 @@ jobs:
       - run: uv sync --group dev --frozen
 
       - name: ruff check
-        run: uv run --no-sync ruff check src tests
+        run: uv run --no-sync ruff check src tests scripts/check_installed.py
 
       - name: ruff format
-        run: uv run --no-sync ruff format --check --diff src tests
+        run: uv run --no-sync ruff format --check --diff src tests scripts/check_installed.py
 
   test:
     name: py${{ matrix.python-version }} · ${{ matrix.os }}
@@ -167,8 +167,16 @@ jobs:
         run: |
           uv venv "$RUNNER_TEMP/smoke" --python 3.13
           uv pip install --python "$RUNNER_TEMP/smoke" dist/*.whl
-          cd "$RUNNER_TEMP"
-          "$RUNNER_TEMP/smoke/bin/python" -c "import python_wrap; print(python_wrap.__version__)"
+          version=$(sed -nE 's/^__version__ *= *"([^"]+)".*/\1/p' src/python_wrap/__init__.py)
+          "$RUNNER_TEMP/smoke/bin/python" -I scripts/check_installed.py "$version"
+
+      - name: The source distribution includes its test fixtures
+        run: |
+          mkdir "$RUNNER_TEMP/sdist"
+          tar -xzf dist/*.tar.gz -C "$RUNNER_TEMP/sdist" --strip-components=1
+          cd "$RUNNER_TEMP/sdist"
+          uv sync --group dev
+          uv run --no-sync pytest tests/test_examples.py tests/test_benchmarks_smoke.py
 
       - name: Upload the distributions
         uses: actions/upload-artifact@v7

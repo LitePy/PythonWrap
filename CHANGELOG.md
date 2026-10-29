@@ -17,7 +17,7 @@ A ground-up rework and a much larger toolkit. Every decorator works on plain fun
 configures logging. Several
 v0.1 decorators that did not do what their names promised (`transactional`, `revert_on_failure`,
 async `timing`) now work. See the
-[migration guide](https://pythonwrap.readthedocs.io/en/latest/migration/) for the full upgrade
+[migration guide](https://pythonwrap.readthedocs.io/en/latest/project/migration/) for the full upgrade
 path.
 
 ### Highlights
@@ -228,6 +228,12 @@ Core:
 
 ### Fixed
 
+- Final releases now pass through TestPyPI and an installation check before PyPI.
+  Both indexes are verified after upload before creating the GitHub release.
+- Source distributions include the examples and benchmark script used by their tests.
+- Release smoke checks validate metadata, public imports, `py.typed`, retry, memoization
+  and async behavior in an isolated installed environment.
+
 - `AsyncPeriodic.stop()` no longer swallows a cancellation aimed at the task awaiting it, and
   ends a loop whose run swallows the cancel; `stop()` called inside a run ends the loop as soon
   as that run returns.
@@ -268,7 +274,7 @@ Core:
 - `audit` skips building a record when nobody would receive it, and `timing` skips formatting
   when its log level is disabled.
 - Numbers and a benchmark script are on the
-  [performance page](https://pythonwrap.readthedocs.io/en/latest/performance/).
+  [performance page](https://pythonwrap.readthedocs.io/en/latest/project/performance/).
 
 ### Deprecated
 

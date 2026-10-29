@@ -80,6 +80,9 @@ exclude = ["**/__pycache__", "**/*.py[cod]", "**/.DS_Store"]
 include = [
     "/src/python_wrap",
     "/tests",
+    "/examples",
+    "/benchmarks",
+    "/scripts/check_installed.py",
     "/README.md",
     "/LICENSE",
     "/CHANGELOG.md",

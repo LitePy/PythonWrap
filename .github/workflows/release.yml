@@ -5,9 +5,8 @@
 # pushed against an unregistered publisher fails at the upload, and a version number on
 # PyPI can never be reused.
 #
-# Routing: a final version (0.2.0, 0.2.0.post1) goes to PyPI. Anything else (a, b, rc,
-# .dev) goes to TestPyPI only, so a release candidate can be rehearsed without burning a
-# real version number.
+# Every tagged version goes to TestPyPI and is installed back from that index first.
+# Final versions then go to PyPI; pre-releases remain on TestPyPI only.
 #
 # No API token is involved anywhere in this file, and none should be added. Trusted
 # Publishing mints a short-lived credential scoped to this workflow and environment.
@@ -78,8 +77,7 @@ jobs:
           python3 -m zipfile -l dist/*.whl | grep -q 'python_wrap/py.typed'
           uv venv "$RUNNER_TEMP/smoke" --python 3.13
           uv pip install --python "$RUNNER_TEMP/smoke" dist/*.whl
-          cd "$RUNNER_TEMP"
-          "$RUNNER_TEMP/smoke/bin/python" -c "import python_wrap; print(python_wrap.__version__)"
+          "$RUNNER_TEMP/smoke/bin/python" -I scripts/check_installed.py "${{ steps.meta.outputs.version }}"
 
       - uses: actions/upload-artifact@v7
         with:
@@ -90,7 +88,7 @@ jobs:
   publish-testpypi:
     name: Publish to TestPyPI
     needs: build
-    if: github.ref_type == 'tag' && needs.build.outputs.prerelease == 'true'
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     environment:
       name: testpypi
@@ -110,9 +108,34 @@ jobs:
           # already landed.
           skip-existing: true
 
+  verify-testpypi:
+    name: Install and verify from TestPyPI
+    needs: [build, publish-testpypi]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.2
+        with:
+          python-version: "3.13"
+      - name: Install the exact published version without fallback indexes
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          uv venv "$RUNNER_TEMP/testpypi-smoke" --python 3.13
+          for attempt in 1 2 3 4 5 6; do
+            if uv pip install --python "$RUNNER_TEMP/testpypi-smoke" --no-deps --no-cache \
+              --index-url https://test.pypi.org/simple/ "python-wrap==$VERSION"; then
+              break
+            fi
+            if [ "$attempt" = 6 ]; then exit 1; fi
+            sleep 10
+          done
+          "$RUNNER_TEMP/testpypi-smoke/bin/python" -I scripts/check_installed.py "$VERSION"
+
   publish-pypi:
     name: Publish to PyPI
-    needs: build
+    needs: [build, verify-testpypi]
     if: github.ref_type == 'tag' && needs.build.outputs.prerelease == 'false'
     runs-on: ubuntu-latest
     environment:
@@ -132,14 +155,40 @@ jobs:
           # PEP 740 attestations, signed by the same OIDC identity.
           attestations: true
 
+  verify-pypi:
+    name: Install and verify from PyPI
+    needs: [build, publish-pypi]
+    if: github.ref_type == 'tag' && needs.build.outputs.prerelease == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.2
+        with:
+          python-version: "3.13"
+      - name: Install the exact published version
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          uv venv "$RUNNER_TEMP/pypi-smoke" --python 3.13
+          for attempt in 1 2 3 4 5 6; do
+            if uv pip install --python "$RUNNER_TEMP/pypi-smoke" --no-deps --no-cache \
+              --index-url https://pypi.org/simple/ "python-wrap==$VERSION"; then
+              break
+            fi
+            if [ "$attempt" = 6 ]; then exit 1; fi
+            sleep 10
+          done
+          "$RUNNER_TEMP/pypi-smoke/bin/python" -I scripts/check_installed.py "$VERSION"
+
   github-release:
     name: Create the GitHub release
-    needs: [build, publish-testpypi, publish-pypi]
+    needs: [build, verify-testpypi, publish-pypi, verify-pypi]
     # Whichever publish job applied must have succeeded; the other is skipped.
     if: >-
       !cancelled() && github.ref_type == 'tag' && needs.build.result == 'success'
-      && contains(fromJSON('["success", "skipped"]'), needs.publish-testpypi.result)
-      && contains(fromJSON('["success", "skipped"]'), needs.publish-pypi.result)
+      && needs.verify-testpypi.result == 'success'
+      && ((needs.build.outputs.prerelease == 'true' && needs.publish-pypi.result == 'skipped')
+          || (needs.publish-pypi.result == 'success' && needs.verify-pypi.result == 'success'))
     runs-on: ubuntu-latest
     permissions:
       contents: write
