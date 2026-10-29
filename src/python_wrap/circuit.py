@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import enum
 import functools
-import threading
+import math
+from collections import deque
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from typing import Any, Concatenate, NoReturn, ParamSpec, Protocol, TypeVar, cast, overload
 
-from python_wrap import _core
+from python_wrap import _core, _fork
 from python_wrap._core import F, LoggerLike, P, R
 from python_wrap.errors import CircuitOpenError
 
@@ -144,15 +146,35 @@ class CircuitBreaker:
         on_state_change: StateChangeListener | None = None,
         name: str | None = None,
         logger: LoggerLike = None,
+        window: float | None = None,
+        backend: Any = None,
     ) -> None:
-        if failure_threshold < 1:
+        if (
+            isinstance(failure_threshold, bool)
+            or not isinstance(failure_threshold, int)
+            or failure_threshold < 1
+        ):
             raise ValueError(f"failure_threshold must be >= 1, got {failure_threshold!r}")
-        if recovery_timeout < 0:
+        if not math.isfinite(recovery_timeout) or recovery_timeout < 0:
             raise ValueError(f"recovery_timeout must be >= 0, got {recovery_timeout!r}")
-        if half_open_max_calls < 1:
+        if (
+            isinstance(half_open_max_calls, bool)
+            or not isinstance(half_open_max_calls, int)
+            or half_open_max_calls < 1
+        ):
             raise ValueError(f"half_open_max_calls must be >= 1, got {half_open_max_calls!r}")
-        if success_threshold < 1:
+        if (
+            isinstance(success_threshold, bool)
+            or not isinstance(success_threshold, int)
+            or success_threshold < 1
+        ):
             raise ValueError(f"success_threshold must be >= 1, got {success_threshold!r}")
+        if window is not None and (not math.isfinite(window) or window <= 0):
+            raise ValueError("window must be positive")
+        if backend is not None and not name:
+            raise ValueError("shared breakers require an explicit name")
+        self.window, self.backend = window, backend
+        self._failure_times: deque[float] = deque()
         self.failure_threshold = failure_threshold
         self.recovery_timeout = recovery_timeout
         self.half_open_max_calls = half_open_max_calls
@@ -162,7 +184,7 @@ class CircuitBreaker:
         self.on_state_change = on_state_change
         self.name = name or "circuit"
         self._log = _core.get_logger(logger)
-        self._lock = threading.Lock()
+        self._lock = _fork.ForkSafeLock()
         self._state = CircuitState.CLOSED
         self._failures = 0
         self._opened_at = 0.0
@@ -174,11 +196,24 @@ class CircuitBreaker:
         self._total_rejected = 0
         # Transitions made under the lock, delivered to listeners after releasing it.
         self._pending: list[tuple[CircuitState, CircuitState]] = []
+        _fork.register(self)
+
+    def _reset_after_fork(self) -> None:
+        # Shared backends remain authoritative; never reset their state from a child.
+        self._pending.clear()
+        if self.backend is None:
+            self._state = CircuitState.CLOSED
+            self._failures = self._trials = self._trial_successes = 0
+            self._total_failures = self._total_successes = self._total_rejected = 0
+            self._failure_times.clear()
+            self._generation += 1
 
     # -- introspection -------------------------------------------------------------
     @property
     def state(self) -> CircuitState:
         """Current state (an open circuit past its timeout reports ``half_open``)."""
+        if self.backend is not None:
+            return CircuitState(self._remote("state")["state"])
         with self._lock:
             self._maybe_half_open()
             state = self._state
@@ -188,12 +223,25 @@ class CircuitBreaker:
     @property
     def failure_count(self) -> int:
         """Consecutive failures counted so far."""
+        if self.backend is not None:
+            return int(self._remote("state")["failures"])
         with self._lock:
             return self._failures
 
     @property
     def stats(self) -> CircuitStats:
         """A consistent `CircuitStats` snapshot of the counters and state."""
+        if self.backend is not None:
+            data = self._remote("state")
+            return CircuitStats(
+                name=self.name,
+                state=CircuitState(data["state"]),
+                failures=data["total_failures"],
+                successes=data["total_successes"],
+                rejected=data["total_rejected"],
+                consecutive_failures=data["failures"],
+                opened_at=None if data["state"] == "closed" else data["opened"] / 1000,
+            )
         with self._lock:
             self._maybe_half_open()
             snapshot = CircuitStats(
@@ -210,7 +258,11 @@ class CircuitBreaker:
 
     def reset(self) -> None:
         """Force the breaker back to closed and zero every counter."""
+        if self.backend is not None:
+            self._remote("reset")
+            return
         with self._lock:
+            self._failure_times.clear()
             if self._state is not CircuitState.CLOSED:
                 self._log.info("circuit %s reset to closed", self.name)
                 self._set_state(CircuitState.CLOSED)
@@ -222,6 +274,28 @@ class CircuitBreaker:
             self._total_rejected = 0
             self._generation += 1
         self._notify()
+
+    def force_open(self) -> None:
+        """Force open for maintenance/tests, without simulating dependency failures."""
+        if self.backend is not None:
+            self._remote("force_open")
+            return
+        with self._lock:
+            self._open()
+        self._notify()
+
+    def _remote(self, operation: str, generation: int = 0, trial: bool = False) -> dict[str, Any]:
+        data: dict[str, Any] = self.backend.operate(self, operation, generation, trial)
+        if data["old"] != data["state"]:
+            _core.emit("circuit.state_changed", self.name, old=data["old"], new=data["state"])
+            if self.on_state_change:
+                try:
+                    self.on_state_change(
+                        self, CircuitState(data["old"]), CircuitState(data["state"])
+                    )
+                except Exception:
+                    self._log.exception("circuit listener failed")
+        return data
 
     # -- internals (call with the lock held) ---------------------------------------
     def _set_state(self, new: CircuitState) -> None:
@@ -273,6 +347,13 @@ class CircuitBreaker:
 
     def _acquire(self) -> tuple[int, bool]:
         """Admit a call. Returns ``(generation, is_trial)`` or raises CircuitOpenError."""
+        if self.backend is not None:
+            data = self._remote("admit")
+            if not data["admitted"]:
+                wait = data["wait"] / 1000
+                _core.emit("circuit.rejected", self.name, retry_after=wait)
+                raise CircuitOpenError(f"circuit {self.name} is {data['state']}", retry_after=wait)
+            return data["generation"], bool(data["trial"])
         error: CircuitOpenError | None = None
         with self._lock:
             self._maybe_half_open()
@@ -300,6 +381,9 @@ class CircuitBreaker:
         return admitted
 
     def _success(self, generation: int, trial: bool) -> None:
+        if self.backend is not None:
+            self._remote("success", generation, trial)
+            return
         with self._lock:
             self._total_successes += 1
             if generation != self._generation:
@@ -317,21 +401,36 @@ class CircuitBreaker:
                         self.name,
                         self.success_threshold,
                     )
-            self._failures = 0
+            if self.window is None or trial:
+                self._failures = 0
+                self._failure_times.clear()
         self._notify()
 
     def _failure(self, generation: int, trial: bool) -> None:
+        if self.backend is not None:
+            self._remote("failure", generation, trial)
+            return
         with self._lock:
             self._total_failures += 1
             if generation != self._generation:
                 return
-            self._failures += 1
+            if self.window is None:
+                self._failures += 1
+            else:
+                now = _core.monotonic()
+                while self._failure_times and self._failure_times[0] <= now - self.window:
+                    self._failure_times.popleft()
+                self._failure_times.append(now)
+                self._failures = len(self._failure_times)
             if trial or self._failures >= self.failure_threshold:
                 self._open()
         self._notify()
 
     def _release(self, generation: int, trial: bool) -> None:
         """A non-counted exception ended the call: free its trial slot, if any."""
+        if self.backend is not None:
+            self._remote("neutral", generation, trial)
+            return
         if not trial:
             return
         with self._lock:
@@ -377,20 +476,63 @@ class CircuitBreaker:
         try:
             result = func(*args, **kwargs)
         except BaseException as exc:
-            self._settle(generation, trial, exc)
+            try:
+                self._settle(generation, trial, exc)
+            except Exception:
+                self._log.exception("circuit outcome bookkeeping failed; preserving original error")
             raise
         self._success(generation, trial)
         return result
 
     async def _acall(self, func: Callable[..., Any], args: Any, kwargs: Any) -> Any:
-        # The lock is only taken inside the sync helpers, never across the await.
-        generation, trial = self._acquire()
+        from python_wrap.coordination import _drain
+
+        # Synchronous network admission cannot be abandoned on cancellation: a late
+        # successful admission would otherwise strand a half-open trial reservation.
+        if self.backend is not None:
+            admission = asyncio.create_task(asyncio.to_thread(self._acquire))
+            try:
+                generation, trial = await asyncio.shield(admission)
+            except asyncio.CancelledError:
+                acquired, error, _ = await _drain(admission)
+                if error is None:
+                    cleanup = asyncio.create_task(asyncio.to_thread(self._release, *acquired))
+                    await _drain(cleanup)
+                raise
+        else:
+            generation, trial = self._acquire()
         try:
             result = await func(*args, **kwargs)
         except BaseException as exc:
-            self._settle(generation, trial, exc)
+            if self.backend is not None:
+                settlement = asyncio.create_task(
+                    asyncio.to_thread(self._settle, generation, trial, exc)
+                )
+                _, error, cancelled = await _drain(settlement)
+                if cancelled:
+                    raise asyncio.CancelledError from None
+                if error is not None:
+                    self._log.error(
+                        "circuit outcome bookkeeping failed; preserving original error",
+                        exc_info=(type(error), error, error.__traceback__),
+                    )
+            else:
+                try:
+                    self._settle(generation, trial, exc)
+                except Exception:
+                    self._log.exception(
+                        "circuit outcome bookkeeping failed; preserving original error"
+                    )
             raise
-        self._success(generation, trial)
+        if self.backend is not None:
+            success = asyncio.create_task(asyncio.to_thread(self._success, generation, trial))
+            _, error, cancelled = await _drain(success)
+            if cancelled:
+                raise asyncio.CancelledError
+            if error is not None:
+                raise error
+        else:
+            self._success(generation, trial)
         return result
 
     def __call__(self, func: F) -> F:

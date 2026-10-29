@@ -182,3 +182,34 @@ jobs:
           name: dist
           path: dist/
           if-no-files-found: error
+
+  backend-integration:
+    name: Redis coordination and fork regressions
+    runs-on: ubuntu-latest
+    env:
+      PW_REQUIRE_REDIS: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.2
+        with:
+          python-version: "3.13"
+      - name: Install the real Redis server
+        run: sudo apt-get update && sudo apt-get install -y redis-server
+      - run: uv sync --group dev --frozen
+      - name: Validate atomic backend scripts against Redis
+        run: uv run --no-sync pytest tests/test_redis_backends.py tests/test_fork_safety.py
+
+  framework-integration:
+    name: Flask, FastAPI, Django and Celery adapters
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.2
+        with:
+          python-version: "3.13"
+      - run: uv sync --group dev --frozen
+      - name: Exercise real framework request/task lifecycles
+        run: >-
+          uv run --frozen --with 'flask>=3' --with 'fastapi>=0.115'
+          --with 'httpx>=0.27,<1' --with 'django>=4.2' --with 'celery>=5.3'
+          pytest tests/test_integrations.py

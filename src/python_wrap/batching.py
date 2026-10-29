@@ -11,13 +11,12 @@ import asyncio
 import concurrent.futures
 import contextlib
 import functools
-import threading
 import warnings
 import weakref
 from collections.abc import Awaitable, Callable, Coroutine, Hashable, Mapping, Sequence
 from typing import Any, Concatenate, ParamSpec, Protocol, TypeGuard, TypeVar, cast, overload
 
-from python_wrap import _core
+from python_wrap import _core, _fork
 from python_wrap.errors import BatchError
 
 __all__ = ["AsyncBatched", "Batched", "batch_calls"]
@@ -160,7 +159,7 @@ class _Counter:
     """Thread-safe count of queued items, mirrored onto ``wrapper.pending``."""
 
     def __init__(self) -> None:
-        self.lock = threading.Lock()
+        self.lock = _fork.ForkSafeLock()
         self.value = 0
         self.wrapper: Any = None
 
@@ -197,7 +196,7 @@ def _batch_sync(
     key_of: Callable[[Any], Hashable],
 ) -> Callable[..., Any]:
     name = _core.qualname(func)
-    lock = threading.Lock()
+    lock = _fork.ForkSafeLock()
     open_batches: dict[_GroupKey, _SyncBatch] = {}
     counter = _Counter()
     warned = False
@@ -284,6 +283,13 @@ def _batch_sync(
 
     counter.wrapper = wrapper
     wrapper.pending = 0  # type: ignore[attr-defined]
+
+    def reset_after_fork() -> None:
+        open_batches.clear()
+        counter.value = 0
+        wrapper.pending = 0  # type: ignore[attr-defined]
+
+    wrapper.__dict__["_fork_reset"] = _fork.register_reset(reset_after_fork)
     wrapper.flush = flush  # type: ignore[attr-defined]
     return wrapper
 
@@ -446,6 +452,13 @@ def _batch_async(
 
     counter.wrapper = wrapper
     wrapper.pending = 0  # type: ignore[attr-defined]
+
+    def reset_after_fork() -> None:
+        loops.clear()
+        counter.value = 0
+        wrapper.pending = 0  # type: ignore[attr-defined]
+
+    wrapper.__dict__["_fork_reset"] = _fork.register_reset(reset_after_fork)
     wrapper.aflush = aflush  # type: ignore[attr-defined]
     return wrapper
 

@@ -23,6 +23,7 @@ Listener = Callable[[Event], None]
 #: function's qualified name unless noted). The docs page renders this mapping.
 EVENT_NAMES: Mapping[str, str] = MappingProxyType(
     {
+        "timing.slow": "A call exceeded its slow-call threshold. Fields: seconds (float).",
         "retry.attempt_failed": (
             "An attempt failed and another will follow. Fields: attempt (int, 1-based), "
             "exception (BaseException, or None for a value rejected by retry_if_result), "

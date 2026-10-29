@@ -38,7 +38,9 @@ def test_is_async_sees_through_partial():
 
 
 def test_version_exposed():
-    assert python_wrap.__version__.startswith("0.2")
+    from packaging.version import Version
+
+    assert str(Version(python_wrap.__version__)) == python_wrap.__version__
 
 
 class _AsyncCallable:

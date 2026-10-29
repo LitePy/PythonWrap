@@ -61,3 +61,13 @@ area that matches your problem.
     Make code that retries, sleeps and rate-limits instant and deterministic in tests.
 
 </div>
+
+## Production tools
+
+0.3 adds [named policies and predicates](resilience/named-policies.md),
+[shared stores and credentials](caching/stores-and-credentials.md),
+[leases and idempotency](concurrency/leases-and-idempotency.md),
+[shared limits](concurrency/shared-limits.md), [buffered writers](concurrency/buffered-writes.md),
+[batch processing](correctness/batch-processing.md), [switches](switches.md),
+and [context, telemetry and health](observability/production.md).
+Optional [framework integrations](../cookbook/framework-integrations.md) bind request/task context.

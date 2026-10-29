@@ -31,7 +31,7 @@ import time
 from collections.abc import AsyncIterator, Callable, Coroutine, Iterator
 from typing import Any, Generic, Literal, ParamSpec, Protocol, TypeVar, overload
 
-from python_wrap import _core
+from python_wrap import _core, _fork
 from python_wrap._core import LoggerLike
 
 __all__ = ["AsyncPeriodic", "Periodic", "periodic"]
@@ -88,7 +88,7 @@ class _Base(Generic[P, R]):
         self._runs = 0
         self._last_error: BaseException | None = None
         self._pending: BaseException | None = None  # on_error="raise", surfaced by stop()
-        self._lock = threading.Lock()
+        self._lock = _fork.ForkSafeLock()
         functools.update_wrapper(self, func)  # type: ignore[arg-type]
 
     def __reduce__(self) -> str:
@@ -163,6 +163,15 @@ class Periodic(_Base[P, R]):
         super().__init__(func, *config)
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._fork_warning = False
+        _fork.register(self)
+
+    def _reset_after_fork(self) -> None:
+        self._fork_warning = self._thread is not None
+        self._thread = None
+        self._stop_event = threading.Event()
+        self._runs = 0
+        self._last_error = self._pending = None
 
     def __call__(self, *args: P.args, **kwargs: P.kwargs) -> R:
         return self._func(*args, **kwargs)  # type: ignore[no-any-return]
@@ -170,6 +179,12 @@ class Periodic(_Base[P, R]):
     @property
     def running(self) -> bool:
         """True while the background thread is alive."""
+        if self._fork_warning:
+            self._fork_warning = False
+            _core.get_logger(self._logger).warning(
+                "periodic %s: inherited loop stopped after fork; call start() in this worker",
+                self._name,
+            )
         thread = self._thread
         return thread is not None and thread.is_alive()
 
@@ -274,9 +289,16 @@ class AsyncPeriodic(_Base[P, R]):
         super().__init__(func, *config)
         self._task: asyncio.Task[None] | None = None
         self._stopping = False
+        _fork.register(self)
         mark = getattr(inspect, "markcoroutinefunction", None)  # Python 3.12+
         if mark is not None:
             mark(self)
+
+    def _reset_after_fork(self) -> None:
+        self._task = None
+        self._stopping = True
+        self._runs = 0
+        self._last_error = self._pending = None
 
     def __call__(self, *args: P.args, **kwargs: P.kwargs) -> Coroutine[Any, Any, R]:
         return self._func(*args, **kwargs)  # type: ignore[no-any-return]

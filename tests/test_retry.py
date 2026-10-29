@@ -1434,9 +1434,7 @@ def test_failing_async_on_retry_hook_keeps_original_error(
 
 
 def test_async_result_retry_honours_retry_after(fake_clock: FakeClock) -> None:
-    responses = iter(
-        [FakeResult(429, headers={"Retry-After": "3"}), FakeResult(200)]
-    )
+    responses = iter([FakeResult(429, headers={"Retry-After": "3"}), FakeResult(200)])
 
     @retry(
         retry_if_result=http_status(429),

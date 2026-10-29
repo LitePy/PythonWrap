@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import functools
 import math
-import threading
 from collections import deque
 from collections.abc import Callable
 from typing import Any, Concatenate, ParamSpec, Protocol, TypeVar, cast, overload
 
-from python_wrap import _core
+from python_wrap import _core, _fork
 
 __all__ = ["CallStats", "Counted", "count_calls"]
 
@@ -50,12 +49,16 @@ class CallStats:
 
     def __init__(self, window: int) -> None:
         self._window = window
-        self._lock = threading.Lock()
+        self._lock = _fork.ForkSafeLock()
         self._durations: deque[float] = deque(maxlen=window)
         self._calls = 0
         self._errors = 0
         self._in_flight = 0
         self._last = 0.0
+        _fork.register(self)
+
+    def _reset_after_fork(self) -> None:
+        self._in_flight = 0
 
     def _begin(self) -> None:
         with self._lock:

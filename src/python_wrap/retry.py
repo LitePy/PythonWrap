@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime
 import functools
 import inspect
@@ -10,7 +11,6 @@ import logging
 import math
 import random
 import sys
-import threading
 import time
 import warnings
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator
@@ -18,9 +18,10 @@ from dataclasses import dataclass
 from types import TracebackType
 from typing import Any, NoReturn, Protocol, TypeVar, cast, overload
 
-from python_wrap import _core, config
+from python_wrap import _core, _fork, config
 from python_wrap._core import F, LoggerLike, P, R
 from python_wrap.deadline import remaining as _deadline_remaining
+from python_wrap.errors import CircuitOpenError
 
 T = TypeVar("T")
 T_co = TypeVar("T_co", covariant=True)
@@ -125,7 +126,7 @@ class RetryStats:
     """
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
+        self._lock = _fork.ForkSafeLock()
         self.calls = 0
         self.attempts_total = 0
         self.retries = 0
@@ -263,7 +264,14 @@ class RetryBudget:
         self.window = float(window)
         self._reserve = self.min_per_second * self.window
         self._width = self.window / _BUDGET_SLOTS
-        self._lock = threading.Lock()
+        self._lock = _fork.ForkSafeLock()
+        self._epochs = [-1] * _BUDGET_SLOTS
+        self._requests = [0] * _BUDGET_SLOTS
+        self._retries = [0] * _BUDGET_SLOTS
+        self._rejected = 0
+        _fork.register(self)
+
+    def _reset_after_fork(self) -> None:
         self._epochs = [-1] * _BUDGET_SLOTS
         self._requests = [0] * _BUDGET_SLOTS
         self._retries = [0] * _BUDGET_SLOTS
@@ -367,23 +375,15 @@ def _parse_seconds(value: Any) -> float | None:
 
 
 def _header(headers: Any, name: str) -> Any:
-    """Read ``name`` from a headers mapping or list of pairs, case-insensitively."""
+    """Read a header from a mapping or pairs, case-insensitively."""
     if headers is None:
         return None
     try:
-        value = headers.get(name)
-    except AttributeError:
-        try:
-            value = dict(headers).get(name)
-        except (TypeError, ValueError):
-            return None
-    if value is not None:
-        return value
-    try:
-        for key in headers:
-            if str(key).lower() == name.lower():
-                return headers[key]
-    except (TypeError, AttributeError):
+        items = headers.items() if hasattr(headers, "items") else headers
+        for key, value in items:
+            if str(key).casefold() == name.casefold():
+                return value
+    except (TypeError, ValueError, AttributeError):
         return None
     return None
 
@@ -429,12 +429,17 @@ def retry_after_header(value: Any, *, json_key: str | None = None) -> float | No
         if found is not None:
             return found
         if json_key:
-            body = getattr(value, "json", None)
+            response = getattr(value, "response", None)
+            target = value if hasattr(value, "json") else response
+            body = getattr(target, "json", None)
             if callable(body):
                 try:
                     payload = body()
                 except Exception:
                     payload = None
+                if inspect.iscoroutine(payload):
+                    payload.close()  # sync helper cannot await an async response decoder
+                    return None
                 if isinstance(payload, dict):
                     return _parse_seconds(payload.get(json_key))
         return None
@@ -484,7 +489,13 @@ def http_status(*codes: int) -> Callable[[Any], bool]:
 
 
 # Never retried, even with ``on=BaseException``: retrying these hangs shutdown/cancellation.
-_NEVER_RETRY = (asyncio.CancelledError, KeyboardInterrupt, SystemExit, GeneratorExit)
+_NEVER_RETRY = (
+    asyncio.CancelledError,
+    KeyboardInterrupt,
+    SystemExit,
+    GeneratorExit,
+    CircuitOpenError,
+)
 
 
 def _parse_hint(value: Any) -> float | None:
@@ -552,6 +563,8 @@ class _Engine:
         self.retry_if = retry_if
         self.retry_if_result = retry_if_result
         self.on_retry = on_retry
+        if delay_from is not None and _core.is_async(delay_from):
+            raise TypeError("delay_from must be synchronous")
         self.delay_from = delay_from
         self.budget = budget
         self.log = _core.get_logger(logger)
@@ -604,11 +617,16 @@ class _Engine:
             )
 
     def _wait_for(self, attempt: int, exc: BaseException | None, result: Any = None) -> float:
-        if self.delay_from is not None and (exc is not None or result is not None):
+        if self.delay_from is not None:
             try:
                 # A result-based retry passes the rejected value, so a response-like
                 # object with Retry-After (or retry_after in its JSON) is honoured.
-                hint = _parse_hint(self.delay_from(exc if exc is not None else result))
+                raw_hint = self.delay_from(exc if exc is not None else result)
+                if inspect.iscoroutine(raw_hint):
+                    raw_hint.close()
+                    hint = None
+                else:
+                    hint = _parse_hint(raw_hint)
             except Exception:
                 self.log.debug("%s: delay_from raised; using backoff", self.name, exc_info=True)
                 hint = None
@@ -689,9 +707,10 @@ class _Engine:
         try:
             self.on_retry(state)
         except Exception:
-            self.log.exception(
-                "%s: on_retry hook failed; the original error/result is kept", self.name
-            )
+            with contextlib.suppress(Exception):
+                self.log.exception(
+                    "%s: on_retry hook failed; the original error/result is kept", self.name
+                )
 
     async def _arun_hook(self, state: RetryState) -> None:
         """`_run_hook` for async callers: an async hook is awaited, failures swallowed."""
@@ -700,9 +719,10 @@ class _Engine:
         try:
             await _maybe_await(self.on_retry(state))
         except Exception:
-            self.log.exception(
-                "%s: on_retry hook failed; the original error/result is kept", self.name
-            )
+            with contextlib.suppress(Exception):
+                self.log.exception(
+                    "%s: on_retry hook failed; the original error/result is kept", self.name
+                )
 
     # -- sync decisions -------------------------------------------------------------------
     def failure(self, attempt: int, exc: BaseException, started: float) -> float | None:

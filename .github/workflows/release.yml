@@ -66,6 +66,16 @@ jobs:
             fi
           fi
 
+      - name: Install Redis for the release integration gate
+        run: sudo apt-get update && sudo apt-get install -y redis-server
+
+      - name: Verify distributed coordination before publishing
+        env:
+          PW_REQUIRE_REDIS: "1"
+        run: |
+          uv sync --frozen --group dev
+          uv run --no-sync pytest tests/test_redis_backends.py tests/test_distributed_contracts.py tests/test_fork_safety.py
+
       - name: Build
         run: uv build
 

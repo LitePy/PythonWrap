@@ -114,3 +114,11 @@ The schedule uses **real time**. `fast_mode()` and `fake_clock()` affect only ba
 - [Throttle and debounce](throttle-debounce.md), [run_in_thread](run-in-thread.md)
 - [Retry](../resilience/retry.md) for retrying a single failing run
 - [API reference](../../api/periodic.md)
+
+## Forked workers
+
+A loop started in the parent does not have a running thread/task in a forked child.
+Python-wrap clears the inherited loop reference and local synchronization state; a
+sync periodic object warns when its inherited state is inspected/restarted. Start it
+explicitly in child-worker initialization if that worker should run it. No loop starts
+automatically at import or after fork. See [worker lifecycle](../../cookbook/framework-integrations.md#worker-lifecycle).

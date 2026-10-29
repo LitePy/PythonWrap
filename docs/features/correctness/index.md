@@ -32,3 +32,8 @@ Keep bad data out and keep objects consistent when something goes wrong halfway.
 
 - [Stacking decorators](../../get-started/stacking.md)
 - [Errors](../../get-started/errors.md)
+
+## Batch jobs
+
+[Batch outcomes and checkpoints](batch-processing.md) record per-item failures and
+support explicit resumption without promising exactly-once external writes.

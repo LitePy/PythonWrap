@@ -45,3 +45,8 @@ Find out how long calls take, how much they allocate, what they were called with
 
 - [Project-wide configuration](../configuration.md) for setting redaction names once.
 - [API reference](../../api/logs.md)
+
+## Application integration
+
+[Context, telemetry, health and slow calls](production.md) connect existing application
+logging and OpenTelemetry providers to the toolkit, with explicit health registration.

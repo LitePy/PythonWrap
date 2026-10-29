@@ -55,3 +55,8 @@ They combine: for example, stack `singleflight` under `memoize` so that two thre
 
 - [API reference](../../api/caching.md)
 - [Metrics and events](../observability/metrics.md): `cache.hit`, `cache.miss`, `cache.evicted`, `cache.stale` and `cache.refresh_failed`
+
+## Shared stores and credentials
+
+[RedisStore and expiring credentials](stores-and-credentials.md) cover optional
+cross-process result caching and one-refresh-at-a-time token loaders.

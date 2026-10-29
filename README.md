@@ -32,7 +32,7 @@ Retry (with `Retry-After`), circuit breaker, timeout, cache, rate limit, bulkhea
 - **Resilience that behaves.** `retry` honours `Retry-After`, a time budget and cancellation; a shared `deadline()` caps a whole request; `policy(...)` stacks the protections in the right order for you.
 - **Zero dependencies.** Pure Python, nothing to audit or pin.
 - **Typed.** Decorators preserve the wrapped signature (`ParamSpec`), and stacking keeps the exact type (`@retry` over `@memoize` still has `.cache_info()`). Ships `py.typed`, checked with `mypy --strict`.
-- **Sync and async, one API.** Works on `def`, `async def` and methods. Async wrappers stay coroutine functions and never block the event loop.
+- **Sync and async, one API.** Works on `def`, `async def` and methods. Async wrappers stay coroutine functions; built-in async paths avoid blocking the event loop. Synchronous external cache stores need the [documented I/O care](https://pythonwrap.readthedocs.io/en/latest/features/caching/stores-and-credentials/#synchronous-store-io).
 - **Fast.** Cache hits and validation skip signature binding on the hot path ([numbers](https://pythonwrap.readthedocs.io/en/latest/project/performance/)).
 - **Observable and testable.** One event stream for retries, cache, circuit, limiters and timeouts; `python_wrap.testing` makes tests instant and deterministic.
 - **Never configures your logging**, is thread-safe, and is tested on Python 3.10 to 3.14 on Linux, macOS and Windows.
@@ -46,6 +46,26 @@ uv add python-wrap
 ```
 
 Python 3.10 or newer.
+
+## New in 0.3
+
+The toolkit now includes production integration helpers alongside the existing decorators:
+
+| Need | API |
+| --- | --- |
+| Context on app logs and request/task lifecycle | `ContextFilter`, `bind`, `unbind`; optional Flask/FastAPI/Django/Celery adapters |
+| Shared result caching and credential refresh | `RedisStore`, `expiring` |
+| One configuration per dependency | `policies.register(...)`, `@resilient("name")`, composable error predicates |
+| Coordinate workers and duplicate deliveries | `single_instance`, owner-checked leases, `idempotent` |
+| Shared capacity and budgets | `RedisWindow`, `Quota`, `RedisBreakerState`, `Bulkhead(backend=...)` |
+| Background writes and resumable input processing | `buffered`, `process_batches`, `aprocess_batches` |
+| Operate integrations safely | Dynamic `switch`, `timed`, explicit health registry and optional OpenTelemetry adapter |
+
+The package still has **no runtime dependencies**. Optional adapters use your application's
+existing Redis client, SQLAlchemy engine, framework or OpenTelemetry providers. Distributed
+leases and stored results do not promise exactly-once external side effects after a crash
+or lease expiry. Read the [0.3 migration guide](https://pythonwrap.readthedocs.io/en/latest/project/migration-0.3/)
+for redaction matching changes, unknown cache counts and worker lifecycle.
 
 ## 30-second tour
 

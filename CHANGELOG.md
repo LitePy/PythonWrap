@@ -10,6 +10,55 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-29
+
+Production integration helpers, optional distributed backends, and fixes from the
+application fit review. The package keeps zero runtime dependencies; applications
+supply Redis clients, SQLAlchemy engines, frameworks and telemetry providers.
+
+### Added
+
+- `ContextFilter`, `bind` and `unbind` for context on application log records, plus optional
+  Flask, FastAPI/ASGI, Django and Celery lifecycle adapters.
+- Deep `redact` and `is_sensitive` helpers, opt-in `deep=True` argument redaction;
+  result-based `Retry-After` and `http_status`;
+  composable `Predicate`, `sqlstate`, `message_contains` and `in_cause_chain` helpers.
+- `RedisStore`, early-refresh `expiring` credential loaders, named `PolicyRegistry`,
+  global `policies`, and call-time `resilient` policy resolution.
+- Owner-checked local/Redis leases, `single_instance`, PostgreSQL advisory and SQL Server
+  application-lock adapters, and retained-result `idempotent` execution.
+- Redis sliding windows, run `Quota` budgets, shared breaker state, failure windows,
+  and lease-backed shared bulkhead capacity. `CircuitBreaker.force_open()` supports
+  maintenance and tests.
+- Bounded sync/async `buffered` writers, per-item batch processing outcomes and explicit
+  memory/Redis checkpoints, and dynamic environment/Redis switches.
+- Opt-in OpenTelemetry event spans and bounded-label metrics, `timed` slow-call detection,
+  an explicit weak health registry, `disabled`, `assert_retried` and `assert_cache_hit`.
+- Feature guides, public API pages, worker-lifecycle recipes and a 0.3 migration guide.
+
+### Fixed
+
+- Redaction no longer masks harmless author/activity-session names by substring.
+  Deep redaction masks cycles and uninspected containers at its depth limit.
+- Retry hints can inspect rejected return values; a failing ordinary `on_retry` hook
+  is logged instead of replacing the protected function's outcome.
+- Registered local locks and in-flight coordination are rebuilt after POSIX fork;
+  inherited periodic loops require explicit child startup.
+- External cache deadlines use the live wall clock. The unsafe handwritten Redis
+  recipe is replaced by a namespaced adapter that does not scan for statistics.
+
+### Behavior changes
+
+- Default log argument redaction matches whole name segments. Use
+  `redact_match="substring"` for the old mode, and explicitly list actual credentials
+  named `session_id` in applications where that name is sensitive.
+- `CacheInfo.currsize` may be None for an external store with an unknown size.
+- `CircuitOpenError` is never retried. Ordinary `on_retry` failures are swallowed after
+  logging; hook cancellation and process-exit exceptions still propagate.
+- Default coordination remains in-process. Shared backends are explicit, clients need
+  finite timeouts, and leases/idempotency cannot guarantee exactly-once effects across
+  crashes or lease expiry. See the migration and limitation guides.
+
 ## [0.2.1] - 2026-10-29
 
 Publishes the completed 0.2 release under a fresh version, preserving the older
@@ -317,6 +366,7 @@ Core:
 
 Initial release.
 
-[Unreleased]: https://github.com/LitePy/PythonWrap/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/LitePy/PythonWrap/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/LitePy/PythonWrap/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/LitePy/PythonWrap/compare/v0.1.0...v0.2.1
 [0.1.0]: https://github.com/LitePy/PythonWrap/releases/tag/v0.1.0

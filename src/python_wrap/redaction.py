@@ -66,6 +66,7 @@ def segments(name: str) -> tuple[str, ...]:
         ('http', 'api', 'key', '2')
     """
     spaced = _CAMEL.sub(" ", name)
+    spaced = re.sub(r"(?<=[a-zA-Z])(?=[0-9])|(?<=[0-9])(?=[a-zA-Z])", " ", spaced)
     return tuple(part for part in _SEPARATORS.split(spaced.lower()) if part)
 
 
@@ -137,7 +138,7 @@ def is_sensitive(
         if joined == "".join(wanted):
             # "apikey" as a single segment matches the "api_key" fragment.
             return True
-        if fragment.lower() in _EXACT_ONLY:
+        if fragment.lower() in _EXACT_ONLY and all(item in chosen for item in DEFAULT_REDACT):
             # Ambiguous words only mask the bare name (or its plural), never a compound.
             if joined in (fragment.lower(), f"{fragment.lower()}s", f"{fragment.lower()}es"):
                 return True
@@ -164,7 +165,7 @@ def redact(
     including nested containers. Lists, tuples, sets and frozensets are rebuilt with the
     same type where possible. Everything else is returned unchanged (no attempt is made
     to introspect arbitrary objects). Recursion stops at ``max_depth``; deeper containers
-    are returned as-is rather than risking a cycle.
+    are masked entirely, and cycles are masked, so truncation cannot expose secrets.
 
     Args:
         obj: The value to copy.
@@ -185,7 +186,7 @@ def redact(
     if match not in ("segment", "substring"):
         raise ValueError(f"match must be 'segment' or 'substring', got {match!r}")
     chosen = DEFAULT_REDACT if fragments is None else tuple(fragments)
-    return _walk(obj, chosen, match, max_depth, mask, 0)
+    return _walk(obj, chosen, match, max_depth, mask, 0, set())
 
 
 def _walk(
@@ -195,22 +196,33 @@ def _walk(
     max_depth: int,
     mask: str,
     depth: int,
+    ancestors: set[int],
 ) -> Any:
-    if depth > max_depth:
+    container = isinstance(obj, (Mapping, list, tuple, set, frozenset))
+    if container and (depth > max_depth or id(obj) in ancestors):
+        return mask
+    if not container:
         return obj
+    ancestors = ancestors | {id(obj)}
     if isinstance(obj, Mapping):
         return {
             key: (
                 mask
                 if is_sensitive(key, fragments, match=match)
-                else _walk(value, fragments, match, max_depth, mask, depth + 1)
+                else _walk(value, fragments, match, max_depth, mask, depth + 1, ancestors)
             )
             for key, value in obj.items()
         }
     if isinstance(obj, list):
-        return [_walk(item, fragments, match, max_depth, mask, depth + 1) for item in obj]
+        return [
+            _walk(item, fragments, match, max_depth, mask, depth + 1, ancestors) for item in obj
+        ]
     if isinstance(obj, tuple):
-        return tuple(_walk(item, fragments, match, max_depth, mask, depth + 1) for item in obj)
+        return tuple(
+            _walk(item, fragments, match, max_depth, mask, depth + 1, ancestors) for item in obj
+        )
     if isinstance(obj, (set, frozenset)):
-        return type(obj)(_walk(item, fragments, match, max_depth, mask, depth + 1) for item in obj)
+        return type(obj)(
+            _walk(item, fragments, match, max_depth, mask, depth + 1, ancestors) for item in obj
+        )
     return obj

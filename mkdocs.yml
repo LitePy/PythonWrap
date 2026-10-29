@@ -154,9 +154,11 @@ nav:
           - Fallback and suppress: features/resilience/fallback.md
           - Hedged requests: features/resilience/hedge.md
           - Policies: features/resilience/policies.md
+          - Named policies and predicates: features/resilience/named-policies.md
       - Caching and batching:
           - features/caching/index.md
           - Memoize: features/caching/memoize.md
+          - Shared stores and credentials: features/caching/stores-and-credentials.md
           - Once: features/caching/once.md
           - Cached property: features/caching/cached-property.md
           - Singleflight: features/caching/singleflight.md
@@ -169,18 +171,24 @@ nav:
           - Async helpers: features/concurrency/async-helpers.md
           - Run in a thread: features/concurrency/run-in-thread.md
           - Periodic tasks: features/concurrency/periodic.md
+          - Leases and idempotency: features/concurrency/leases-and-idempotency.md
+          - Shared limits and quotas: features/concurrency/shared-limits.md
+          - Buffered writes: features/concurrency/buffered-writes.md
       - Observability:
           - features/observability/index.md
           - Logging: features/observability/logging.md
           - Audit: features/observability/audit.md
           - Timing and profiling: features/observability/timing.md
           - Metrics and events: features/observability/metrics.md
+          - Context, telemetry and health: features/observability/production.md
       - Correctness:
           - features/correctness/index.md
           - Validation: features/correctness/validation.md
           - State and transactions: features/correctness/state.md
+          - Batch processing: features/correctness/batch-processing.md
       - Developer tools: features/devtools.md
       - Configuration: features/configuration.md
+      - Dynamic switches: features/switches.md
   - Testing: testing/index.md
   - Cookbook:
       - cookbook/index.md
@@ -192,6 +200,7 @@ nav:
       - DataLoader-style batching: cookbook/dataloader-batching.md
       - Testing your code: cookbook/testing-your-code.md
       - Observability: cookbook/observability.md
+      - Framework integrations: cookbook/framework-integrations.md
   - API reference:
       - api/index.md
       - Resilience:
@@ -200,28 +209,49 @@ nav:
           - Deadline: api/deadline.md
           - Hedging: api/hedging.md
           - Policies: api/policy.md
+          - Named registry: api/policies.md
+          - Predicates: api/predicates.md
       - Caching and batching:
           - Caching: api/caching.md
           - Batching: api/batching.md
+          - Redis stores: api/stores.md
+          - Expiring credentials: api/credentials.md
+          - Buffered writers: api/buffering.md
+          - Batch processing: api/processing.md
       - Concurrency and limits:
           - Concurrency: api/concurrency.md
           - Async helpers: api/aio.md
           - Bulkhead: api/bulkhead.md
           - Periodic: api/periodic.md
+          - Coordination: api/coordination.md
+          - Idempotency: api/idempotency.md
+          - Quotas and shared windows: api/quotas.md
+          - Shared backends: api/shared.md
       - Observability:
           - Logging and audit: api/logs.md
           - Timing and profiling: api/timing.md
           - Metrics: api/metrics.md
           - Events: api/events.md
+          - Redaction: api/redaction.md
+          - OpenTelemetry adapter: api/observability.md
+          - Health registry: api/health.md
+          - Slow calls: api/slow.md
       - Correctness:
           - Validation: api/validation.md
           - State: api/state.md
       - Configuration: api/config.md
       - Developer tools: api/devtools.md
+      - Switches: api/switches.md
+      - Framework adapters:
+          - Flask: api/flask.md
+          - FastAPI and ASGI: api/fastapi.md
+          - Django: api/django.md
+          - Celery: api/celery.md
       - Testing helpers: api/testing.md
       - Errors: api/errors.md
   - Project:
       - Performance: project/performance.md
       - Limitations: project/limitations.md
       - Migrating to 0.2: project/migration.md
+      - Migrating to 0.3: project/migration-0.3.md
       - Changelog: project/changelog.md

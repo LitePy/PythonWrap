@@ -283,44 +283,29 @@ What a store can rely on, and what it must do:
 - Exceptions raised by the store propagate to the caller.
 - `maxsize` (LRU) only applies to the built-in store: passing both `store=` and `maxsize=` raises `TypeError`.
 
-A sketch of a Redis adapter, using the `redis` package (not a python-wrap dependency):
+Use the shipped `RedisStore` when a cache needs to be shared between workers:
 
 <!-- skip -->
 ```python
-import pickle
 import redis
-from python_wrap import memoize
+from python_wrap import RedisStore, memoize
 
-class RedisStore:
-    def __init__(self, client: redis.Redis, prefix: str) -> None:
-        self.client, self.prefix = client, prefix
+client = redis.Redis(socket_timeout=2, socket_connect_timeout=2)
 
-    def _key(self, key) -> bytes:
-        return self.prefix.encode() + pickle.dumps(key)  # keys are tuples, not strings
-
-    def get(self, key):
-        raw = self.client.get(self._key(key))
-        return None if raw is None else pickle.loads(raw)
-
-    def set(self, key, entry, ttl):
-        expire = None if ttl is None else max(1, int(ttl) + 1)
-        self.client.set(self._key(key), pickle.dumps(entry), ex=expire)
-
-    def delete(self, key):
-        return bool(self.client.delete(self._key(key)))
-
-    def clear(self):
-        for k in self.client.scan_iter(match=self.prefix + "*"):
-            self.client.delete(k)
-
-    def __len__(self):
-        return sum(1 for _ in self.client.scan_iter(match=self.prefix + "*"))
-
-@memoize(store=RedisStore(redis.Redis(), prefix="pricing:"), ttl=300)
-def price(sku: str) -> float: ...
+@memoize(store=RedisStore(client, prefix="pricing:v1:", fail_open=False), ttl=300)
+def price(sku: str) -> float:
+    return load_price(sku)
 ```
 
-`pickle.dumps` of a key is only stable when the arguments pickle deterministically (strings, numbers, tuples of them), so prefer simple arguments or a `key=` that returns a string. Only unpickle data from a store you trust.
+Keys are hashed by default and `clear()` escapes the namespace before scanning it.
+`cache_info().currsize` is **None** for `RedisStore`: statistics do not scan Redis.
+External deadlines use the live Unix wall clock. The adapter defaults to pickle for
+values, so only decode data from a trusted store or provide a safe application serializer.
+
+Store methods are synchronous and a network-backed store can block an async event loop.
+Configure finite client timeouts and use a local cache for latency-sensitive async code.
+See [shared caches and credentials](stores-and-credentials.md) for serialization,
+failure modes, unknown counts and credential refresh.
 
 ## Per-instance method caches
 

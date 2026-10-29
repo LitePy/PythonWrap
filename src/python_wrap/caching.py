@@ -10,7 +10,6 @@ import datetime
 import functools
 import inspect
 import threading
-import time
 import weakref
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Coroutine, Hashable
@@ -26,7 +25,7 @@ from typing import (
     runtime_checkable,
 )
 
-from python_wrap import _core
+from python_wrap import _core, _fork
 
 __all__ = [
     "CacheInfo",
@@ -56,7 +55,7 @@ class CacheInfo(NamedTuple):
     hits: int
     misses: int
     maxsize: int | None
-    currsize: int
+    currsize: int | None
 
 
 class Memoized(Protocol[P, R_co]):
@@ -396,10 +395,7 @@ def _fast_arity(func: Callable[..., Any], typed: bool, key: Callable[..., Hashab
 # (equal to ``expires`` unless ``stale_ttl`` is set).
 _EXPIRED: Any = ()
 
-# Deadlines in entries given to a custom `CacheStore` are Unix-epoch seconds, so processes
-# sharing one store agree on them. They are still read through ``_core.monotonic()`` (plus
-# this constant offset) so ``fake_clock`` drives them too.
-_WALL_OFFSET = time.time() - time.monotonic()
+# External-store deadlines use the live Unix wall clock; fake_clock patches it too.
 
 
 @runtime_checkable
@@ -414,6 +410,10 @@ class CacheStore(Protocol):
     * ``delete(key)`` removes the entry and returns True if there was one.
     * ``clear()`` removes every entry.
     * ``__len__()`` is the number of stored entries (``cache_info().currsize``).
+      Network adapters may additionally expose ``size() -> int | None``; memoize uses
+      that method when present. Return None for an unknown count rather than scanning
+      a remote database on every stats read. ``__len__`` must still return a nonnegative
+      integer for normal Python compatibility.
 
     Contract:
 
@@ -677,7 +677,7 @@ def memoize(
     else:
 
         def now() -> float:
-            return _core.monotonic() + _WALL_OFFSET
+            return _core.wall_time()
 
     def decorate(f: Callable[..., Any]) -> Any:
         build_key = _make_key_builder(f, typed, key, skip_first=per_instance)
@@ -694,7 +694,7 @@ def memoize(
         ] = weakref.WeakKeyDictionary()
         refreshing: set[Hashable] = set()  # sync keys being refreshed in a thread
         background: set[asyncio.Future[Any]] = set()  # strong refs to refresh tasks
-        lock = threading.Lock()
+        lock = _fork.ForkSafeLock()
         guard: Any = lock if builtin else contextlib.nullcontext()
         hits = misses = gen = 0
 
@@ -898,6 +898,7 @@ def memoize(
 
         def cache_info() -> CacheInfo:
             expired = 0
+            size: int | None = 0
             with lock:
                 if per_instance:
                     buckets = live_buckets()
@@ -909,7 +910,8 @@ def memoize(
                     size = len(main)
                 info = (hits, misses)
             if not builtin:
-                size = len(main)
+                size_fn = getattr(main, "size", None)
+                size = size_fn() if callable(size_fn) else len(main)
             if _core.listeners:
                 for _ in range(expired):
                     report_expired()
@@ -1168,6 +1170,19 @@ def memoize(
         wrapper.cache_delete = cache_delete
         wrapper.cache_contains = cache_contains
         wrapper.cache_get = cache_get
+
+        def reset_after_fork() -> None:
+            nonlocal hits, misses, gen
+            if builtin:
+                main.clear()
+                instances.clear()
+            inflight.clear()
+            refreshing.clear()
+            background.clear()
+            hits = misses = 0
+            gen += 1
+
+        wrapper.__dict__["_fork_reset"] = _fork.register_reset(reset_after_fork)
         wrapper.cache_parameters = cache_parameters
         return wrapper
 
@@ -1266,7 +1281,7 @@ def once(func: Callable[..., Any] | None = None, /) -> Any:
     """
 
     def decorate(f: Callable[..., Any]) -> Any:
-        lock = threading.RLock()
+        lock = _fork.ForkSafeRLock()
         # "flight" is the run in progress (shared by every thread and event loop).
         state: dict[str, Any] = {"done": False, "result": None, "gen": 0, "flight": None}
 
@@ -1338,6 +1353,7 @@ def once(func: Callable[..., Any] | None = None, /) -> Any:
                 state.update(done=False, result=None, gen=state["gen"] + 1, flight=None)
                 wrapper.called = False
 
+        wrapper.__dict__["_fork_reset"] = _fork.register_reset(reset)
         wrapper.reset = reset
         return wrapper
 
@@ -1361,24 +1377,30 @@ class _PropState:
     pickles as an empty state so locks never end up in a pickle.
     """
 
-    __slots__ = ("entries", "gens", "locks", "owner_id", "tasks")
+    __slots__ = ("__weakref__", "entries", "gens", "locks", "owner_id", "tasks")
 
     def __init__(self, owner_id: int) -> None:
         self.owner_id = owner_id
         self.entries: dict[str, tuple[Any, float | None]] = {}
-        self.locks: dict[str, threading.RLock] = {}
+        self.locks: dict[str, _fork.ForkSafeRLock] = {}
         self.gens: dict[str, int] = {}
         self.tasks: weakref.WeakKeyDictionary[
             asyncio.AbstractEventLoop, dict[str, asyncio.Future[Any]]
         ] = weakref.WeakKeyDictionary()
+        _fork.register(self)
+
+    def _reset_after_fork(self) -> None:
+        self.entries.clear()
+        self.tasks.clear()
+        self.gens.clear()
 
     def __reduce__(self) -> tuple[Callable[[], _PropState], tuple[()]]:
         return (_new_state, ())
 
-    def lock_for(self, name: str) -> threading.RLock:
+    def lock_for(self, name: str) -> _fork.ForkSafeRLock:
         lock = self.locks.get(name)
         if lock is None:
-            lock = self.locks.setdefault(name, threading.RLock())  # atomic: one winner
+            lock = self.locks.setdefault(name, _fork.ForkSafeRLock())  # atomic: one winner
         return lock
 
     def drop(self, name: str) -> bool:

@@ -51,11 +51,12 @@ import asyncio
 import functools
 import inspect
 import logging
-import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, fields
 from typing import Any, NoReturn, ParamSpec, TypeVar
+
+from python_wrap import _fork
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -68,6 +69,9 @@ LoggerLike = logging.Logger | str | None
 # Time sources, patched by tests. Call them as ``_core.monotonic()``.
 monotonic: Callable[[], float] = time.monotonic
 perf_counter: Callable[[], float] = time.perf_counter
+# Wall-clock source for values shared across processes (cache deadlines in an external
+# store). Unlike an offset frozen at import, this follows an NTP step.
+wall_time: Callable[[], float] = time.time
 
 
 @dataclass
@@ -81,7 +85,7 @@ class Overrides:
 
 
 overrides = Overrides()
-overrides_lock = threading.RLock()
+overrides_lock = _fork.ForkSafeRLock()
 
 
 def set_overrides(**values: Any) -> dict[str, Any]:
@@ -197,7 +201,7 @@ class Event:
 
 
 listeners: list[Callable[[Event], None]] = []
-listeners_lock = threading.Lock()
+listeners_lock = _fork.ForkSafeLock()
 
 
 def emit(name: str, function: str, **fields: Any) -> None:

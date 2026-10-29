@@ -73,7 +73,10 @@ assert args["ssn"] == "***" and args["password"] == "***" and args["name"] == "a
     An exception raised by the sink is logged and swallowed, so a broken audit store never breaks the audited function. Exceptions from the function itself are recorded and re-raised.
 
 !!! warning "Redaction is by name"
-    Values are not scanned. A secret passed in a parameter called `data` is recorded as is; add the name with `redact_extra=` or rename the parameter.
+    Arbitrary string values are not scanned. Top-level redaction is the default: a secret
+    string passed as `data` is recorded as is, so add that name with `redact_extra=` or
+    rename it. For structured arguments, `deep=True` also masks sensitive nested mapping
+    keys. See [nested redaction](logging.md#nested-payloads).
 
 ## See also
 

@@ -94,7 +94,7 @@ def test_redact_walks_nested_containers() -> None:
 
 def test_redact_depth_limit_and_validation() -> None:
     payload = {"a": {"b": {"password": "p"}}}
-    assert redact(payload, max_depth=1) == {"a": {"b": {"password": "p"}}}
+    assert redact(payload, max_depth=1) == {"a": {"b": "***"}}
     with pytest.raises(ValueError):
         redact(payload, max_depth=-1)
 
@@ -140,3 +140,30 @@ def test_audit_redact_match_option() -> None:
 
     f("alice")
     assert records[0].arguments == {"author": "***"}
+
+
+def test_cycles_depth_and_explicit_custom_segments_do_not_leak():
+    payload = {"password": "secret"}
+    payload["cycle"] = payload
+    assert redact(payload) == {"password": "***", "cycle": "***"}
+    assert is_sensitive("training_session", ["session"])
+    assert is_sensitive("password2")
+    assert is_sensitive("v2Password")
+
+
+def test_deep_log_and_audit_use_custom_fragments_without_mutation(caplog):
+    caplog.set_level(logging.INFO, logger="python_wrap")
+    records = []
+
+    @audit(deep=True, redact_extra=["ssn"], sink=records.append)
+    @log_args(deep=True, redact_extra=["ssn"], level=logging.INFO)
+    def work(payload):
+        return 7
+
+    payload = {"author": "ana", "rows": [{"password": "hidden-pass", "ssn": "hidden-id"}]}
+    assert work(payload) == 7
+    assert records[0].arguments == {
+        "payload": {"author": "ana", "rows": [{"password": "***", "ssn": "***"}]}
+    }
+    assert "hidden-pass" not in caplog.text and "hidden-id" not in caplog.text
+    assert payload["rows"][0]["password"] == "hidden-pass"

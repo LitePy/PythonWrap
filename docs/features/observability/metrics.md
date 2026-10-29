@@ -213,3 +213,10 @@ With the standard library instead, call `logging.getLogger("myapp.events").info(
 - [Timing](timing.md), [Logging](logging.md)
 - [Retry](../resilience/retry.md), [Circuit breaker](../resilience/circuit-breaker.md) and the other pages that list the events they emit
 - [API reference](../../api/metrics.md), [events API](../../api/events.md)
+
+## Slow calls and provider integration
+
+`timing.slow` is emitted by `timed` when a call reaches its configured threshold;
+its `seconds` field contains elapsed seconds. The
+[OpenTelemetry adapter](production.md#opentelemetry-events-and-metrics) supplies stable
+metrics and bounded function labels without reading user arguments or results.

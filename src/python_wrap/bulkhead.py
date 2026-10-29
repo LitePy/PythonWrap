@@ -19,7 +19,7 @@ from collections.abc import Callable
 from types import TracebackType
 from typing import Any, Concatenate, NoReturn, ParamSpec, Protocol, TypeVar, cast, overload
 
-from python_wrap import _core
+from python_wrap import _core, _fork
 from python_wrap._core import F, P, R
 from python_wrap.aio import _cancel_and_settle
 from python_wrap.errors import BulkheadFull
@@ -140,6 +140,8 @@ class Bulkhead:
         max_waiting: int | None = None,
         timeout: float | None = None,
         name: str | None = None,
+        backend: Any = None,
+        ttl: float = 60,
     ) -> None:
         if isinstance(max_concurrent, bool) or not isinstance(max_concurrent, int):
             raise ValueError(f"max_concurrent must be an integer, got {max_concurrent!r}")
@@ -149,16 +151,36 @@ class Bulkhead:
             raise ValueError(f"max_waiting must be >= 0 or None, got {max_waiting}")
         if timeout is not None and timeout < 0:
             raise ValueError(f"timeout must be >= 0 or None, got {timeout}")
+        self._shared: Any = None
+        if backend is not None:
+            if not name:
+                raise ValueError("shared bulkheads require an explicit name")
+            from python_wrap.shared import SharedBulkhead
+
+            self._shared = SharedBulkhead(
+                max_concurrent,
+                backend=backend,
+                name=name,
+                max_waiting=max_waiting,
+                timeout=timeout,
+                ttl=ttl,
+            )
         self.max_concurrent = max_concurrent
         self.max_waiting = max_waiting
         self.timeout = timeout
         self.name = name
-        self._lock = threading.Lock()
+        self._lock = _fork.ForkSafeLock()
         self._thread_semaphore = threading.BoundedSemaphore(max_concurrent)
         self._thread_pool = _Pool()
         self._loop_pools: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, _AsyncPool] = (
             weakref.WeakKeyDictionary()
         )
+        _fork.register(self)
+
+    def _reset_after_fork(self) -> None:
+        self._thread_semaphore = threading.BoundedSemaphore(self.max_concurrent)
+        self._thread_pool = _Pool()
+        self._loop_pools.clear()
 
     # -- introspection ------------------------------------------------------------------
 
@@ -168,12 +190,16 @@ class Bulkhead:
     @property
     def active(self) -> int:
         """Number of calls currently holding a slot (threads and every loop together)."""
+        if self._shared is not None:
+            return int(self._shared.active)
         with self._lock:
             return sum(pool.active for pool in self._pools())
 
     @property
     def waiting(self) -> int:
         """Number of callers currently queued for a slot (threads and every loop)."""
+        if self._shared is not None:
+            return int(self._shared.waiting)
         with self._lock:
             return sum(pool.waiting for pool in self._pools())
 
@@ -232,6 +258,9 @@ class Bulkhead:
         Raises:
             BulkheadFull: The queue is full, or `timeout` expired.
         """
+        if self._shared is not None:
+            self._shared.acquire()
+            return
         pool = self._thread_pool
         semaphore = self._thread_semaphore
         if not semaphore.acquire(blocking=False):
@@ -249,6 +278,9 @@ class Bulkhead:
 
     def release(self) -> None:
         """Give back a slot taken with `acquire`."""
+        if self._shared is not None:
+            self._shared.release()
+            return
         # Decrement `active` before freeing the permit, so a caller that takes the slot
         # right away never sees more than `max_concurrent` active.
         pool = self._thread_pool
@@ -269,7 +301,10 @@ class Bulkhead:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
-        self.release()
+        if self._shared is not None:
+            self._shared.release(exc_type, exc, tb)
+        else:
+            self.release()
 
     # -- async --------------------------------------------------------------------------
 
@@ -282,11 +317,18 @@ class Bulkhead:
             return pool
 
     async def acquire_async(self) -> None:
-        """Take a slot in the running event loop. Prefer `async with bulkhead:`.
+        """Take a local slot in the running event loop.
+
+        Shared backends require `async with bulkhead` so remote release can be awaited.
 
         Raises:
             BulkheadFull: The queue is full, or `timeout` expired.
+            RuntimeError: Manual acquisition is requested for a shared backend.
         """
+        if self._shared is not None:
+            # release_async is intentionally synchronous for the established local API.
+            # Reject manual shared acquisition before taking a remotely renewed lease.
+            raise RuntimeError("use async with bulkhead for a shared backend")
         pool = self._loop_pool()
         semaphore = pool.semaphore
         if semaphore.locked():
@@ -304,12 +346,17 @@ class Bulkhead:
 
     def release_async(self) -> None:
         """Give back a slot taken with `acquire_async` (from the same event loop)."""
+        if self._shared is not None:
+            raise RuntimeError("use async with bulkhead for a shared backend")
         pool = self._loop_pool()
         self._exit(pool)
         pool.semaphore.release()
 
     async def __aenter__(self) -> Bulkhead:
-        await self.acquire_async()
+        if self._shared is not None:
+            await self._shared.acquire_async()
+        else:
+            await self.acquire_async()
         return self
 
     async def __aexit__(
@@ -318,7 +365,10 @@ class Bulkhead:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
-        self.release_async()
+        if self._shared is not None:
+            await self._shared.release_async(exc_type, exc, tb)
+        else:
+            self.release_async()
 
     # -- decorator ----------------------------------------------------------------------
 

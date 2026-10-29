@@ -66,8 +66,8 @@ The wait before attempt `n + 1` is `min(delay * backoff ** (n - 1), max_delay) +
 | `on` | `Exception` | Exception type(s) that trigger a retry. Anything else propagates immediately. |
 | `retry_if` | `None` | Extra predicate on the exception; retry only if it returns `True`. May be `async def` for async functions. |
 | `retry_if_result` | `None` | Predicate on the return value; `True` means "retry". The last value is returned when retries run out. May be `async def` for async functions. |
-| `on_retry` | `None` | Called with a `RetryState` before each wait. May be `async def` for async functions. |
-| `delay_from` | `None` | `exc -> seconds or None`: exact wait for this attempt (e.g. `Retry-After`). |
+| `on_retry` | `None` | Called with a `RetryState` before each wait. May be async for async functions. Ordinary hook errors are logged and swallowed. |
+| `delay_from` | `None` | Exception or rejected result → seconds or None: exact wait for this attempt (e.g. `Retry-After`). |
 | `budget` | `None` | A `RetryBudget` shared with other retried code, so retries stay a fraction of traffic. |
 | `logger` | package logger | Logger or logger name for the per-retry message. |
 | `log_level` | `WARNING` | Level of the per-retry message; `None` disables it. |
@@ -239,9 +239,9 @@ assert stats is not None and stats.budget_exhausted > 0
 
 ## Honouring Retry-After
 
-Servers that answer 429 or 503 often say how long to wait. Pass `delay_from` a function that maps the exception to a number of seconds, or to `None` to fall back to the normal backoff. A number is the exact wait for that attempt (no backoff, no jitter), still capped by `max_delay` and `max_time`.
+Servers that answer 429 or 503 often say how long to wait. Pass `delay_from` a synchronous function that maps the exception or rejected result to a number of seconds, or to `None` to fall back to the normal backoff. A number is the exact wait for that attempt (no backoff, no jitter), still capped by `max_delay` and `max_time`.
 
-`retry_after_header` reads `exc.retry_after` or `exc.response.headers["Retry-After"]` (seconds or an HTTP-date) and never raises, so it works with `httpx.HTTPStatusError`, `requests.HTTPError` and similar without importing them. The example uses a stand-in exception with the same shape:
+`retry_after_header` reads `.retry_after` or a `Retry-After` header on the object itself or its `.response` (seconds or an HTTP-date). It never raises, so it works with returned responses and `httpx.HTTPStatusError`/`requests.HTTPError` without importing those clients. The example uses a stand-in exception with the same shape:
 
 ```python
 from python_wrap import retry
@@ -268,7 +268,47 @@ def fetch() -> str:
 assert fetch() == "payload"
 ```
 
-Any function works as `delay_from`, e.g. `delay_from=lambda exc: getattr(exc, "wait", None)`. If it raises, the normal backoff is used.
+A callback that returns None or raises uses normal backoff. An exception-only callback
+should check the input type now that result retries can pass a response or any other
+rejected value, including None.
+
+### Returned responses
+
+`http_status` matches `.status_code` or `.status`, so HTTP clients need not raise just
+to retry a 429/503 response:
+
+```python
+from types import SimpleNamespace
+from python_wrap import http_status, retry, retry_after_header
+from python_wrap.testing import fake_clock
+
+responses = iter([
+    SimpleNamespace(status_code=429, headers={"Retry-After": "7"}),
+    SimpleNamespace(status_code=200, headers={}),
+])
+
+@retry(retry_if_result=http_status(429, 503), delay_from=retry_after_header,
+       max_attempts=2, delay=1)
+def request():
+    return next(responses)
+
+with fake_clock() as clock:
+    assert request().status_code == 200
+assert clock.sleeps == [7.0]
+```
+
+For APIs with a body field, use
+`delay_from=lambda outcome: retry_after_header(outcome, json_key="retry_after")`.
+JSON decoding must be synchronous; this sync hint helper cannot await an async
+response decoder. Hints still respect `max_delay`, `max_time`, and a surrounding deadline.
+
+An ordinary `on_retry` exception is logged and swallowed. This prevents a failed
+bookkeeping hook from replacing the original failure or rejected result. Cancellation,
+KeyboardInterrupt and SystemExit still propagate. Use `retry_if` to decide whether a
+failure is retryable, rather than intentionally raising from a notification hook.
+
+`CircuitOpenError` is never retried in 0.3, even with a broad `on=` filter.
+See [named policies and composable predicates](named-policies.md) for driver-error rules.
 
 ## Time budget
 
