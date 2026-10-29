@@ -25,11 +25,18 @@ EVENT_NAMES: Mapping[str, str] = MappingProxyType(
     {
         "retry.attempt_failed": (
             "An attempt failed and another will follow. Fields: attempt (int, 1-based), "
-            "exception (BaseException), next_delay (float seconds before the next attempt)."
+            "exception (BaseException, or None for a value rejected by retry_if_result), "
+            "next_delay (float seconds before the next attempt)."
         ),
         "retry.succeeded": "The call finally succeeded. Fields: attempts (int, total made).",
+        "retry.budget_exhausted": (
+            "A shared RetryBudget refused another retry; the call stops (retry.gave_up "
+            "follows). Fields: attempts (int), exception (BaseException, or None when "
+            "the last attempt returned a value rejected by retry_if_result)."
+        ),
         "retry.gave_up": (
-            "Attempts were exhausted. Fields: attempts (int), exception (BaseException)."
+            "Attempts were exhausted. Fields: attempts (int), exception (BaseException, or "
+            "None when the last attempt returned a value rejected by retry_if_result)."
         ),
         "timeout.expired": "A call exceeded its time limit. Fields: seconds (float, the limit).",
         "circuit.state_changed": (
@@ -49,8 +56,24 @@ EVENT_NAMES: Mapping[str, str] = MappingProxyType(
         "cache.hit": "A cached value was returned. No fields.",
         "cache.miss": "No cached value; the function ran. No fields.",
         "cache.evicted": "An entry left the cache. Fields: reason (str): 'lru' or 'ttl'.",
+        "cache.stale": (
+            "A stale value was served (stale-while-revalidate) and a background refresh "
+            "started. No fields."
+        ),
+        "cache.refresh_failed": (
+            "A background refresh failed; the stale value is kept. "
+            "Fields: exception (BaseException)."
+        ),
         "bulkhead.rejected": (
             "A call was refused because the bulkhead is full. Fields: active (int), waiting (int)."
+        ),
+        "periodic.run": (
+            "A background run of a periodic function finished. function is its name. "
+            "Fields: run (int, 1-based), seconds (float, how long it took)."
+        ),
+        "periodic.failed": (
+            "A background run of a periodic function raised. Fields: run (int), "
+            "exception (BaseException)."
         ),
     }
 )

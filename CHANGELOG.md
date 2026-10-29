@@ -17,7 +17,7 @@ A ground-up rework and a much larger toolkit. Every decorator works on plain fun
 configures logging. Several
 v0.1 decorators that did not do what their names promised (`transactional`, `revert_on_failure`,
 async `timing`) now work. See the
-[migration guide](https://python-wrap.readthedocs.io/en/latest/migration/) for the full upgrade
+[migration guide](https://pythonwrap.readthedocs.io/en/latest/project/migration/) for the full upgrade
 path.
 
 ### Highlights
@@ -70,6 +70,16 @@ path.
 
 Resilience:
 
+- `RetryBudget` (with `RetryBudgetStats`): one Finagle/Envoy-style retry allowance shared
+  across functions, threads and event loops via `retry(budget=...)`, `retrying(budget=...)` or
+  `configure(retry={"budget": ...})`. When it is spent, retrying stops at once and emits
+  `retry.budget_exhausted`, which prevents retry storms against a failing dependency.
+- `retry_if_result=` on `retry`/`retrying` retries when the function returns a matching value;
+  once retries run out the last value is returned. `retrying` blocks set `attempt.result`.
+- For `async def` functions, `retry_if`, `retry_if_result` and `on_retry` may be async and are
+  awaited; `async with attempt:` is supported in `retrying`.
+- `timeout(..., cleanup_grace=)` bounds async cleanup after the limit: the call is cancelled,
+  given the grace to finish its cleanup, then `TimeoutExpired` is raised.
 - `retry`: `delay_from=` (with the `retry_after_header` helper for `Retry-After`), `max_time=`,
   `log_level=` and `log_exc_info=`; `retry_stats(func)` and `RetryStats`; `retrying(...)` /
   `Retrying` for retrying an inline block (`for` / `async for` with `with attempt`); retries
@@ -85,6 +95,11 @@ Resilience:
 
 Async toolkit and concurrency:
 
+- `periodic(interval, *, jitter=, initial_delay=, max_runs=, on_error=)` runs a sync function in
+  a daemon thread, or an async function as a task, every N seconds without drift (missed ticks
+  are skipped). The function stays callable and gains `start()`, `stop()`, `running`, `runs`,
+  `last_error` and `running_in_background()` for clean shutdown. Events `periodic.run` and
+  `periodic.failed`.
 - `python_wrap.aio`: `gather_limit`, `map_async` and `amap_iter` (bounded concurrency, lazy
   input, ordered results; everything is cancelled and awaited on error, cancellation or early
   exit), `race` (first success wins; `RaceFailed`) and `run_sync` (refuses to run inside a running
@@ -98,12 +113,24 @@ Async toolkit and concurrency:
 
 Caching:
 
+- `memoize(ttl=..., stale_ttl=...)`: stale-while-revalidate. After `ttl` a stale value is served
+  at once while one background refresh runs (a task for async functions, a daemon thread for
+  sync ones); a failed refresh keeps the stale value and is logged. Events `cache.stale` and
+  `cache.refresh_failed`.
+- `memoize(store=...)` and the `CacheStore` protocol: keep entries in any store (a dict, Redis,
+  ...); the `cache_*` helpers work against it.
+- `memoize(per_instance=True)`: per-instance method caches held through weak references, so
+  instances stay collectable and need not be hashable.
 - `cached_property(ttl=)` (thread-safe, `async def` getters, `invalidate()`).
 - `memoize`: `cache_exceptions=` / `exception_ttl=`, a per-item `ttl=` callable, and
   `cache_contains()`, `cache_get()` and `cache_parameters()`.
 
 Observability, configuration and testing:
 
+- `trace(otel=True, span_name=...)` wraps calls in an OpenTelemetry span (sync and async) with
+  `code.function`, `code.namespace` and `python_wrap.context.*` attributes and exception
+  recording. `opentelemetry-api` is imported lazily and only when asked for; python-wrap still
+  has no runtime dependencies.
 - `count_calls`: calls, errors, in-flight, mean, p50, p95 and p99 per function.
 - `python_wrap.events`: `subscribe()`, `listening()`, `filter_events()` and `EVENT_NAMES`, one hook
   for retry, cache, circuit, limiter, bulkhead and timeout events (Prometheus, OpenTelemetry and
@@ -131,6 +158,9 @@ Observability, configuration and testing:
 
 Core:
 
+- Decorated functions, including `periodic` objects and `wrap_methods` classes, pickle by
+  reference, so they work with `multiprocessing` and `ProcessPoolExecutor` under the "spawn"
+  start method. Cache, limiter and breaker state is per worker process.
 - `retry`: `backoff`, `max_delay`, `jitter`, `on=` exception filter, `retry_if=` predicate,
   `on_retry=` hook receiving a `RetryState`, unlimited attempts (`max_attempts=None`), and bare
   `@retry` usage.
@@ -153,14 +183,22 @@ Core:
 - `revert_on_failure(attrs=, deep=, target=)`.
 - `deprecate(since=, removed_in=, alternative=, category=)`, which also works on classes;
   `mock_data(enabled=bool | callable)`; `compose(*decorators)`.
-- Exceptions in `python_wrap.errors`, each subclassing the closest builtin: `PythonWrapError`,
-  `TimeoutExpired` (`TimeoutError`), `RateLimitExceeded`, `CircuitOpenError`, `ValidationError`
-  (`ValueError`) and `ArgumentTypeError` (`TypeError`).
+- Exceptions in `python_wrap.errors`, all subclassing `PythonWrapError`: `TimeoutExpired`
+  (also a `TimeoutError`), `RateLimitExceeded`, `CircuitOpenError`, `ValidationError` (also a
+  `ValueError`) and `ArgumentTypeError` (also a `TypeError`).
 - `once` gained `.reset()` and `.called`.
 - A `py.typed` marker, and a `NullHandler` on the `python_wrap` logger.
 
 ### Changed
 
+- `CircuitBreaker`, `RateLimiter`, `Bulkhead`, `RetryBudget`, `Transaction`, `Policy` and
+  `testing.FakeClock` raise a clear `TypeError` when pickled or copied (their state belongs to
+  one process), instead of an error about a thread lock or a copy that silently shares a lock.
+- `RetryState.exception` can be `None` (when a returned value was rejected by
+  `retry_if_result`), and `RetryState` has a new `result` field. A sync function given an async
+  retry hook raises `TypeError` when decorated.
+- On free-threaded Python 3.14t new threads inherit the caller's context, so `log_context`
+  fields carry over into them (`sys.flags.thread_inherit_context`).
 - The project uses a `src/` layout and Hatchling, and requires Python 3.10 or newer.
 - The runtime dependencies `wrapt` and `typing-extensions` were unused and have been removed.
 - `retry` waits with `asyncio.sleep` for `async def` functions, and re-raises the final
@@ -190,6 +228,20 @@ Core:
 
 ### Fixed
 
+- Final releases now pass through TestPyPI and an installation check before PyPI.
+  Both indexes are verified after upload before creating the GitHub release.
+- Source distributions include the examples and benchmark script used by their tests.
+- Release smoke checks validate metadata, public imports, `py.typed`, retry, memoization
+  and async behavior in an isolated installed environment.
+
+- `AsyncPeriodic.stop()` no longer swallows a cancellation aimed at the task awaiting it, and
+  ends a loop whose run swallows the cancel; `stop()` called inside a run ends the loop as soon
+  as that run returns.
+- `timeout(..., cleanup_grace=...)` lets an outside cancellation propagate as `CancelledError`
+  (matching `asyncio.timeout`), and waits for and retrieves the child task when the caller is
+  cancelled instead of logging "Task exception was never retrieved".
+- `periodic(on_error="raise")` logs an error that `stop()` never collected when `start()` is
+  called again, instead of dropping it silently.
 - `revert_on_failure` never restored anything because its snapshot was always empty.
 - `transactional` was a no-op; it now commits and rolls back through a `Transaction`.
 - `memoize` and `cache` built keys from `str(args)`, which collided and ignored keyword
@@ -215,13 +267,14 @@ Core:
 
 ### Performance
 
+- Async `memoize` and `cache` hits are about 30-35% faster (one lock instead of two).
 - The `memoize` hit path is about 9x faster.
 - `validate_args`, `check_type`, `enforce_types`, `log_args` and `audit` skip signature binding on
   plain positional calls (5x to 40x faster).
 - `audit` skips building a record when nobody would receive it, and `timing` skips formatting
   when its log level is disabled.
 - Numbers and a benchmark script are on the
-  [performance page](https://python-wrap.readthedocs.io/en/latest/performance/).
+  [performance page](https://pythonwrap.readthedocs.io/en/latest/project/performance/).
 
 ### Deprecated
 
@@ -240,7 +293,8 @@ Core:
 ### Infrastructure
 
 - CI runs ruff, `mypy --strict`, the test suite on Linux, macOS and Windows across Python 3.10 to
-  3.14, and a wheel check.
+  3.14, the test and thread-safety stress suites on free-threaded Python 3.14t, and a wheel
+  check.
 - Tag-driven releases publish to PyPI through Trusted Publishing, with no stored token.
 - The documentation build is checked in CI and hosted on Read the Docs.
 - Added Dependabot, issue and pull request templates, `CONTRIBUTING.md`, `SECURITY.md`,

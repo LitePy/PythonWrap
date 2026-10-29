@@ -86,4 +86,16 @@ def test_unsubscribe_during_emit_is_safe() -> None:
 def test_event_names_catalogue() -> None:
     assert "retry.attempt_failed" in EVENT_NAMES
     assert all(isinstance(v, str) and v for v in EVENT_NAMES.values())
-    assert len(EVENT_NAMES) == 13
+    # Every name the package emits is catalogued, and nothing else.
+    import pathlib
+    import re
+
+    import python_wrap
+
+    src = pathlib.Path(python_wrap.__file__).parent
+    emitted = {
+        name
+        for path in src.glob("*.py")
+        for name in re.findall(r"""emit\(\s*["']([a-z_]+\.[a-z_]+)["']""", path.read_text())
+    }
+    assert emitted == set(EVENT_NAMES)

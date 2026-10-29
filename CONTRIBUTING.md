@@ -21,7 +21,9 @@ There is no Makefile; the commands below are the whole workflow.
 
 ## Run the checks
 
-CI runs exactly these, so if they pass locally the pull request will be green.
+Run these checks before opening or merging a pull request. CI and docs run after
+changes land on `main`; pull requests and feature-branch pushes do not start them.
+Release publishing remains tied to version tags.
 
 ```bash
 uv run pytest                                  # tests

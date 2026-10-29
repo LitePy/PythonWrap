@@ -46,7 +46,7 @@ dependencies = []
 
 [project.urls]
 Homepage = "https://github.com/LitePy/PythonWrap"
-Documentation = "https://python-wrap.readthedocs.io"
+Documentation = "https://pythonwrap.readthedocs.io"
 Source = "https://github.com/LitePy/PythonWrap"
 Issues = "https://github.com/LitePy/PythonWrap/issues"
 Changelog = "https://github.com/LitePy/PythonWrap/blob/main/CHANGELOG.md"
@@ -59,11 +59,13 @@ dev = [
     "hypothesis>=6.100",
     "ruff>=0.8",
     "mypy>=1.13",
+    "opentelemetry-api>=1.45.1",
+    "opentelemetry-sdk>=1.45.1",
 ]
 docs = [
     "mkdocs-material>=9.5",
     "mkdocs-redirects>=1.2.3",
-    "mkdocstrings[python]>=0.27",
+    "mkdocstrings[python]>=1.0.6",
 ]
 release = ["build>=1.2", "twine>=6.0"]
 
@@ -78,6 +80,9 @@ exclude = ["**/__pycache__", "**/*.py[cod]", "**/.DS_Store"]
 include = [
     "/src/python_wrap",
     "/tests",
+    "/examples",
+    "/benchmarks",
+    "/scripts/check_installed.py",
     "/README.md",
     "/LICENSE",
     "/CHANGELOG.md",

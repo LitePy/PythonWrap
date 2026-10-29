@@ -36,6 +36,7 @@ from typing import (
     Concatenate,
     Final,
     Generic,
+    NoReturn,
     ParamSpec,
     Protocol,
     TypeVar,
@@ -283,6 +284,18 @@ def _call_in_worker(
     return cast(R, job.result)
 
 
+# Message of the cancellations a timer sends itself. Python 3.10 has no
+# ``Task.cancelling()`` counter, so there the message is how a timer tells its own
+# cancellation apart from one sent by someone else (best effort: two cancellations that
+# arrive before the task resumes are delivered as one, as in the 3.10 stdlib).
+_TIMER_CANCEL = "python_wrap.timeout expired"
+
+
+def _is_timer_cancel(exc: BaseException | None) -> bool:
+    """True if ``exc`` is the CancelledError a timer sent (3.10 path only)."""
+    return isinstance(exc, asyncio.CancelledError) and exc.args[:1] == (_TIMER_CANCEL,)
+
+
 if sys.version_info >= (3, 11):
     _async_timer = asyncio.timeout
 
@@ -309,7 +322,7 @@ else:  # pragma: no cover - exercised by the Python 3.10 CI job
 
             def fire() -> None:
                 self._fired = True
-                task.cancel()
+                task.cancel(_TIMER_CANCEL)
 
             self._handle = asyncio.get_running_loop().call_later(self._seconds, fire)
             return self
@@ -321,10 +334,127 @@ else:  # pragma: no cover - exercised by the Python 3.10 CI job
             tb: TracebackType | None,
         ) -> None:
             self._handle.cancel()
-            if self._fired and exc_type is asyncio.CancelledError:
+            if self._fired and _is_timer_cancel(exc):
                 raise TimeoutError from exc
 
     _async_timer = _CancelTimer
+
+
+class _GraceTimer:
+    """Cancel the current task at the deadline, and again after ``grace`` seconds.
+
+    The first cancellation lets the block run its ``finally`` / ``except CancelledError``
+    cleanup; if the cleanup is still awaiting when the grace period ends, a second
+    cancellation interrupts it (with a warning). Only cancellations caused by this timer
+    are turned into ``TimeoutError``.
+    """
+
+    def __init__(self, seconds: float, grace: float, label: str) -> None:
+        self._seconds = seconds
+        self._grace = grace
+        self._label = label
+        self._fired = False
+        self._cancels = 0
+        self._cancelling = 0
+        self._handles: list[asyncio.TimerHandle] = []
+
+    def expired(self) -> bool:
+        return self._fired
+
+    async def __aenter__(self) -> _GraceTimer:
+        task = asyncio.current_task()
+        if task is None:  # pragma: no cover - asyncio always runs coroutines in a task
+            raise RuntimeError("timeout() must be used inside a task")
+        loop = asyncio.get_running_loop()
+
+        def second() -> None:
+            self._cancels += 1
+            _core.get_logger(None).warning(
+                "%s: cleanup still running %ss after the timeout, cancelling it again",
+                self._label,
+                self._grace,
+            )
+            task.cancel(_TIMER_CANCEL)
+
+        def fire() -> None:
+            self._fired = True
+            self._cancels += 1
+            task.cancel(_TIMER_CANCEL)
+            self._handles.append(loop.call_later(self._grace, second))
+
+        self._task = task
+        # Like asyncio.timeout: remember the cancel requests already pending on entry, so
+        # on exit only the timer's own ones are converted (3.11+).
+        cancelling = getattr(task, "cancelling", None)
+        self._cancelling = cancelling() if cancelling is not None else 0
+        self._handles.append(loop.call_later(self._seconds, fire))
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        for handle in self._handles:
+            handle.cancel()
+        if not self._fired or exc_type is not asyncio.CancelledError:
+            return
+        uncancel = getattr(self._task, "uncancel", None)
+        if uncancel is not None:  # 3.11+: withdraw our own requests, then count the rest
+            remaining: int = getattr(self._task, "cancelling")()  # noqa: B009 - 3.11+ only
+            for _ in range(self._cancels):
+                if remaining <= self._cancelling:
+                    break
+                remaining = uncancel()
+            if remaining <= self._cancelling:
+                raise TimeoutError from exc
+        elif _is_timer_cancel(exc):  # pragma: no cover - exercised by the 3.10 CI job
+            raise TimeoutError from exc
+
+
+async def _await_with_grace(awaitable: Awaitable[T], label: str, seconds: float, grace: float) -> T:
+    """Run ``awaitable`` as a child task; on expiry cancel it and wait ``grace`` for cleanup."""
+    task = asyncio.ensure_future(awaitable)
+    try:
+        await asyncio.wait({task}, timeout=seconds)
+    except BaseException:
+        # Cancelled from outside: cancel the child too, give its cleanup the same grace,
+        # then re-raise the caller's cancellation. Never leave its outcome unretrieved.
+        task.cancel()
+        try:
+            await asyncio.wait({task}, timeout=grace)
+        finally:
+            _consume_when_done(task)
+        raise
+    if task.done():
+        return task.result()
+    task.cancel()
+    try:
+        await asyncio.wait({task}, timeout=grace)
+    except BaseException:
+        _consume_when_done(task)  # cancelled from outside during the grace period
+        raise
+    if not task.done():
+        _core.get_logger(None).warning(
+            "%s: still running %ss after the timeout; abandoning it", label, grace
+        )
+    _consume_when_done(task)
+    raise _expired(label, seconds)
+
+
+def _consume_when_done(task: asyncio.Future[Any]) -> None:
+    """Retrieve ``task``'s outcome now if it is done, otherwise once it is."""
+    if task.done():
+        _consume_result(task)
+    else:
+        task.add_done_callback(_consume_result)
+
+
+def _consume_result(task: asyncio.Future[Any]) -> None:
+    """Mark an abandoned task's outcome as retrieved so asyncio does not log it."""
+    if not task.cancelled():
+        task.exception()
 
 
 async def _await_with_deadline(awaitable: Awaitable[T], label: str, seconds: float) -> T:
@@ -349,11 +479,22 @@ class Timeout:
     Attributes:
         seconds: The configured limit.
         use_signals: The configured sync strategy (`None` means automatic).
+        cleanup_grace: Seconds async code may spend cleaning up after the limit (`None`: no
+            separate bound).
     """
 
-    def __init__(self, seconds: float, *, use_signals: bool | None = None) -> None:
+    def __init__(
+        self,
+        seconds: float,
+        *,
+        use_signals: bool | None = None,
+        cleanup_grace: float | None = None,
+    ) -> None:
         if seconds <= 0:
             raise ValueError(f"timeout seconds must be positive, got {seconds!r}")
+        if cleanup_grace is not None and cleanup_grace < 0:
+            raise ValueError(f"cleanup_grace must be >= 0, got {cleanup_grace!r}")
+        self.cleanup_grace = cleanup_grace
         if use_signals and not _HAS_SETITIMER:
             raise RuntimeError("use_signals=True needs signal.setitimer, unavailable here")
         self.seconds = seconds
@@ -377,12 +518,21 @@ class Timeout:
         """Apply the limit to every call of ``func`` (sync or ``async def``)."""
         label = _core.qualname(func)
         use_signals = self.use_signals
+        grace = self.cleanup_grace
+
+        if grace is not None and not _core.is_async(func):
+            raise TypeError(
+                f"timeout(cleanup_grace=...) only supports async def functions; {label} is "
+                "synchronous (signals and worker threads cannot give cleanup a bounded grace)"
+            )
 
         if _core.is_async(func):
 
             @functools.wraps(func)
             async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
                 seconds = self._limit(label)
+                if grace is not None:
+                    return await _await_with_grace(func(*args, **kwargs), label, seconds, grace)
                 return await _await_with_deadline(func(*args, **kwargs), label, seconds)
 
             return cast(F, async_wrapper)
@@ -404,6 +554,8 @@ class Timeout:
     # -- sync context manager -----------------------------------------------------------
 
     def __enter__(self) -> Timeout:
+        if self.cleanup_grace is not None:
+            raise TypeError("timeout(cleanup_grace=...) is only supported with `async with`")
         if self.use_signals is False or not _signals_usable():
             raise RuntimeError(
                 "`with timeout(...)` needs SIGALRM (Unix) and the main thread, because a "
@@ -430,7 +582,11 @@ class Timeout:
         if task is None:  # pragma: no cover - asyncio always runs coroutines in a task
             raise RuntimeError("`async with timeout(...)` must run inside an asyncio task")
         seconds = self._limit(_BLOCK)
-        timer = _async_timer(seconds)
+        timer: Any = (
+            _async_timer(seconds)
+            if self.cleanup_grace is None
+            else _GraceTimer(seconds, self.cleanup_grace, _BLOCK)
+        )
         await timer.__aenter__()
         self._timers.setdefault(task, []).append((timer, seconds))
         return self
@@ -455,10 +611,15 @@ class Timeout:
             raise _expired(_BLOCK, seconds) from error
 
     def __repr__(self) -> str:
-        return f"Timeout(seconds={self.seconds!r}, use_signals={self.use_signals!r})"
+        return (
+            f"Timeout(seconds={self.seconds!r}, use_signals={self.use_signals!r}, "
+            f"cleanup_grace={self.cleanup_grace!r})"
+        )
 
 
-def timeout(seconds: float, *, use_signals: bool | None = None) -> Timeout:
+def timeout(
+    seconds: float, *, use_signals: bool | None = None, cleanup_grace: float | None = None
+) -> Timeout:
     """Raise `TimeoutExpired` if a call or block runs longer than ``seconds``.
 
     ``TimeoutExpired`` subclasses the built-in ``TimeoutError``. The returned `Timeout`
@@ -517,13 +678,28 @@ def timeout(seconds: float, *, use_signals: bool | None = None) -> Timeout:
         use_signals: ``True`` forces the signal strategy, ``False`` forces the thread
             fallback (and so rules out ``with timeout(...)``), ``None`` (default) picks
             signals when they are usable.
+        cleanup_grace: Async only. Seconds the code may spend in its ``finally`` /
+            ``except CancelledError`` cleanup after the limit is hit. As a decorator, the
+            call runs as a child task: at the limit it is cancelled and given
+            ``cleanup_grace`` more seconds to finish; then ``TimeoutExpired`` is raised
+            (even if the cleanup finished), and a task still running is abandoned with a
+            warning logged to the package logger (it keeps running until it ends on its own).
+            As ``async with timeout(5, cleanup_grace=1)`` the block cannot be moved to
+            another task, so after the grace period the cleanup is cancelled a second time
+            (with a warning) rather than abandoned; cleanup that suppresses cancellation
+            cannot be stopped. Sync functions and ``with`` blocks are not supported and
+            raise ``TypeError`` (signals and worker threads cannot bound cleanup).
+            ``None`` (default) keeps the plain behaviour. Real time: not affected by the
+            test overrides.
 
     Returns:
         A `Timeout`: a decorator that preserves the wrapped function's type, and a sync
         and async context manager.
 
     Raises:
-        ValueError: If ``seconds`` is not positive.
+        ValueError: If ``seconds`` is not positive or ``cleanup_grace`` is negative.
+        TypeError: If ``cleanup_grace`` is set and the target is a sync function or a
+            plain ``with`` block.
         RuntimeError: If ``use_signals=True`` but ``signal.setitimer`` does not exist on
             this platform (at creation time); if ``use_signals=True`` and the call is not
             made from the main thread (at call time); or on entering ``with`` where
@@ -552,7 +728,7 @@ def timeout(seconds: float, *, use_signals: bool | None = None) -> Timeout:
         asyncio.run(main())
         ```
     """
-    return Timeout(seconds, use_signals=use_signals)
+    return Timeout(seconds, use_signals=use_signals, cleanup_grace=cleanup_grace)
 
 
 # ---------------------------------------------------------------------------------------
@@ -710,6 +886,9 @@ class RateLimiter:
         assert not github.try_acquire()  # 4 calls in the last second
         ```
     """
+
+    def __reduce__(self) -> NoReturn:
+        _core.refuse_pickle(self)
 
     def __init__(
         self,

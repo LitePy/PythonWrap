@@ -1,6 +1,7 @@
-# Continuous integration.
+# Continuous integration after changes land on main.
 #
-# Four jobs: lint (seconds), the test matrix, mypy, and a packaging check.
+# Five jobs: lint (seconds), the test matrix, free-threaded Python with the stress
+# suite, mypy, and a packaging check.
 #
 # python-wrap is pure Python with no dependencies, so the matrix is wide rather than
 # deep: every interpreter the classifiers name, on all three operating systems. Time and
@@ -12,8 +13,6 @@ name: CI
 on:
   push:
     branches: [main]
-  pull_request:
-  workflow_dispatch:
 
 # A force-push should not leave the previous run burning minutes on a dead commit.
 concurrency:
@@ -43,10 +42,10 @@ jobs:
       - run: uv sync --group dev --frozen
 
       - name: ruff check
-        run: uv run --no-sync ruff check src tests
+        run: uv run --no-sync ruff check src tests scripts/check_installed.py
 
       - name: ruff format
-        run: uv run --no-sync ruff format --check --diff src tests
+        run: uv run --no-sync ruff format --check --diff src tests scripts/check_installed.py
 
   test:
     name: py${{ matrix.python-version }} · ${{ matrix.os }}
@@ -83,6 +82,36 @@ jobs:
           name: coverage
           path: coverage.xml
           if-no-files-found: warn
+
+  free-threaded:
+    # CPython 3.14t with the GIL off, plus the thread-safety stress suite, which only
+    # runs when PW_STRESS=1. This is where real data races show up.
+    name: py3.14t (free-threaded) · ubuntu-latest
+    runs-on: ubuntu-latest
+    env:
+      PYTHON_GIL: "0"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.2
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          python-version: "3.14t"
+
+      - run: uv sync --group dev --frozen
+
+      - name: The GIL must really be off
+        run: uv run --no-sync python -c "import sys; assert not sys._is_gil_enabled()"
+
+      - name: pytest
+        run: uv run --no-sync pytest -q
+
+      - name: Thread-safety stress suite
+        run: uv run --no-sync pytest -q tests/stress
+        env:
+          PW_STRESS: "1"
 
   typecheck:
     name: mypy
@@ -136,8 +165,16 @@ jobs:
         run: |
           uv venv "$RUNNER_TEMP/smoke" --python 3.13
           uv pip install --python "$RUNNER_TEMP/smoke" dist/*.whl
-          cd "$RUNNER_TEMP"
-          "$RUNNER_TEMP/smoke/bin/python" -c "import python_wrap; print(python_wrap.__version__)"
+          version=$(sed -nE 's/^__version__ *= *"([^"]+)".*/\1/p' src/python_wrap/__init__.py)
+          "$RUNNER_TEMP/smoke/bin/python" -I scripts/check_installed.py "$version"
+
+      - name: The source distribution includes its test fixtures
+        run: |
+          mkdir "$RUNNER_TEMP/sdist"
+          tar -xzf dist/*.tar.gz -C "$RUNNER_TEMP/sdist" --strip-components=1
+          cd "$RUNNER_TEMP/sdist"
+          uv sync --group dev
+          uv run --no-sync pytest tests/test_examples.py tests/test_benchmarks_smoke.py
 
       - name: Upload the distributions
         uses: actions/upload-artifact@v7

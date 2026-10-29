@@ -5,11 +5,13 @@ import concurrent.futures
 import contextlib
 import gc
 import inspect
+import logging
 import signal
 import sys
 import threading
 import time
 import types
+from typing import Any
 
 import pytest
 
@@ -1798,3 +1800,229 @@ def test_timeout_fallback_result_arriving_after_the_limit_is_a_timeout(monkeypat
     with pytest.raises(TimeoutExpired):
         late()
     assert [e.name for e in events] == ["timeout.expired"]
+
+
+# ------------------------------------------------------------------ timeout(cleanup_grace=)
+
+
+def test_cleanup_grace_validation() -> None:
+    with pytest.raises(ValueError):
+        timeout(1, cleanup_grace=-1)
+    with pytest.raises(TypeError):
+
+        @timeout(1, cleanup_grace=1)
+        def sync() -> None: ...
+
+    with pytest.raises(TypeError), timeout(1, cleanup_grace=1):
+        pass
+
+
+def test_cleanup_grace_decorator_cleanup_finishes() -> None:
+    cleaned: list[str] = []
+
+    @timeout(0.02, cleanup_grace=0.5)
+    async def work() -> None:
+        try:
+            await asyncio.sleep(5)
+        finally:
+            await asyncio.sleep(0.02)
+            cleaned.append("done")
+
+    with pytest.raises(TimeoutExpired):
+        asyncio.run(work())
+    assert cleaned == ["done"]
+
+
+def test_cleanup_grace_decorator_abandons_slow_cleanup(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    finished: list[str] = []
+
+    @timeout(0.02, cleanup_grace=0.02)
+    async def work() -> None:
+        try:
+            await asyncio.sleep(5)
+        finally:
+            await asyncio.sleep(0.2)
+            finished.append("late")
+
+    async def main() -> None:
+        with pytest.raises(TimeoutExpired):
+            await work()
+        assert finished == []
+        await asyncio.sleep(0.3)  # the abandoned task keeps running
+        assert finished == ["late"]
+
+    with caplog.at_level(logging.WARNING, logger="python_wrap"):
+        asyncio.run(main())
+    assert "abandoning" in caplog.text
+
+
+def test_cleanup_grace_decorator_passthrough_and_outer_cancel() -> None:
+    @timeout(1, cleanup_grace=0.1)
+    async def quick() -> int:
+        return 7
+
+    @timeout(1, cleanup_grace=0.1)
+    async def fails() -> None:
+        raise KeyError("x")
+
+    async def main() -> None:
+        assert await quick() == 7
+        with pytest.raises(KeyError):
+            await fails()
+        started = asyncio.Event()
+        stopped: list[bool] = []
+
+        @timeout(5, cleanup_grace=0.1)
+        async def slow() -> None:
+            started.set()
+            try:
+                await asyncio.sleep(5)
+            except asyncio.CancelledError:
+                stopped.append(True)
+                raise
+
+        t = asyncio.ensure_future(slow())
+        await started.wait()
+        t.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await t
+        await asyncio.sleep(0)
+        assert stopped == [True]
+
+    asyncio.run(main())
+
+
+def test_cleanup_grace_block() -> None:
+    cleaned: list[str] = []
+
+    async def main() -> None:
+        with pytest.raises(TimeoutExpired):
+            async with timeout(0.02, cleanup_grace=0.5):
+                try:
+                    await asyncio.sleep(5)
+                finally:
+                    await asyncio.sleep(0.02)
+                    cleaned.append("done")
+        async with timeout(1, cleanup_grace=0.1):
+            pass
+
+    asyncio.run(main())
+    assert cleaned == ["done"]
+
+
+def test_cleanup_grace_block_second_cancel(caplog: pytest.LogCaptureFixture) -> None:
+    async def main() -> None:
+        with pytest.raises(TimeoutExpired):
+            async with timeout(0.02, cleanup_grace=0.02):
+                try:
+                    await asyncio.sleep(5)
+                finally:
+                    await asyncio.sleep(5)
+
+    with caplog.at_level(logging.WARNING, logger="python_wrap"):
+        asyncio.run(main())
+    assert "cancelling it again" in caplog.text
+
+
+# ------------------------------------------------------------------ cleanup_grace + outer cancel
+
+
+def test_cleanup_grace_block_outer_cancel_during_grace_stays_cancelled() -> None:
+    in_cleanup = asyncio.Event()
+
+    async def block() -> None:
+        async with timeout(0.01, cleanup_grace=5):
+            try:
+                await asyncio.sleep(5)
+            finally:
+                in_cleanup.set()
+                await asyncio.sleep(5)  # interrupted by the outside cancel below
+
+    async def main() -> None:
+        t = asyncio.ensure_future(block())
+        await in_cleanup.wait()  # the timer has fired
+        t.cancel()  # the application cancels the task during the grace period
+        with pytest.raises(asyncio.CancelledError):
+            await t
+
+    asyncio.run(main())
+
+
+def test_cleanup_grace_block_keeps_cancel_pending_on_entry() -> None:
+    async def main() -> None:
+        task = asyncio.current_task()
+        assert task is not None
+        if not hasattr(task, "cancelling"):  # pragma: no cover - 3.10 has no counter
+            return
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.sleep(1)
+        assert task.cancelling() == 1  # a cancel request is still outstanding
+        with pytest.raises(TimeoutExpired):
+            async with timeout(0.01, cleanup_grace=0.5):
+                await asyncio.sleep(5)
+        assert task.cancelling() == 1  # only the timer's own requests were withdrawn
+        task.uncancel()
+
+    asyncio.run(main())
+
+
+def test_cleanup_grace_decorator_outer_cancel_waits_for_and_consumes_child() -> None:
+    in_cleanup = asyncio.Event()
+    finished: list[bool] = []
+    unhandled: list[dict[str, Any]] = []
+
+    @timeout(5, cleanup_grace=1)
+    async def work() -> None:
+        try:
+            await asyncio.sleep(5)
+        finally:
+            in_cleanup.set()
+            await asyncio.sleep(0.02)
+            finished.append(True)
+            raise ValueError("cleanup failed")
+
+    async def main() -> None:
+        asyncio.get_running_loop().set_exception_handler(lambda _loop, ctx: unhandled.append(ctx))
+        t = asyncio.ensure_future(work())
+        await asyncio.sleep(0.01)
+        t.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await t
+        assert finished == [True]  # the child's cleanup ran within the grace period
+
+    asyncio.run(main())
+    gc.collect()
+    assert unhandled == []
+
+
+def test_cleanup_grace_decorator_outer_cancel_during_grace_consumes_child() -> None:
+    in_cleanup = asyncio.Event()
+    release = asyncio.Event()
+    unhandled: list[dict[str, Any]] = []
+
+    @timeout(0.01, cleanup_grace=5)
+    async def work() -> None:
+        try:
+            await asyncio.sleep(5)
+        finally:
+            in_cleanup.set()
+            await release.wait()
+            raise ValueError("cleanup failed")
+
+    async def main() -> None:
+        asyncio.get_running_loop().set_exception_handler(lambda _loop, ctx: unhandled.append(ctx))
+        t = asyncio.ensure_future(work())
+        await in_cleanup.wait()  # the limit expired; the wrapper waits out the grace
+        t.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await t
+        release.set()
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+    asyncio.run(main())
+    gc.collect()
+    assert unhandled == []

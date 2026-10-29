@@ -30,6 +30,7 @@ from .bulkhead import (
 from .caching import (
     CachedProperty,
     CacheInfo,
+    CacheStore,
     Memoized,
     Once,
     cache,
@@ -107,12 +108,19 @@ from .metrics import (
     Counted,
     count_calls,
 )
+from .periodic import (
+    AsyncPeriodic,
+    Periodic,
+    periodic,
+)
 from .policy import (
     Policy,
     policy,
 )
 from .retry import (
     Attempt,
+    RetryBudget,
+    RetryBudgetStats,
     Retrying,
     RetryState,
     RetryStats,
@@ -159,6 +167,7 @@ __all__ = [
     "ArgumentTypeError",
     "AsyncBatched",
     "AsyncDebounced",
+    "AsyncPeriodic",
     "Attempt",
     "AuditRecord",
     "BatchError",
@@ -167,6 +176,7 @@ __all__ = [
     "Bulkhead",
     "BulkheadFull",
     "CacheInfo",
+    "CacheStore",
     "CachedProperty",
     "CallStats",
     "CircuitBreaker",
@@ -181,11 +191,14 @@ __all__ = [
     "Memoized",
     "MemoryRecord",
     "Once",
+    "Periodic",
     "Policy",
     "PythonWrapError",
     "RaceFailed",
     "RateLimitExceeded",
     "RateLimiter",
+    "RetryBudget",
+    "RetryBudgetStats",
     "RetryState",
     "RetryStats",
     "Retrying",
@@ -231,6 +244,7 @@ __all__ = [
     "mock_data",
     "no_debug",
     "once",
+    "periodic",
     "policy",
     "profile",
     "race",

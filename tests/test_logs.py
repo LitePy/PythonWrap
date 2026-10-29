@@ -4,6 +4,7 @@ import asyncio
 import functools
 import inspect
 import logging
+import sys
 from datetime import timedelta, timezone
 from typing import Any
 
@@ -482,7 +483,9 @@ def test_log_context_is_isolated_per_task_and_thread() -> None:
         t = threading.Thread(target=lambda: seen.update(copied=ctx.run(current_log_context)))
         t.start()
         t.join()
-    assert seen == {"plain": {}, "copied": {"a": 1}}
+    # Free-threaded 3.14 builds start threads in a copy of the caller's context.
+    inherits = getattr(sys.flags, "thread_inherit_context", 0)
+    assert seen == {"plain": {"a": 1} if inherits else {}, "copied": {"a": 1}}
 
 
 def test_log_context_restores_on_error() -> None:
@@ -694,3 +697,81 @@ def test_audit_async_with_sink_and_level_disabled() -> None:
 
     assert asyncio.run(f(2, "t")) == 2
     assert records[0].arguments == {"a": 2, "token": "***"}
+
+
+# ---------------------------------------------------------------------------- trace(otel=)
+
+
+def test_trace_otel_missing_package_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    import sys
+
+    monkeypatch.setitem(sys.modules, "opentelemetry", None)
+    with pytest.raises(ImportError, match="opentelemetry-api"):
+
+        @trace(otel=True)
+        def f() -> None: ...
+
+
+def _otel_exporter() -> Any:
+    pytest.importorskip("opentelemetry.sdk.trace")
+    from opentelemetry import trace as ot
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    # get_tracer is looked up at decoration time, so patch the global lazily
+    ot._TRACER_PROVIDER = provider  # type: ignore[attr-defined]
+    ot._TRACER_PROVIDER_SET_ONCE._done = True  # type: ignore[attr-defined]
+    return exporter
+
+
+def test_trace_otel_span_attributes_and_error() -> None:
+    exporter = _otel_exporter()
+    from opentelemetry.trace import StatusCode
+
+    from python_wrap.logs import log_context
+
+    @trace(otel=True, span_name="custom")
+    def ok(x: int) -> int:
+        return x
+
+    @trace(otel=True)
+    def bad() -> None:
+        raise ValueError("boom")
+
+    with log_context(request_id="r1", n=3, obj=[1]):
+        assert ok(1) == 1
+    with pytest.raises(ValueError):
+        bad()
+    first, second = exporter.get_finished_spans()
+    assert first.name == "custom"
+    assert first.attributes["code.function"] == "ok"
+    assert first.attributes["code.namespace"] == __name__
+    assert first.attributes["python_wrap.context.request_id"] == "r1"
+    assert first.attributes["python_wrap.context.n"] == 3
+    assert first.attributes["python_wrap.context.obj"] == "[1]"
+    assert second.name.endswith("bad")
+    assert second.status.status_code == StatusCode.ERROR
+    assert second.events[0].name == "exception"
+
+
+def test_trace_otel_async_span_current_across_await() -> None:
+    exporter = _otel_exporter()
+    from opentelemetry import trace as ot
+
+    seen: list[bool] = []
+
+    @trace(otel=True)
+    async def work() -> int:
+        await asyncio.sleep(0)
+        seen.append(ot.get_current_span().is_recording())
+        return 1
+
+    assert asyncio.run(work()) == 1
+    assert seen == [True]
+    assert inspect.iscoroutinefunction(work)
+    assert len(exporter.get_finished_spans()) == 1
+    assert not ot.get_current_span().get_span_context().is_valid

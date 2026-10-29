@@ -21,7 +21,7 @@ For explanations and examples, start from the matching [feature page](../feature
 
 | Module | Contents |
 | --- | --- |
-| [caching](caching.md) | `memoize`, `cache`, `once`, `cached_property`, `invalidate`, `CacheInfo`, `Memoized`, `Once`, `CachedProperty` |
+| [caching](caching.md) | `memoize`, `cache`, `once`, `cached_property`, `invalidate`, `CacheInfo`, `CacheStore`, `Memoized`, `Once`, `CachedProperty` |
 | [batching](batching.md) | `batch_calls`, `Batched`, `AsyncBatched` |
 
 ## Concurrency and limits
@@ -31,6 +31,7 @@ For explanations and examples, start from the matching [feature page](../feature
 | [concurrency](concurrency.md) | `timeout`, `Timeout`, `rate_limit`, `RateLimiter`, `Limit`, `limiter_of`, `throttle`, `debounce`, `singleflight`, `run_in_thread` |
 | [aio](aio.md) | `gather_limit`, `map_async`, `amap_iter`, `race`, `RaceFailed`, `run_sync` |
 | [bulkhead](bulkhead.md) | `Bulkhead`, `limit_concurrency`, `Limited` |
+| [periodic](periodic.md) | `periodic`, `Periodic`, `AsyncPeriodic` |
 
 ## Observability
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import functools
+import inspect
 import logging
 import math
 import random
@@ -12,10 +13,10 @@ import sys
 import threading
 import time
 import warnings
-from collections.abc import AsyncIterator, Callable, Coroutine, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator
 from dataclasses import dataclass
 from types import TracebackType
-from typing import Any, Protocol, TypeVar, cast, overload
+from typing import Any, NoReturn, Protocol, TypeVar, cast, overload
 
 from python_wrap import _core, config
 from python_wrap._core import F, LoggerLike, P, R
@@ -28,6 +29,8 @@ ExceptionTypes = type[BaseException] | tuple[type[BaseException], ...]
 
 __all__ = [
     "Attempt",
+    "RetryBudget",
+    "RetryBudgetStats",
     "RetryState",
     "RetryStats",
     "Retrying",
@@ -43,22 +46,29 @@ __all__ = [
 _MISSING: Any = object()
 _UNSET: Any = config.UNSET  # resolved by `_resolve_defaults`
 
+ExceptionPredicate = Callable[[BaseException], bool] | Callable[[BaseException], Awaitable[bool]]
+ResultPredicate = Callable[[Any], bool] | Callable[[Any], Awaitable[bool]]
+RetryCallback = Callable[["RetryState"], None] | Callable[["RetryState"], Awaitable[None]]
+
 
 @dataclass(frozen=True)
 class RetryState:
-    """Snapshot passed to the ``on_retry`` callback before each wait.
+    """Snapshot passed to the `on_retry` callback before each wait.
 
     Attributes:
         attempt: Number of the attempt that just failed (1-based).
-        exception: The exception that attempt raised.
+        exception: The exception that attempt raised, or `None` when the attempt
+            returned a value that `retry_if_result` rejected.
         next_delay: Seconds about to be slept before the next attempt (jitter included).
         elapsed: Seconds since the first attempt started.
+        result: The rejected return value when `exception` is `None`, else `None`.
     """
 
     attempt: int
-    exception: BaseException
+    exception: BaseException | None
     next_delay: float
     elapsed: float
+    result: Any = None
 
 
 def _validate(
@@ -104,8 +114,11 @@ class RetryStats:
         calls: Times the wrapped function was called (each call may make several attempts).
         attempts_total: Individual attempts made across all calls.
         retries: Times an attempt failed and another one was scheduled.
-        gave_up: Calls that ended by re-raising a retryable exception (attempts, time
-            budget or `retry_if` said stop).
+        gave_up: Calls that ended by re-raising a retryable exception, or by returning
+            a result `retry_if_result` rejected (attempts, time budget, retry budget or
+            `retry_if` said stop).
+        budget_exhausted: Calls among `gave_up` that stopped because the shared
+            `RetryBudget` refused another retry.
         total_sleep: Seconds spent waiting between attempts.
         last_exception: The most recent exception a retried attempt raised, if any.
     """
@@ -116,6 +129,7 @@ class RetryStats:
         self.attempts_total = 0
         self.retries = 0
         self.gave_up = 0
+        self.budget_exhausted = 0
         self.total_sleep = 0.0
         self.last_exception: BaseException | None = None
 
@@ -127,6 +141,7 @@ class RetryStats:
                 "attempts_total": self.attempts_total,
                 "retries": self.retries,
                 "gave_up": self.gave_up,
+                "budget_exhausted": self.budget_exhausted,
                 "total_sleep": self.total_sleep,
                 "last_exception": self.last_exception,
             }
@@ -135,6 +150,7 @@ class RetryStats:
         """Set every counter back to zero."""
         with self._lock:
             self.calls = self.attempts_total = self.retries = self.gave_up = 0
+            self.budget_exhausted = 0
             self.total_sleep = 0.0
             self.last_exception = None
 
@@ -142,7 +158,8 @@ class RetryStats:
         s = self.snapshot()
         return (
             f"RetryStats(calls={s['calls']}, attempts_total={s['attempts_total']}, "
-            f"retries={s['retries']}, gave_up={s['gave_up']}, total_sleep={s['total_sleep']:g})"
+            f"retries={s['retries']}, gave_up={s['gave_up']}, "
+            f"budget_exhausted={s['budget_exhausted']}, total_sleep={s['total_sleep']:g})"
         )
 
 
@@ -169,6 +186,162 @@ def retry_stats(func: Callable[..., Any]) -> RetryStats | None:
     """
     stats = getattr(func, _STATS_ATTR, None)
     return stats if isinstance(stats, RetryStats) else None
+
+
+@dataclass(frozen=True)
+class RetryBudgetStats:
+    """Snapshot of a `RetryBudget`, returned by `RetryBudget.stats`.
+
+    Attributes:
+        requests: First attempts recorded in the current window.
+        retries: Retries granted in the current window.
+        rejected: Retries refused since creation (or the last `reset`).
+        allowed: Retries the budget would still grant right now.
+    """
+
+    requests: int
+    retries: int
+    rejected: int
+    allowed: int
+
+
+_BUDGET_SLOTS = 10
+
+
+class RetryBudget:
+    """A retry allowance shared by many retried functions (Finagle/Envoy style).
+
+    Every call's first attempt deposits into the budget and every retry withdraws from
+    it. A retry is allowed while the retries made in the last `window` seconds stay
+    within `ratio` times the requests made in that window, plus a reserve of
+    `min_per_second * window` retries so that low-traffic code can still retry. When a
+    dependency fails for everyone, retries are capped at about `ratio` of the traffic
+    instead of multiplying it by `max_attempts`.
+
+    One budget can be passed to any number of `retry` decorators and `retrying` blocks;
+    it is thread-safe and works across threads and event loops (it never blocks). Time
+    comes from `python_wrap._core.monotonic`, so `fake_clock` controls it in tests.
+
+    Args:
+        ratio: Retries allowed per request in the window (`0.1` = 10 %). `>= 0`.
+        min_per_second: Retries per second always allowed regardless of traffic. `>= 0`.
+        window: Length of the sliding window in seconds. `> 0`.
+
+    Raises:
+        ValueError: If an argument is out of range.
+
+    Example:
+        ```python
+        from python_wrap.retry import RetryBudget, retry
+
+        budget = RetryBudget(ratio=0.2, min_per_second=1, window=10)
+
+        @retry(max_attempts=3, delay=0, budget=budget)
+        def fetch() -> str:
+            return "ok"
+
+        assert fetch() == "ok"
+        assert budget.stats.requests == 1
+        ```
+    """
+
+    def __reduce__(self) -> NoReturn:
+        _core.refuse_pickle(self)
+
+    def __init__(
+        self, ratio: float = 0.1, min_per_second: float = 10, window: float = 10.0
+    ) -> None:
+        if not ratio >= 0 or math.isinf(ratio):
+            raise ValueError(f"ratio must be a finite number >= 0, got {ratio!r}")
+        if not min_per_second >= 0 or math.isinf(min_per_second):
+            raise ValueError(f"min_per_second must be a finite number >= 0, got {min_per_second!r}")
+        if not window > 0 or math.isinf(window):
+            raise ValueError(f"window must be a finite number > 0, got {window!r}")
+        self.ratio = float(ratio)
+        self.min_per_second = float(min_per_second)
+        self.window = float(window)
+        self._reserve = self.min_per_second * self.window
+        self._width = self.window / _BUDGET_SLOTS
+        self._lock = threading.Lock()
+        self._epochs = [-1] * _BUDGET_SLOTS
+        self._requests = [0] * _BUDGET_SLOTS
+        self._retries = [0] * _BUDGET_SLOTS
+        self._rejected = 0
+
+    def _slot(self) -> tuple[int, int]:
+        """Index and epoch of the current slot; clears it if it held an older epoch."""
+        epoch = int(_core.monotonic() // self._width)
+        index = epoch % _BUDGET_SLOTS
+        if self._epochs[index] != epoch:
+            self._epochs[index] = epoch
+            self._requests[index] = 0
+            self._retries[index] = 0
+        return index, epoch
+
+    def _totals(self, epoch: int) -> tuple[int, int]:
+        oldest = epoch - _BUDGET_SLOTS
+        requests = retries = 0
+        for i in range(_BUDGET_SLOTS):
+            if self._epochs[i] > oldest:
+                requests += self._requests[i]
+                retries += self._retries[i]
+        return requests, retries
+
+    def _available(self, requests: int, retries: int) -> float:
+        return self.ratio * requests + self._reserve - retries
+
+    def deposit(self) -> None:
+        """Record one request (a first attempt). `retry` calls this for you."""
+        with self._lock:
+            index, _ = self._slot()
+            self._requests[index] += 1
+
+    def try_withdraw(self) -> bool:
+        """Take one retry from the budget.
+
+        `retry` calls this before each retry; call it yourself only in a hand-written
+        loop.
+
+        Returns:
+            `True` if the retry is allowed (and was recorded), `False` if the budget is
+            exhausted (recorded as rejected).
+        """
+        with self._lock:
+            index, epoch = self._slot()
+            if self._available(*self._totals(epoch)) >= 1:
+                self._retries[index] += 1
+                return True
+            self._rejected += 1
+            return False
+
+    @property
+    def stats(self) -> RetryBudgetStats:
+        """A consistent `RetryBudgetStats` snapshot of the current window."""
+        with self._lock:
+            _, epoch = self._slot()
+            requests, retries = self._totals(epoch)
+            allowed = max(math.floor(self._available(requests, retries)), 0)
+            return RetryBudgetStats(requests, retries, self._rejected, allowed)
+
+    def reset(self) -> None:
+        """Forget all recorded requests, retries and rejections."""
+        with self._lock:
+            self._epochs = [-1] * _BUDGET_SLOTS
+            self._requests = [0] * _BUDGET_SLOTS
+            self._retries = [0] * _BUDGET_SLOTS
+            self._rejected = 0
+
+    def __repr__(self) -> str:
+        return (
+            f"RetryBudget(ratio={self.ratio:g}, min_per_second={self.min_per_second:g}, "
+            f"window={self.window:g})"
+        )
+
+
+async def _maybe_await(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return await value
+    return value
 
 
 def _parse_seconds(value: Any) -> float | None:
@@ -251,7 +424,13 @@ _RETRY_FALLBACK: dict[str, Any] = {
     "jitter": 0.0,
     "max_time": None,
     "log_level": logging.WARNING,
+    "budget": None,
 }
+
+
+def _async_hooks(**hooks: Callable[..., Any] | None) -> list[str]:
+    """Names of the given hooks that are async callables."""
+    return [name for name, hook in hooks.items() if hook is not None and _core.is_async(hook)]
 
 
 class _Engine:
@@ -268,15 +447,18 @@ class _Engine:
         jitter: float,
         max_time: float | None,
         on: ExceptionTypes,
-        retry_if: Callable[[BaseException], bool] | None,
-        on_retry: Callable[[RetryState], None] | None,
+        retry_if: ExceptionPredicate | None,
+        retry_if_result: ResultPredicate | None,
+        on_retry: RetryCallback | None,
         delay_from: Callable[[BaseException], float | None] | None,
+        budget: RetryBudget | None,
         logger: LoggerLike,
         log_level: int | None,
         log_exc_info: bool,
         stats: RetryStats,
     ) -> None:
         _validate(max_attempts, delay, backoff, max_delay, jitter, max_time)
+        _check_budget(budget)
         self.name = name
         self.max_attempts = max_attempts
         self.delay = delay
@@ -286,12 +468,19 @@ class _Engine:
         self.max_time = max_time
         self.on = on
         self.retry_if = retry_if
+        self.retry_if_result = retry_if_result
         self.on_retry = on_retry
         self.delay_from = delay_from
+        self.budget = budget
         self.log = _core.get_logger(logger)
         self.log_level = log_level
         self.log_exc_info = log_exc_info
         self.stats = stats
+        if budget is not None:  # keeps the budget check off the no-budget hot path
+            self.start_call = self._start_call_with_budget  # type: ignore[method-assign]
+        self.async_hooks = _async_hooks(
+            retry_if=retry_if, retry_if_result=retry_if_result, on_retry=on_retry
+        )
 
     def limit(self) -> int | None:
         """Attempts allowed for this call, honouring the test override at call time."""
@@ -305,6 +494,12 @@ class _Engine:
             self.stats.calls += 1
         return _core.monotonic()
 
+    def _start_call_with_budget(self) -> float:
+        with self.stats._lock:
+            self.stats.calls += 1
+        self.budget.deposit()  # type: ignore[union-attr]  # only installed with a budget
+        return _core.monotonic()
+
     def start_attempt(self) -> None:
         with self.stats._lock:
             self.stats.attempts_total += 1
@@ -316,8 +511,18 @@ class _Engine:
         with self.stats._lock:
             self.stats.total_sleep += seconds
 
-    def _wait_for(self, attempt: int, exc: BaseException) -> float:
-        if self.delay_from is not None:
+    def check_sync(self, *hooks: str) -> None:
+        """Refuse async hooks where nothing can await them."""
+        bad = [h for h in hooks if h in self.async_hooks]
+        if bad:
+            raise TypeError(
+                f"{self.name}: {', '.join(f'{h}=' for h in bad)} is an async function, which "
+                "only an async retry can await: decorate an `async def` function, or use "
+                "`async for attempt in retrying(...)` with `async with attempt:`"
+            )
+
+    def _wait_for(self, attempt: int, exc: BaseException | None) -> float:
+        if self.delay_from is not None and exc is not None:
             try:
                 hint = _parse_hint(self.delay_from(exc))
             except Exception:
@@ -327,45 +532,133 @@ class _Engine:
                 return hint if self.max_delay is None else min(hint, self.max_delay)
         return _compute_delay(attempt, self.delay, self.backoff, self.max_delay, self.jitter)
 
-    def failure(self, attempt: int, exc: BaseException, started: float) -> float | None:
-        """Decide after a failed attempt: the wait in seconds, or None to re-raise."""
-        if isinstance(exc, _NEVER_RETRY):
-            return None
-        with self.stats._lock:
-            self.stats.last_exception = exc
+    def _plan(
+        self, attempt: int, exc: BaseException | None, wanted: bool, started: float
+    ) -> float | None:
+        """The wait before the next attempt, or None to stop (counted and emitted)."""
         wait: float | None = None
+        denied = False
         limit = self.limit()
-        if (self.retry_if is None or self.retry_if(exc)) and (limit is None or attempt < limit):
+        if wanted and (limit is None or attempt < limit):
             wait = self._wait_for(attempt, exc)
             if self.max_time is not None and _core.monotonic() - started + wait > self.max_time:
                 wait = None
             left = _deadline_remaining()
             if wait is not None and left is not None and wait > left:
                 wait = None  # never sleep past the surrounding `deadline`
+            if wait is not None and self.budget is not None and not self.budget.try_withdraw():
+                wait = None
+                denied = True
         if wait is None:
             with self.stats._lock:
                 self.stats.gave_up += 1
+                if denied:
+                    self.stats.budget_exhausted += 1
+            if denied:
+                _core.emit("retry.budget_exhausted", self.name, attempts=attempt, exception=exc)
             _core.emit("retry.gave_up", self.name, attempts=attempt, exception=exc)
             return None
         with self.stats._lock:
             self.stats.retries += 1
-        if self.on_retry is not None:
-            self.on_retry(RetryState(attempt, exc, wait, _core.monotonic() - started))
+        return wait
+
+    def _state(
+        self, attempt: int, exc: BaseException | None, result: Any, wait: float, started: float
+    ) -> RetryState:
+        return RetryState(attempt, exc, wait, _core.monotonic() - started, result)
+
+    def _announce(self, attempt: int, exc: BaseException | None, result: Any, wait: float) -> None:
         if self.log_level is not None:
+            limit = self.limit()
+            what = repr(exc) if exc is not None else f"returned {result!r}"
             self.log.log(
                 self.log_level,
-                "%s failed (attempt %d/%s): %r; retrying in %.3fs",
+                "%s failed (attempt %d/%s): %s; retrying in %.3fs",
                 self.name,
                 attempt,
                 "inf" if limit is None else limit,
-                exc,
+                what,
                 wait,
-                exc_info=(type(exc), exc, exc.__traceback__) if self.log_exc_info else None,
+                exc_info=(
+                    (type(exc), exc, exc.__traceback__)
+                    if self.log_exc_info and exc is not None
+                    else None
+                ),
             )
         _core.emit(
             "retry.attempt_failed", self.name, attempt=attempt, exception=exc, next_delay=wait
         )
+
+    def _record(self, exc: BaseException) -> None:
+        with self.stats._lock:
+            self.stats.last_exception = exc
+
+    # -- sync decisions -------------------------------------------------------------------
+    def failure(self, attempt: int, exc: BaseException, started: float) -> float | None:
+        """Decide after a failed attempt: the wait in seconds, or None to re-raise."""
+        if isinstance(exc, _NEVER_RETRY):
+            return None
+        self.check_sync("retry_if", "on_retry")
+        self._record(exc)
+        wanted = self.retry_if is None or bool(self.retry_if(exc))
+        wait = self._plan(attempt, exc, wanted, started)
+        if wait is not None:
+            if self.on_retry is not None:
+                self.on_retry(self._state(attempt, exc, None, wait, started))
+            self._announce(attempt, exc, None, wait)
         return wait
+
+    def rejects(self, result: Any) -> bool:
+        """True if `retry_if_result` asks for another attempt (sync callers)."""
+        if self.retry_if_result is None:
+            return False
+        self.check_sync("retry_if_result")
+        return bool(self.retry_if_result(result))
+
+    def result_failure(self, attempt: int, result: Any, started: float) -> float | None:
+        """Decide after a rejected result: the wait, or None to return it as is."""
+        self.check_sync("on_retry")
+        wait = self._plan(attempt, None, True, started)
+        if wait is not None:
+            if self.on_retry is not None:
+                self.on_retry(self._state(attempt, None, result, wait, started))
+            self._announce(attempt, None, result, wait)
+        return wait
+
+    # -- async decisions ------------------------------------------------------------------
+    async def afailure(self, attempt: int, exc: BaseException, started: float) -> float | None:
+        """`failure` for async callers: async hooks are awaited."""
+        if isinstance(exc, _NEVER_RETRY):
+            return None
+        self._record(exc)
+        wanted = self.retry_if is None or bool(await _maybe_await(self.retry_if(exc)))
+        wait = self._plan(attempt, exc, wanted, started)
+        if wait is not None:
+            if self.on_retry is not None:
+                await _maybe_await(self.on_retry(self._state(attempt, exc, None, wait, started)))
+            self._announce(attempt, exc, None, wait)
+        return wait
+
+    async def arejects(self, result: Any) -> bool:
+        """`rejects` for async callers."""
+        if self.retry_if_result is None:
+            return False
+        return bool(await _maybe_await(self.retry_if_result(result)))
+
+    async def aresult_failure(self, attempt: int, result: Any, started: float) -> float | None:
+        """`result_failure` for async callers."""
+        wait = self._plan(attempt, None, True, started)
+        if wait is not None:
+            if self.on_retry is not None:
+                state = self._state(attempt, None, result, wait, started)
+                await _maybe_await(self.on_retry(state))
+            self._announce(attempt, None, result, wait)
+        return wait
+
+
+def _check_budget(budget: Any) -> None:
+    if budget is not None and not isinstance(budget, RetryBudget):
+        raise TypeError(f"budget must be a RetryBudget or None, got {budget!r}")
 
 
 @overload
@@ -380,9 +673,11 @@ def retry(
     jitter: float = ...,
     max_time: float | None = ...,
     on: ExceptionTypes = ...,
-    retry_if: Callable[[BaseException], bool] | None = ...,
-    on_retry: Callable[[RetryState], None] | None = ...,
+    retry_if: ExceptionPredicate | None = ...,
+    retry_if_result: ResultPredicate | None = ...,
+    on_retry: RetryCallback | None = ...,
     delay_from: Callable[[BaseException], float | None] | None = ...,
+    budget: RetryBudget | None = ...,
     logger: LoggerLike = ...,
     log_level: int | None = ...,
     log_exc_info: bool = ...,
@@ -399,9 +694,11 @@ def retry(
     jitter: float = ...,
     max_time: float | None = ...,
     on: ExceptionTypes = ...,
-    retry_if: Callable[[BaseException], bool] | None = ...,
-    on_retry: Callable[[RetryState], None] | None = ...,
+    retry_if: ExceptionPredicate | None = ...,
+    retry_if_result: ResultPredicate | None = ...,
+    on_retry: RetryCallback | None = ...,
     delay_from: Callable[[BaseException], float | None] | None = ...,
+    budget: RetryBudget | None = ...,
     logger: LoggerLike = ...,
     log_level: int | None = ...,
     log_exc_info: bool = ...,
@@ -417,14 +714,16 @@ def retry(
     jitter: float = _UNSET,
     max_time: float | None = _UNSET,
     on: ExceptionTypes = Exception,
-    retry_if: Callable[[BaseException], bool] | None = None,
-    on_retry: Callable[[RetryState], None] | None = None,
+    retry_if: ExceptionPredicate | None = None,
+    retry_if_result: ResultPredicate | None = None,
+    on_retry: RetryCallback | None = None,
     delay_from: Callable[[BaseException], float | None] | None = None,
+    budget: RetryBudget | None = _UNSET,
     logger: LoggerLike = None,
     log_level: int | None = _UNSET,
     log_exc_info: bool = False,
 ) -> Any:
-    """Retry a function when it raises, optionally with exponential backoff.
+    """Retry a function when it raises (or returns a bad value), with optional backoff.
 
     Works bare (`@retry`), with options (`@retry(max_attempts=5)`) and as a plain
     call (`retry(func, max_attempts=5)`). Async functions are awaited and slept
@@ -433,7 +732,15 @@ def retry(
     The wait before attempt `n + 1` is
     `min(delay * backoff ** (n - 1), max_delay) + random.uniform(0, jitter)`.
     The last exception is re-raised unchanged, with its original traceback, once
-    attempts or the time budget are exhausted.
+    attempts, the time budget or the retry budget are exhausted.
+
+    With `retry_if_result`, a returned value for which the predicate is true is treated
+    as a failure and retried. When no retry is left, that last value is **returned**
+    (no exception is raised), so check it if it matters.
+
+    For `async def` functions, `retry_if`, `retry_if_result` and `on_retry` may be
+    `async def` callables; they are awaited. A sync function given an async callable
+    raises `TypeError` when decorated.
 
     `asyncio.CancelledError`, `KeyboardInterrupt`, `SystemExit` and `GeneratorExit` are
     never retried, even with `on=BaseException` or when listed in `on`. Cancelling an
@@ -445,8 +752,9 @@ def retry(
     wait would outlast the deadline the last exception is re-raised instead.
 
     Statistics are available through `retry_stats`. The events `retry.attempt_failed`,
-    `retry.succeeded` and `retry.gave_up` are emitted for `python_wrap.events`. Under
-    `python_wrap.testing`, an `overrides.max_attempts` cap lowers `max_attempts`.
+    `retry.succeeded`, `retry.gave_up` and `retry.budget_exhausted` are emitted for
+    `python_wrap.events`. Under `python_wrap.testing`, an `overrides.max_attempts` cap
+    lowers `max_attempts`.
 
     Args:
         func: The function to wrap (when used without parentheses).
@@ -459,11 +767,17 @@ def retry(
         max_time: Total time budget in seconds, measured from the first attempt. If the
             next wait would run past it, the last exception is re-raised instead.
         on: Exception type(s) that trigger a retry; anything else propagates at once.
-        retry_if: Extra predicate; the exception is retried only if it returns True.
-        on_retry: Called with a `RetryState` before each wait.
+        retry_if: Extra predicate on the exception; it is retried only if this returns
+            True. May be async for async functions.
+        retry_if_result: Predicate on the return value; True means "retry". When no
+            retry is left the last value is returned. May be async for async functions.
+        on_retry: Called with a `RetryState` before each wait. May be async for async
+            functions.
         delay_from: Called with the exception; a number is the exact wait for this
             attempt (no backoff, no jitter; still capped by `max_delay` and `max_time`),
             `None` means use the normal backoff. See `retry_after_header`.
+        budget: A `RetryBudget` shared with other retried code. When it refuses a retry
+            the last exception is re-raised (or the last result returned) at once.
         logger: Logger (or logger name) for the per-retry message.
         log_level: Level of the per-retry message, or `None` to not log.
         log_exc_info: Attach the traceback to the per-retry log record.
@@ -473,6 +787,8 @@ def retry(
 
     Raises:
         ValueError: If an option is out of range (raised when decorating).
+        TypeError: If `budget` is not a `RetryBudget`, or a sync function is given an
+            async `retry_if`, `retry_if_result` or `on_retry` (raised when decorating).
 
     Example:
         >>> @retry(max_attempts=5, delay=0.5, backoff=2, on=ConnectionError)
@@ -486,6 +802,7 @@ def retry(
         jitter=jitter,
         max_time=max_time,
         log_level=log_level,
+        budget=budget,
     )
     max_attempts, delay, backoff = ds["max_attempts"], ds["delay"], ds["backoff"]
     max_delay, jitter, max_time, log_level = (
@@ -494,8 +811,10 @@ def retry(
         ds["max_time"],
         ds["log_level"],
     )
+    budget = ds["budget"]
     # Validate eagerly so a bad option fails at decoration time, even with no function yet.
     _validate(max_attempts, delay, backoff, max_delay, jitter, max_time)
+    _check_budget(budget)
 
     def decorate(f: Callable[P, R]) -> Callable[P, R]:
         stats = RetryStats()
@@ -509,13 +828,16 @@ def retry(
             max_time=max_time,
             on=on,
             retry_if=retry_if,
+            retry_if_result=retry_if_result,
             on_retry=on_retry,
             delay_from=delay_from,
+            budget=budget,
             logger=logger,
             log_level=log_level,
             log_exc_info=log_exc_info,
             stats=stats,
         )
+        check_result = retry_if_result is not None
 
         if _core.is_async(f):
             af = cast("Callable[..., Coroutine[Any, Any, Any]]", f)
@@ -529,18 +851,24 @@ def retry(
                     try:
                         result = await af(*args, **kwargs)
                     except on as exc:
-                        wait = engine.failure(attempt, exc, started)
+                        wait = await engine.afailure(attempt, exc, started)
                         if wait is None:
                             raise
                     else:
-                        engine.success(attempt)
-                        return result
+                        if not check_result or not await engine.arejects(result):
+                            engine.success(attempt)
+                            return result
+                        wait = await engine.aresult_failure(attempt, result, started)
+                        if wait is None:
+                            return result
                     await _core.async_sleep(wait)
                     engine.slept(wait)
                     attempt += 1
 
             setattr(async_wrapper, _STATS_ATTR, stats)
             return cast("Callable[P, R]", async_wrapper)
+
+        engine.check_sync(*engine.async_hooks)
 
         @functools.wraps(f)
         def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
@@ -555,8 +883,12 @@ def retry(
                     if wait is None:
                         raise
                 else:
-                    engine.success(attempt)
-                    return result
+                    if not check_result or not engine.rejects(result):
+                        engine.success(attempt)
+                        return result
+                    wait = engine.result_failure(attempt, result, started)
+                    if wait is None:
+                        return result
                 _core.sleep(wait)
                 engine.slept(wait)
                 attempt += 1
@@ -578,7 +910,13 @@ class Attempt:
 
     Exceptions that `retry` would retry are swallowed by `with attempt:` (the loop then
     waits and continues); other exceptions, and the failure of the final attempt,
-    propagate.
+    propagate. In an `async for` loop, use `async with attempt:` when `retry_if`,
+    `retry_if_result` or `on_retry` are async callables (plain `with` works otherwise).
+
+    With `retry_if_result`, store the value the block produced in `attempt.result`; the
+    predicate is checked when the block ends and a rejected value starts another
+    attempt. When no retry is left the loop simply ends, leaving the last value in
+    your variable (and in `attempt.result`).
 
     Attributes:
         number: 1-based number of this attempt.
@@ -588,6 +926,17 @@ class Attempt:
         self.number = number
         self._run = run
         self._wait: float | None = None
+        self._gave_up = False
+        self._result: Any = _MISSING
+
+    @property
+    def result(self) -> Any:
+        """The value checked by `retry_if_result` (`None` until you set it)."""
+        return None if self._result is _MISSING else self._result
+
+    @result.setter
+    def result(self, value: Any) -> None:
+        self._result = value
 
     def __enter__(self) -> Attempt:
         self._run.engine.start_attempt()
@@ -600,9 +949,36 @@ class Attempt:
         tb: TracebackType | None,
     ) -> bool:
         engine = self._run.engine
-        if exc is None or not isinstance(exc, engine.on):
+        if exc is None:
+            if self._result is not _MISSING and engine.rejects(self._result):
+                self._wait = engine.result_failure(self.number, self._result, self._run.started)
+                self._gave_up = self._wait is None
+            return False
+        if not isinstance(exc, engine.on):
             return False
         self._wait = engine.failure(self.number, exc, self._run.started)
+        return self._wait is not None
+
+    async def __aenter__(self) -> Attempt:
+        self._run.engine.start_attempt()
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> bool:
+        engine = self._run.engine
+        if exc is None:
+            if self._result is not _MISSING and await engine.arejects(self._result):
+                started = self._run.started
+                self._wait = await engine.aresult_failure(self.number, self._result, started)
+                self._gave_up = self._wait is None
+            return False
+        if not isinstance(exc, engine.on):
+            return False
+        self._wait = await engine.afailure(self.number, exc, self._run.started)
         return self._wait is not None
 
 
@@ -629,7 +1005,8 @@ class Retrying:
             yield attempt
             wait = attempt._wait
             if wait is None:
-                run.engine.success(number)
+                if not attempt._gave_up:
+                    run.engine.success(number)
                 return
             _core.sleep(wait)
             run.engine.slept(wait)
@@ -643,7 +1020,8 @@ class Retrying:
             yield attempt
             wait = attempt._wait
             if wait is None:
-                run.engine.success(number)
+                if not attempt._gave_up:
+                    run.engine.success(number)
                 return
             await _core.async_sleep(wait)
             run.engine.slept(wait)
@@ -659,9 +1037,11 @@ def retrying(
     jitter: float = _UNSET,
     max_time: float | None = _UNSET,
     on: ExceptionTypes = Exception,
-    retry_if: Callable[[BaseException], bool] | None = None,
-    on_retry: Callable[[RetryState], None] | None = None,
+    retry_if: ExceptionPredicate | None = None,
+    retry_if_result: ResultPredicate | None = None,
+    on_retry: RetryCallback | None = None,
     delay_from: Callable[[BaseException], float | None] | None = None,
+    budget: RetryBudget | None = _UNSET,
     logger: LoggerLike = None,
     log_level: int | None = _UNSET,
     log_exc_info: bool = False,
@@ -670,12 +1050,18 @@ def retrying(
     """Retry an inline block of code instead of a whole function.
 
     Takes the same options as `retry` and behaves identically (backoff, jitter,
-    `max_time`, `delay_from`, cancellation rules, events, test overrides). Put the
-    risky code in `with attempt:`: a retryable exception is swallowed and the loop
+    `max_time`, `delay_from`, `budget`, cancellation rules, events, test overrides). Put
+    the risky code in `with attempt:`: a retryable exception is swallowed and the loop
     waits and continues; success ends the loop; the final failure propagates.
 
     Use `for` in sync code and `async for` in async code. Do not use `for` inside a
-    coroutine, it would block the event loop while waiting.
+    coroutine, it would block the event loop while waiting. Async `retry_if`,
+    `retry_if_result` or `on_retry` callables need `async for` and `async with attempt:`;
+    with plain `with attempt:` they raise `TypeError`.
+
+    For `retry_if_result`, assign the block's value to `attempt.result`; a rejected
+    value is retried, and when no retry is left the loop ends normally with the last
+    value (like `retry`, nothing is raised).
 
     Args:
         max_attempts: Total attempts allowed, or `None` for no limit.
@@ -685,9 +1071,11 @@ def retrying(
         jitter: Up to this many random extra seconds are added to each wait.
         max_time: Total time budget in seconds from the first attempt.
         on: Exception type(s) that trigger a retry.
-        retry_if: Extra predicate; retry only if it returns True.
+        retry_if: Extra predicate on the exception; retry only if it returns True.
+        retry_if_result: Predicate on `attempt.result`; True means "retry".
         on_retry: Called with a `RetryState` before each wait.
         delay_from: Exact wait derived from the exception, or `None` for backoff.
+        budget: A shared `RetryBudget`; when it refuses, the loop stops retrying.
         logger: Logger (or logger name) for the per-retry message.
         log_level: Level of the per-retry message, or `None` to not log.
         log_exc_info: Attach the traceback to the per-retry log record.
@@ -698,6 +1086,7 @@ def retrying(
 
     Raises:
         ValueError: If an option is out of range.
+        TypeError: If `budget` is not a `RetryBudget`.
 
     Example:
         >>> for attempt in retrying(max_attempts=3, delay=0.1, on=ConnectionError):
@@ -712,6 +1101,7 @@ def retrying(
         jitter=jitter,
         max_time=max_time,
         log_level=log_level,
+        budget=budget,
     )
     max_attempts, delay, backoff = ds["max_attempts"], ds["delay"], ds["backoff"]
     max_delay, jitter, max_time, log_level = (
@@ -731,8 +1121,10 @@ def retrying(
             max_time=max_time,
             on=on,
             retry_if=retry_if,
+            retry_if_result=retry_if_result,
             on_retry=on_retry,
             delay_from=delay_from,
+            budget=ds["budget"],
             logger=logger,
             log_level=log_level,
             log_exc_info=log_exc_info,

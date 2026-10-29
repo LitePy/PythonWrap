@@ -47,7 +47,7 @@ reset_config()
 | Key | Effect |
 | --- | --- |
 | `logger` | Logger (or name) used by every decorator that logs and was not given `logger=`. `None` restores the package logger. |
-| `retry` | Dict of defaults for `retry` and `retrying`: `max_attempts`, `delay`, `backoff`, `max_delay`, `jitter`, `max_time`, `log_level`. |
+| `retry` | Dict of defaults for `retry` and `retrying`: `max_attempts`, `delay`, `backoff`, `max_delay`, `jitter`, `max_time`, `log_level`, `budget` (one shared `RetryBudget`). |
 | `redact` | Replaces the built-in `DEFAULT_REDACT` list for `log_args` and `audit`. `None` restores it. |
 | `redact_extra` | Names **added** to the redaction list (the built-ins stay), for `log_args` and `audit`. |
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any, TypeVar, cast
+from typing import Any, NoReturn, TypeVar, cast
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -78,6 +78,13 @@ class Policy:
     _outer: tuple[_Decorator, ...]
     _inner: tuple[_Decorator, ...]
     _roles: dict[str, tuple[_Decorator, ...]]
+
+    def __reduce__(self) -> NoReturn:
+        raise TypeError(
+            "cannot pickle a Policy: it holds decorator closures. Define the policy at "
+            "module level so each process builds it on import; functions decorated "
+            "with it pickle by reference."
+        )
 
     def __init__(
         self,

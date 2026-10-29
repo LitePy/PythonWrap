@@ -105,9 +105,10 @@ unsubscribe()
 
 | Event | Fields |
 | --- | --- |
-| `retry.attempt_failed` | `attempt` (int, 1-based), `exception`, `next_delay` (seconds) |
+| `retry.attempt_failed` | `attempt` (int, 1-based), `exception` (`None` for a rejected result), `next_delay` (seconds) |
 | `retry.succeeded` | `attempts` (total made) |
-| `retry.gave_up` | `attempts`, `exception` |
+| `retry.gave_up` | `attempts`, `exception` (`None` for a rejected result) |
+| `retry.budget_exhausted` | `attempts`, `exception`: a shared `RetryBudget` refused the retry (`retry.gave_up` follows) |
 | `timeout.expired` | `seconds` (the limit) |
 | `circuit.state_changed` | `old`, `new` (`closed`, `open`, `half_open`) |
 | `circuit.rejected` | `retry_after` (seconds) |
@@ -117,7 +118,11 @@ unsubscribe()
 | `cache.hit` | none |
 | `cache.miss` | none |
 | `cache.evicted` | `reason` (`lru` or `ttl`) |
+| `cache.stale` | none (a stale value was served and a background refresh started) |
+| `cache.refresh_failed` | `exception` (the stale value is kept) |
 | `bulkhead.rejected` | `active`, `waiting` |
+| `periodic.run` | `run` (1-based), `seconds` (how long the run took) |
+| `periodic.failed` | `run`, `exception` |
 
 ```python
 from python_wrap.events import EVENT_NAMES
