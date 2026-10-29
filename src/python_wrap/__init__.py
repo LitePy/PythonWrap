@@ -156,7 +156,7 @@ from .validation import (
     validate_args,
 )
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 # A library must never configure logging; this only silences "no handler" warnings.
 logging.getLogger("python_wrap").addHandler(logging.NullHandler())
