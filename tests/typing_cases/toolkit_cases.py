@@ -7,7 +7,10 @@ from python_wrap import (
     aprocess_batches,
     expiring,
     idempotent,
+    memoize,
     process_batches,
+    retry,
+    retrying,
     single_instance,
     switch,
     timed,
@@ -63,3 +66,32 @@ async def check_async() -> None:
         return str(value)
 
     assert_type(await aprocess_batches([1, 2], handler), BatchResult[int, str])
+
+
+@retry(delays=[5, 30, 120], log_values=False)
+def scheduled(value: int) -> str:
+    return str(value)
+
+
+assert_type(scheduled(1), str)
+scheduled("bad")  # type: ignore[arg-type]
+
+
+async def scheduled_async() -> None:
+    @retry(delays=(1, 2), log_values=False)
+    async def operation(value: int) -> str:
+        return str(value)
+
+    assert_type(await operation(1), str)
+    async for attempt in retrying(delays=[0, 1], log_values=False):
+        async with attempt:
+            await operation(1)
+
+
+@memoize(copy_result=True)
+def isolated(value: int) -> list[int]:
+    return [value]
+
+
+assert_type(isolated(1), list[int])
+isolated("bad")  # type: ignore[arg-type]

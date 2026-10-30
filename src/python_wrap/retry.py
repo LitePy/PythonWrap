@@ -13,7 +13,7 @@ import random
 import sys
 import time
 import warnings
-from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator, Sequence
 from dataclasses import dataclass
 from types import TracebackType
 from typing import Any, NoReturn, Protocol, TypeVar, cast, overload
@@ -93,6 +93,25 @@ def _validate(
         raise ValueError(f"max_delay must be >= 0, got {max_delay!r}")
     if max_time is not None and max_time < 0:
         raise ValueError(f"max_time must be >= 0 or None, got {max_time!r}")
+
+
+def _validate_delays(delays: Sequence[float] | None) -> tuple[float, ...] | None:
+    if delays is None:
+        return None
+    if not isinstance(delays, Sequence) or isinstance(delays, (str, bytes)) or not delays:
+        raise ValueError("delays must be a nonempty sequence of finite nonnegative seconds")
+    values = []
+    for value in delays:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("delays must contain finite nonnegative seconds")
+        try:
+            normalized = float(value)
+        except OverflowError as exc:
+            raise ValueError("delays must contain finite nonnegative seconds") from exc
+        if not math.isfinite(normalized) or normalized < 0:
+            raise ValueError("delays must contain finite nonnegative seconds")
+        values.append(normalized)
+    return tuple(values)
 
 
 def _compute_delay(
@@ -549,12 +568,15 @@ class _Engine:
         log_level: int | None,
         log_exc_info: bool,
         stats: RetryStats,
+        delays: Sequence[float] | None = None,
+        log_values: bool = True,
     ) -> None:
         _validate(max_attempts, delay, backoff, max_delay, jitter, max_time)
         _check_budget(budget)
         self.name = name
         self.max_attempts = max_attempts
         self.delay = delay
+        self.delays = _validate_delays(delays)
         self.backoff = backoff
         self.max_delay = max_delay
         self.jitter = jitter
@@ -568,6 +590,7 @@ class _Engine:
         self.delay_from = delay_from
         self.budget = budget
         self.log = _core.get_logger(logger)
+        self.log_values = log_values
         self.log_level = log_level
         self.log_exc_info = log_exc_info
         self.stats = stats
@@ -627,11 +650,20 @@ class _Engine:
                     hint = None
                 else:
                     hint = _parse_hint(raw_hint)
-            except Exception:
-                self.log.debug("%s: delay_from raised; using backoff", self.name, exc_info=True)
+            except Exception as hint_error:
+                with contextlib.suppress(Exception):
+                    self.log.debug(
+                        "%s: delay_from raised (%s); using backoff",
+                        self.name,
+                        type(hint_error).__name__,
+                        exc_info=self.log_values,
+                    )
                 hint = None
             if hint is not None:
                 return hint if self.max_delay is None else min(hint, self.max_delay)
+        if self.delays is not None:
+            delay = self.delays[min(attempt - 1, len(self.delays) - 1)]
+            return _compute_delay(1, delay, 1.0, self.max_delay, self.jitter)
         return _compute_delay(attempt, self.delay, self.backoff, self.max_delay, self.jitter)
 
     def _plan(
@@ -677,7 +709,12 @@ class _Engine:
     def _announce(self, attempt: int, exc: BaseException | None, result: Any, wait: float) -> None:
         if self.log_level is not None:
             limit = self.limit()
-            what = repr(exc) if exc is not None else f"returned {result!r}"
+            if self.log_values:
+                what = repr(exc) if exc is not None else f"returned {result!r}"
+            else:
+                what = (
+                    type(exc).__name__ if exc is not None else f"returned {type(result).__name__}"
+                )
             self.log.log(
                 self.log_level,
                 "%s failed (attempt %d/%s): %s; retrying in %.3fs",
@@ -688,7 +725,7 @@ class _Engine:
                 wait,
                 exc_info=(
                     (type(exc), exc, exc.__traceback__)
-                    if self.log_exc_info and exc is not None
+                    if self.log_values and self.log_exc_info and exc is not None
                     else None
                 ),
             )
@@ -706,11 +743,17 @@ class _Engine:
             return
         try:
             self.on_retry(state)
-        except Exception:
-            with contextlib.suppress(Exception):
-                self.log.exception(
-                    "%s: on_retry hook failed; the original error/result is kept", self.name
-                )
+        except Exception as hook_error:
+            self._hook_failure(hook_error)
+
+    def _hook_failure(self, error: Exception) -> None:
+        with contextlib.suppress(Exception):
+            self.log.error(
+                "%s: on_retry hook failed (%s); the original error/result is kept",
+                self.name,
+                type(error).__name__,
+                exc_info=self.log_values,
+            )
 
     async def _arun_hook(self, state: RetryState) -> None:
         """`_run_hook` for async callers: an async hook is awaited, failures swallowed."""
@@ -718,11 +761,8 @@ class _Engine:
             return
         try:
             await _maybe_await(self.on_retry(state))
-        except Exception:
-            with contextlib.suppress(Exception):
-                self.log.exception(
-                    "%s: on_retry hook failed; the original error/result is kept", self.name
-                )
+        except Exception as hook_error:
+            self._hook_failure(hook_error)
 
     # -- sync decisions -------------------------------------------------------------------
     def failure(self, attempt: int, exc: BaseException, started: float) -> float | None:
@@ -804,10 +844,12 @@ def retry(
     retry_if_result: ResultPredicate | None = ...,
     on_retry: RetryCallback | None = ...,
     delay_from: Callable[[Any], float | None] | None = ...,
+    delays: Sequence[float] | None = ...,
     budget: RetryBudget | None = ...,
     logger: LoggerLike = ...,
     log_level: int | None = ...,
     log_exc_info: bool = ...,
+    log_values: bool = ...,
 ) -> F: ...
 @overload
 def retry(
@@ -825,10 +867,12 @@ def retry(
     retry_if_result: ResultPredicate | None = ...,
     on_retry: RetryCallback | None = ...,
     delay_from: Callable[[Any], float | None] | None = ...,
+    delays: Sequence[float] | None = ...,
     budget: RetryBudget | None = ...,
     logger: LoggerLike = ...,
     log_level: int | None = ...,
     log_exc_info: bool = ...,
+    log_values: bool = ...,
 ) -> Callable[[F], F]: ...
 def retry(
     func: Callable[..., Any] | None = None,
@@ -845,10 +889,12 @@ def retry(
     retry_if_result: ResultPredicate | None = None,
     on_retry: RetryCallback | None = None,
     delay_from: Callable[[Any], float | None] | None = None,
+    delays: Sequence[float] | None = None,
     budget: RetryBudget | None = _UNSET,
     logger: LoggerLike = None,
     log_level: int | None = _UNSET,
     log_exc_info: bool = False,
+    log_values: bool = True,
 ) -> Any:
     """Retry a function when it raises (or returns a bad value), with optional backoff.
 
@@ -886,6 +932,10 @@ def retry(
     Args:
         func: The function to wrap (when used without parentheses).
         max_attempts: Total number of calls allowed, or `None` for no limit.
+        delays: Optional nonempty sequence of finite nonnegative waits. Failure n
+            uses entry n (one-based), repeating the last entry after exhaustion.
+            Overrides delay/backoff; max_delay caps before jitter. A valid delay_from
+            hint takes priority. Does not change max_attempts. Copied at creation.
         delay: Base wait in seconds before the second attempt.
         backoff: Multiplier applied to the wait after each failure (>= 1).
         max_delay: Upper bound for the backoff wait (before jitter is added); also caps
@@ -909,6 +959,9 @@ def retry(
             the last exception is re-raised (or the last result returned) at once.
         logger: Logger (or logger name) for the per-retry message.
         log_level: Level of the per-retry message, or `None` to not log.
+        log_values: False logs only exception/result type names, including hook/hint
+            failures, and suppresses log_exc_info. Events, stats and callbacks still
+            receive original objects; function names and custom loggers are caller-owned.
         log_exc_info: Attach the traceback to the per-retry log record.
 
     Returns:
@@ -944,6 +997,7 @@ def retry(
     # Validate eagerly so a bad option fails at decoration time, even with no function yet.
     _validate(max_attempts, delay, backoff, max_delay, jitter, max_time)
     _check_budget(budget)
+    delays = _validate_delays(delays)
 
     def decorate(f: Callable[P, R]) -> Callable[P, R]:
         stats = RetryStats()
@@ -960,10 +1014,12 @@ def retry(
             retry_if_result=retry_if_result,
             on_retry=on_retry,
             delay_from=delay_from,
+            delays=delays,
             budget=budget,
             logger=logger,
             log_level=log_level,
             log_exc_info=log_exc_info,
+            log_values=log_values,
             stats=stats,
         )
         check_result = retry_if_result is not None
@@ -1170,10 +1226,12 @@ def retrying(
     retry_if_result: ResultPredicate | None = None,
     on_retry: RetryCallback | None = None,
     delay_from: Callable[[Any], float | None] | None = None,
+    delays: Sequence[float] | None = None,
     budget: RetryBudget | None = _UNSET,
     logger: LoggerLike = None,
     log_level: int | None = _UNSET,
     log_exc_info: bool = False,
+    log_values: bool = True,
     name: str = "retrying",
 ) -> Retrying:
     """Retry an inline block of code instead of a whole function.
@@ -1194,6 +1252,10 @@ def retrying(
 
     Args:
         max_attempts: Total attempts allowed, or `None` for no limit.
+        delays: Optional nonempty sequence of finite nonnegative waits. Failure n
+            uses entry n (one-based), repeating the last entry after exhaustion.
+            Overrides delay/backoff; max_delay caps before jitter. A valid delay_from
+            hint takes priority. Does not change max_attempts. Copied at creation.
         delay: Base wait in seconds before the second attempt.
         backoff: Multiplier applied to the wait after each failure (>= 1).
         max_delay: Upper bound for the backoff wait (before jitter).
@@ -1209,6 +1271,9 @@ def retrying(
         budget: A shared `RetryBudget`; when it refuses, the loop stops retrying.
         logger: Logger (or logger name) for the per-retry message.
         log_level: Level of the per-retry message, or `None` to not log.
+        log_values: False logs only exception/result type names, including hook/hint
+            failures, and suppresses log_exc_info. Events, stats and callbacks still
+            receive original objects; function names and custom loggers are caller-owned.
         log_exc_info: Attach the traceback to the per-retry log record.
         name: Name used in log messages and events.
 
@@ -1255,10 +1320,12 @@ def retrying(
             retry_if_result=retry_if_result,
             on_retry=on_retry,
             delay_from=delay_from,
+            delays=delays,
             budget=ds["budget"],
             logger=logger,
             log_level=log_level,
             log_exc_info=log_exc_info,
+            log_values=log_values,
             stats=RetryStats(),
         )
     )

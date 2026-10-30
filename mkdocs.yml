@@ -201,6 +201,7 @@ nav:
       - Testing your code: cookbook/testing-your-code.md
       - Observability: cookbook/observability.md
       - Framework integrations: cookbook/framework-integrations.md
+      - Existing FastAPI application: cookbook/existing-fastapi-app.md
   - API reference:
       - api/index.md
       - Resilience:

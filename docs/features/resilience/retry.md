@@ -59,6 +59,7 @@ The wait before attempt `n + 1` is `min(delay * backoff ** (n - 1), max_delay) +
 | --- | --- | --- |
 | `max_attempts` | `3` | Total calls allowed. `None` retries forever. |
 | `delay` | `1.0` | Base wait in seconds. |
+| `delays` | `None` | Explicit nonempty delay sequence; repeat the last entry. Overrides `delay`/`backoff`, with the same cap and jitter. |
 | `backoff` | `1.0` | Multiplier applied after each failure (use `2` for exponential). |
 | `max_delay` | `None` | Cap on the backoff wait (before jitter). |
 | `jitter` | `0.0` | Up to this many random extra seconds, so many clients do not retry in lockstep. |
@@ -71,7 +72,32 @@ The wait before attempt `n + 1` is `min(delay * backoff ** (n - 1), max_delay) +
 | `budget` | `None` | A `RetryBudget` shared with other retried code, so retries stay a fraction of traffic. |
 | `logger` | package logger | Logger or logger name for the per-retry message. |
 | `log_level` | `WARNING` | Level of the per-retry message; `None` disables it. |
+| `log_values` | `True` | Set `False` for exception/result type names only, including hint/hook failures. Also suppresses traceback logging. |
 | `log_exc_info` | `False` | Attach the traceback to the per-retry log record. |
+
+## Job-specific delay schedules
+
+Use `delays=[5, 30, 120]` when the job contract specifies exact waits instead of an
+exponential curve. With `max_attempts=3`, waits are **5 and 30**: there is no wait
+after the final failure. More failures repeat the last entry. Each invocation starts
+from the first entry, and the sequence is copied when the decorator or iterator is
+created. Values must be finite nonnegative seconds; use `[0]` for immediate retries.
+`retrying` accepts the same option.
+
+A valid `delay_from` hint takes priority over the schedule, without jitter. Otherwise
+`max_delay` caps the scheduled wait before adding `jitter`. All attempt/time/deadline
+and retry-budget limits still apply.
+
+## Logging around credentials
+
+Use `log_values=False` when exception messages or response representations can contain
+credentials, URLs with tokens, or customer data. Retry messages then include only the
+exception/result type. Hint/hook failures also omit messages and tracebacks, even if
+`log_exc_info=True`. The default remains compatible with existing logging.
+
+This controls the retry engine's own logs. Stats, events, predicates and callbacks still
+receive the original objects. Keep custom callbacks, function names, event subscribers,
+and the application's final exception handler free of secrets too.
 
 ## Choosing what to retry
 

@@ -63,6 +63,44 @@ fetch_user(Client(), 1)
 assert fetch_user.cache_info().hits == 1
 ```
 
+### Mutable result isolation
+
+By default, cached results are shared by reference. Use `copy_result=True` for
+JSON-shaped data that callers may modify:
+
+```python
+from python_wrap import memoize
+
+source = {"items": [1]}
+
+@memoize(copy_result=True)
+def load() -> dict:
+    return source
+
+first = load()
+first["items"].append(2)
+source["items"].append(3)
+assert load() == {"items": [1]}
+peek = load.cache_get()
+peek["items"].clear()
+assert load() == {"items": [1]}
+```
+
+PythonWrap takes a deep copy before storing a successful value, then gives each
+caller another copy. The first result, cache hits, `cache_get`, concurrent async
+miss waiters and stale refreshes all follow this rule. Cached exceptions retain
+their identity. When caching is disabled, the original function result is returned.
+
+Copies run outside cache locks and follow Python's `deepcopy` protocol. Custom
+objects can deliberately retain identity; this option is appropriate for ordinary
+data containers, not database sessions or HTTP clients. A copy failure raises a
+`TypeError` with the original cause rather than silently sharing the value. Copying
+adds CPU/memory cost, so it is opt-in. An external store's own serialization may
+already supply some isolation, but does not by itself isolate shared async waiters.
+
+For tenant data, also include the authenticated tenant and relevant configuration
+generation in the key. Copying does not provide authorization or tenant partitioning.
+
 ## Expiry and size
 
 ```python
@@ -92,6 +130,7 @@ assert calls == ["a", "b", "c", "c"]
 | `ttl` | Seconds (or a `datetime.timedelta`) an entry stays valid. `None` never expires. |
 | `typed` | If `True`, `f(1)` and `f(1.0)` are cached separately. |
 | `key` | Custom `key(*args, **kwargs)` returning a hashable key. |
+| `copy_result` | Deep-copy successful values on write and delivery; default `False`. |
 | `cache_exceptions` | Exception class (or tuple) to cache like a result. |
 | `exception_ttl` | Seconds a cached exception stays valid (defaults to `ttl`). |
 | `stale_ttl` | Seconds after `ttl` during which a stale value is still served while it is refreshed in the background. See [Serving stale values](#serving-stale-values-while-refreshing). |

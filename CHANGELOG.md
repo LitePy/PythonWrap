@@ -18,6 +18,14 @@ supply Redis clients, SQLAlchemy engines, frameworks and telemetry providers.
 
 ### Added
 
+- Application-fit follow-up: explicit `retry`/`retrying(delays=[...])` schedules,
+  repeating the final wait, and `log_values=False` for retry diagnostics that omit
+  exception/result contents and tracebacks, including failing hooks/hints.
+- Opt-in `memoize(copy_result=True)` isolates mutable cached results on write and
+  delivery, including concurrent callers and explicit cache reads.
+- Existing FastAPI application adoption guide covering tenant keys, response adapters,
+  job delay contracts, and durable outbox/cache boundaries.
+
 - `ContextFilter`, `bind` and `unbind` for context on application log records, plus optional
   Flask, FastAPI/ASGI, Django and Celery lifecycle adapters.
 - Deep `redact` and `is_sensitive` helpers, opt-in `deep=True` argument redaction;

@@ -113,7 +113,7 @@ class Memoized(Protocol[P, R_co]):
         """
 
     def cache_parameters(self) -> dict[str, Any]:
-        """The options: ``maxsize``, ``ttl``, ``typed``, ``cache_exceptions``, ``exception_ttl``."""
+        """Return configuration, including TTL, key behavior and result-copy isolation."""
 
 
 class _MemoizedOnClass(Memoized[P, R_co], Protocol[P, P2, R_co]):
@@ -538,6 +538,7 @@ def memoize(
     exception_ttl: float | datetime.timedelta | None = None,
     store: CacheStore | None = None,
     per_instance: bool = False,
+    copy_result: bool = False,
     logger: _core.LoggerLike = None,
 ) -> Callable[[Callable[P, R]], Memoized[P, R]]: ...
 def memoize(
@@ -553,6 +554,7 @@ def memoize(
     exception_ttl: float | datetime.timedelta | None = None,
     store: CacheStore | None = None,
     per_instance: bool = False,
+    copy_result: bool = False,
     logger: _core.LoggerLike = None,
 ) -> Any:
     """Cache a function's results per argument values.
@@ -588,6 +590,14 @@ def memoize(
     weak-referenceable (a ``__slots__`` class must list ``'__weakref__'``), and a cached
     result that references its instance keeps it alive.
 
+    Mutable results are shared by reference by default. Set ``copy_result=True`` to
+    deepcopy a private snapshot on write and return an independent deepcopy to each
+    caller (including concurrent async miss waiters and ``cache_get``). The first
+    caller cannot mutate the cache, and mutations to an externally retained original
+    result cannot alter the snapshot. Copies follow Python's ``deepcopy`` protocol;
+    unsupported values raise TypeError rather than falling back to a shared object.
+    Cached exceptions are never copied. Copying occurs outside the cache lock.
+
     The wrapper has ``cache_clear()``, ``cache_info()`` (a `CacheInfo`),
     ``cache_delete(*args, **kwargs)``, ``cache_contains(*args, **kwargs)``,
     ``cache_get(*args, **kwargs)`` and ``cache_parameters()``. ``cache_contains`` and
@@ -620,6 +630,8 @@ def memoize(
         store: A `CacheStore` to keep entries in instead of the built-in LRU dict.
         per_instance: For methods: one cache per instance, held through a weak
             reference, keyed by the arguments after ``self``.
+        copy_result: Deepcopy successful values on write and on delivery. False keeps
+            the existing shared-reference behavior. Does not apply while caching is disabled.
         logger: Logger (or name) for failed background refreshes.
 
     Returns:
@@ -632,7 +644,8 @@ def memoize(
             `CacheStore`, ``store`` combined with ``maxsize`` or ``per_instance``, or
             ``per_instance`` on a function without parameters. At call time, for an
             unhashable argument (see above) or, with ``per_instance``, an instance that
-            cannot be weakly referenced.
+            cannot be weakly referenced. Also if copy_result is not bool or a result
+            cannot be deep-copied with copy_result=True (original error is chained).
 
     Example:
         >>> @memoize(maxsize=128, ttl=60)
@@ -643,6 +656,13 @@ def memoize(
         >>> square.cache_info().hits
         1
     """
+    if not isinstance(copy_result, bool):
+        raise TypeError("copy_result must be bool")
+    copier: Callable[[Any], Any] | None = None
+    if copy_result:
+        from copy import deepcopy
+
+        copier = deepcopy
     if maxsize is not None and maxsize < 1:
         raise ValueError("maxsize must be a positive integer or None")
     if store is not None:
@@ -685,6 +705,19 @@ def memoize(
         if per_instance and fast_n == 0:
             raise TypeError("per_instance=True needs a method (a function taking self)")
         name = _core.qualname(f)
+
+        def isolate(value: Any) -> Any:
+            # Never copy while holding a cache lock: user __deepcopy__ methods may
+            # inspect cache_info(), invalidate entries, or call other cached functions.
+            if copier is None:
+                return value
+            try:
+                return copier(value)
+            except Exception as exc:
+                raise TypeError(
+                    f"memoize(copy_result=True) could not deepcopy the result of {name}"
+                ) from exc
+
         main: Any = _LocalStore(maxsize, expiring) if builtin else store
         # per_instance: id(instance) -> (weak reference, that instance's store)
         instances: dict[int, tuple[weakref.ref[Any], _LocalStore]] = {}
@@ -779,26 +812,27 @@ def memoize(
         def report_expired() -> None:
             _core.emit("cache.evicted", name, reason="ttl")
 
-        def save(b: Any, k: Hashable, value: Any, g: int, is_exc: bool = False) -> None:
+        def save(b: Any, k: Hashable, value: Any, g: int, is_exc: bool = False) -> Any:
             if is_exc:
                 seconds = exc_ttl_s
             elif ttl_fn is not None:
                 seconds = ttl_fn(value)
-                if seconds is not None and seconds <= 0:
-                    return  # not worth storing
             else:
                 seconds = ttl_s
+            snapshot = isolate(value) if copy_result and not is_exc else value
+            if not is_exc and seconds is not None and seconds <= 0:
+                return snapshot  # not stored, but async waiters still need a private outcome
             keep = seconds
             if seconds is not None and stale_s is not None and not is_exc:
                 keep = seconds + stale_s
             evicted = 0
             with guard:
                 if g != gen:
-                    return  # cache_clear() ran while computing
+                    return snapshot  # cache_clear() ran while computing
                 t = now()
                 fresh = None if seconds is None else t + seconds
                 expires = None if keep is None else t + keep
-                entry = (value, expires, is_exc, fresh)
+                entry = (snapshot, expires, is_exc, fresh)
                 if builtin:
                     evicted = b.put(k, entry)
                 else:
@@ -808,6 +842,7 @@ def memoize(
                     report_expired()
                 for _ in range(evicted & 0xFFFFFFFF):
                     _core.emit("cache.evicted", name, reason="lru")
+            return snapshot
 
         def refresh_failed(exc: BaseException) -> None:
             _core.get_logger(logger).warning(
@@ -867,7 +902,7 @@ def memoize(
             async def run() -> Any:
                 try:
                     result = await f(*args, **kwargs)
-                    save(b, k, result, g)
+                    result = save(b, k, result, g)
                 except Exception as exc:
                     refresh_failed(exc)
                     raise
@@ -945,7 +980,7 @@ def memoize(
                 raise KeyError("no cached entry for these arguments")
             if entry[2]:
                 raise entry[0]
-            return entry[0]
+            return isolate(entry[0]) if copy_result else entry[0]
 
         def cache_parameters() -> dict[str, Any]:
             return {
@@ -957,6 +992,7 @@ def memoize(
                 "exception_ttl": exc_ttl_s,
                 "store": store,
                 "per_instance": per_instance,
+                "copy_result": copy_result,
             }
 
         data: Any = main.data if builtin else None
@@ -1000,8 +1036,7 @@ def memoize(
                         if not isinstance(exc, asyncio.CancelledError):
                             save(b, k, exc, g, True)
                         raise
-                    save(b, k, result, g)
-                    return result
+                    return save(b, k, result, g)
 
                 def done(_t: asyncio.Future[Any] | None) -> None:
                     with lock:
@@ -1012,7 +1047,8 @@ def memoize(
             if _core.listeners:
                 _core.emit("cache.hit" if shared else "cache.miss", name)
             # one cancelled caller must not cancel the shared computation
-            return await _await_shared(shared_fut)
+            outcome = await _await_shared(shared_fut)
+            return isolate(outcome) if copy_result else outcome
 
         if _core.is_async(f) and builtin and not per_instance:
 
@@ -1042,7 +1078,7 @@ def memoize(
                         refresh_in_task(main, k, args, kwargs)
                     if entry[2]:
                         raise entry[0]
-                    return entry[0]
+                    return isolate(entry[0]) if copy_result else entry[0]
                 if _core.listeners and entry is not None:
                     report_expired()
                 return await amiss(main, k, args, kwargs)
@@ -1068,7 +1104,7 @@ def memoize(
                         refresh_in_task(b, k, args, kwargs)
                     if entry[2]:
                         raise entry[0]
-                    return entry[0]
+                    return isolate(entry[0]) if copy_result else entry[0]
                 if _core.listeners and entry is not None:
                     report_expired()
                 return await amiss(b, k, args, kwargs)
@@ -1115,7 +1151,7 @@ def memoize(
                         refresh_in_thread(main, k, args, kwargs)
                     if entry[2]:
                         raise entry[0]
-                    return entry[0]
+                    return isolate(entry[0]) if copy_result else entry[0]
                 if _core.listeners:
                     if entry is not None:
                         report_expired()
@@ -1125,8 +1161,8 @@ def memoize(
                 except exc_types as exc:
                     save(main, k, exc, g, True)
                     raise
-                save(main, k, result, g)
-                return result
+                snapshot = save(main, k, result, g)
+                return isolate(snapshot) if copy_result else result
 
         else:
 
@@ -1152,7 +1188,7 @@ def memoize(
                         refresh_in_thread(b, k, args, kwargs)
                     if entry[2]:
                         raise entry[0]
-                    return entry[0]
+                    return isolate(entry[0]) if copy_result else entry[0]
                 if _core.listeners:
                     if entry is not None:
                         report_expired()
@@ -1162,8 +1198,8 @@ def memoize(
                 except exc_types as exc:
                     save(b, k, exc, g, True)
                     raise
-                save(b, k, result, g)
-                return result
+                snapshot = save(b, k, result, g)
+                return isolate(snapshot) if copy_result else result
 
         wrapper.cache_clear = cache_clear
         wrapper.cache_info = cache_info
