@@ -418,7 +418,7 @@ def retry_after_header(value: Any, *, json_key: str | None = None) -> float | No
     * a ``retry_after`` attribute;
     * a ``Retry-After`` header (case-insensitive), on the object itself or on
       ``exc.response``;
-    * with ``json_key=``, that key in the response's JSON body (vendor-specific APIs put
+    * with ``json_key=``, that key in the response's JSON body (some APIs put
       ``retry_after`` there). A failing ``.json()`` is ignored.
 
     Values may be seconds or an HTTP-date; dates become seconds from now. Works with
