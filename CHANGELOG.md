@@ -31,6 +31,9 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
   failed attempt (duration, exception type name, following wait). `observability.annotate_span`
   copies it onto an OpenTelemetry span and `observability.sentry_breadcrumbs()` records
   python-wrap events as Sentry breadcrumbs, with exceptions reduced to type names.
+- `HealthRegistry.summary(critical=...)` rolls component health up into `ok`/`degraded`/
+  `down` with a matching HTTP status, served as JSON by `health.wsgi_app()` and
+  `health.asgi_app()` (checks run off the event loop).
 - Celery helpers: `retry_countdown` and `retry_task` schedule Celery task retries from
   `request.retries` with explicit delays or capped backoff, honouring a dependency's
   `retry_after`/`Retry-After`; `shared_breaker` builds a breaker whose state is shared by
