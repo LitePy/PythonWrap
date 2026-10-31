@@ -77,7 +77,7 @@ class Dashboard:
         >>> from python_wrap import _core
         >>> with Dashboard(recent=10) as dash:
         ...     _core.emit("cache.hit", "load")
-        ...     dash.snapshot()["functions"]["load"]["cache_hits"]
+        ...     dash.snapshot()["functions"].get("load", {}).get("cache_hits")
         1
     """
 
