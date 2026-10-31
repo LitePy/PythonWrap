@@ -547,6 +547,7 @@ class CircuitBreaker:
             async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
                 return await self._acall(func, args, kwargs)
 
+            async_wrapper.__python_wrap_layer__ = ("breaker", self)  # type: ignore[attr-defined]
             return cast(F, async_wrapper)
 
         @functools.wraps(func)
@@ -554,6 +555,7 @@ class CircuitBreaker:
             # Sync vs async was decided above, once: no per-call detection.
             return self._call_sync(func, args, kwargs)
 
+        wrapper.__python_wrap_layer__ = ("breaker", self)  # type: ignore[attr-defined]
         return cast(F, wrapper)
 
     def __repr__(self) -> str:

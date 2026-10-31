@@ -185,6 +185,8 @@ class RetryStats:
 
 
 _STATS_ATTR = "__retry_stats__"
+# (role, settings) read by python_wrap.doctor to explain a decorated function.
+_LAYER_ATTR = "__python_wrap_layer__"
 
 
 def retry_stats(func: Callable[..., Any]) -> RetryStats | None:
@@ -999,6 +1001,20 @@ def retry(
     _check_budget(budget)
     delays = _validate_delays(delays)
 
+    settings = {
+        "max_attempts": max_attempts,
+        "delay": delay,
+        "backoff": backoff,
+        "max_delay": max_delay,
+        "jitter": jitter,
+        "max_time": max_time,
+        "delays": delays,
+        "on": on,
+        "retry_if": retry_if is not None,
+        "retry_if_result": retry_if_result is not None,
+        "budget": budget is not None,
+    }
+
     def decorate(f: Callable[P, R]) -> Callable[P, R]:
         stats = RetryStats()
         engine = _Engine(
@@ -1051,6 +1067,7 @@ def retry(
                     attempt += 1
 
             setattr(async_wrapper, _STATS_ATTR, stats)
+            setattr(async_wrapper, _LAYER_ATTR, ("retry", settings))
             return cast("Callable[P, R]", async_wrapper)
 
         engine.check_sync(*engine.async_hooks)
@@ -1079,8 +1096,10 @@ def retry(
                 attempt += 1
 
         setattr(wrapper, _STATS_ATTR, stats)
+        setattr(wrapper, _LAYER_ATTR, ("retry", settings))
         return wrapper
 
+    setattr(decorate, _LAYER_ATTR, ("retry", settings))
     return decorate if func is None else decorate(func)
 
 

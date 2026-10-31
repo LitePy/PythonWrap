@@ -12,6 +12,13 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
 
 ### Added
 
+- `Policy.explain()`, `python_wrap.doctor.doctor(func)` and `python -m python_wrap doctor`
+  describe every layer of a resilience stack and flag risky combinations: unbounded
+  retries, retries of non-idempotent operations, retries without a timeout or budget,
+  timeouts longer than the retry budget, misordered or duplicated layers (codes PW001-PW008).
+- `python_wrap.presets`: `http_client()`, `db_call()` and `third_party_api()` policies with
+  documented timeouts, attempts, backoff, retry budgets and breaker thresholds;
+  `idempotent=False` leaves the retry layer out.
 - Ready-made transient database error predicates: `postgres_transient`, `mysql_transient`,
   `sqlserver_transient` (pyodbc SQLSTATEs and native numbers such as deadlock 1205 and
   Azure SQL 40613), their union `db_transient` (also SQLAlchemy `connection_invalidated`)

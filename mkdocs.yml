@@ -156,6 +156,7 @@ nav:
           - Hedged requests: features/resilience/hedge.md
           - Policies: features/resilience/policies.md
           - Named policies and predicates: features/resilience/named-policies.md
+          - Presets and the policy doctor: features/resilience/presets-and-doctor.md
       - Caching and batching:
           - features/caching/index.md
           - Memoize: features/caching/memoize.md
@@ -216,6 +217,8 @@ nav:
           - Hedging: api/hedging.md
           - Policies: api/policy.md
           - Named registry: api/policies.md
+          - Presets: api/presets.md
+          - Doctor: api/doctor.md
           - Predicates: api/predicates.md
           - HTTP clients: api/http.md
       - Caching and batching:
