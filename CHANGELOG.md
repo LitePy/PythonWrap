@@ -27,6 +27,10 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
 - `python_wrap.presets`: `http_client()`, `db_call()` and `third_party_api()` policies with
   documented timeouts, attempts, backoff, retry budgets and breaker thresholds;
   `idempotent=False` leaves the retry layer out.
+- Celery helpers: `retry_countdown` and `retry_task` schedule Celery task retries from
+  `request.retries` with explicit delays or capped backoff, honouring a dependency's
+  `retry_after`/`Retry-After`; `shared_breaker` builds a breaker whose state is shared by
+  all prefork children.
 - Ready-made transient database error predicates: `postgres_transient`, `mysql_transient`,
   `sqlserver_transient` (pyodbc SQLSTATEs and native numbers such as deadlock 1205 and
   Azure SQL 40613), their union `db_transient` (also SQLAlchemy `connection_invalidated`)

@@ -78,6 +78,46 @@ budget for python-wrap retry/timeout code; Celery retains ownership of actual ta
 limits. Signal handlers are scoped to this app. Installation returns a disconnect handle
 and repeated installation reuses the active handle.
 
+### Retrying tasks with Celery and python-wrap together
+
+Keep the two retry layers apart: python-wrap's in-process `retry` handles short blips
+inside one task run (seconds), and Celery's task retry re-queues the task for longer
+outages (minutes), surviving worker restarts. `retry_task` gives Celery's layer the same
+schedule rules, and uses the wait a dependency asked for (`CircuitOpenError.retry_after`,
+`RateLimitExceeded.retry_after`, a `Retry-After` header) instead of guessing:
+
+<!-- skip -->
+```python
+from python_wrap import CircuitOpenError, retry, timeout
+from python_wrap.celery import retry_task, shared_breaker
+
+vendor_breaker = shared_breaker("vendor-a", redis_client, failure_threshold=5)
+
+
+@vendor_breaker
+@retry(max_attempts=3, delay=0.5, on=ConnectionError)
+@timeout(10)
+def fetch_report(day: str) -> bytes: ...
+
+
+@app.task(bind=True, max_retries=5)
+def import_day(self, day: str) -> None:
+    try:
+        store(fetch_report(day))
+    except (ConnectionError, CircuitOpenError) as exc:
+        retry_task(self, exc, delays=[60, 300, 900])
+```
+
+Prefer this over `autoretry_for=` for dependency errors: `autoretry_for` retries with
+its own backoff and cannot see the breaker's `retry_after`. If you do use
+`autoretry_for`, leave `CircuitOpenError` out of it so an open circuit re-queues with
+`retry_task`'s countdown rather than immediately.
+
+Prefork workers each hold their own in-process breaker state, so without a shared
+backend every child probes a dead dependency separately. `shared_breaker` stores the
+state in Redis (or any state backend) under one stable name per dependency; see
+[multi-process breakers](../features/resilience/multi-process-breakers.md).
+
 ## Worker lifecycle
 
 Create database engines and backend clients in worker initialization when their libraries
