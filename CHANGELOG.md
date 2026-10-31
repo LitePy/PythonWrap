@@ -51,6 +51,13 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
   buffered writers, batchers, debouncers, bulkheads and callables in priority order within
   a time budget, with SIGTERM/SIGINT handler and `atexit` installation and a per-item
   `ShutdownReport`. New `lifecycle.*` events.
+- `benchmarks/soak.py` (policy soak test against a simulated flaky dependency, checking
+  retry amplification, breaker recovery and memory) and `benchmarks/compare.py` (overhead
+  next to tenacity, backoff, cachetools and `functools.lru_cache`, with a ratio gate).
+- Project docs: API stability and deprecation policy with the declared stable core pinned
+  by `tests/test_stability.py`, a threat model and serialization/redaction review, an
+  operations runbook with troubleshooting and the stored key formats, and a production
+  pilot guide.
 - Celery helpers: `retry_countdown` and `retry_task` schedule Celery task retries from
   `request.retries` with explicit delays or capped backoff, honouring a dependency's
   `retry_after`/`Retry-After`; `shared_breaker` builds a breaker whose state is shared by

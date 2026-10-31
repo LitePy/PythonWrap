@@ -172,6 +172,8 @@ nav:
           - Rate limits: features/concurrency/rate-limits.md
           - Throttle and debounce: features/concurrency/throttle-debounce.md
           - Bulkheads: features/concurrency/bulkheads.md
+          - Adaptive limits: features/concurrency/adaptive-limits.md
+          - Graceful shutdown: features/concurrency/graceful-shutdown.md
           - Async helpers: features/concurrency/async-helpers.md
           - Run in a thread: features/concurrency/run-in-thread.md
           - Periodic tasks: features/concurrency/periodic.md
@@ -238,6 +240,8 @@ nav:
           - Concurrency: api/concurrency.md
           - Async helpers: api/aio.md
           - Bulkhead: api/bulkhead.md
+          - Adaptive limits: api/adaptive.md
+          - Graceful shutdown: api/lifecycle.md
           - Periodic: api/periodic.md
           - Coordination: api/coordination.md
           - Idempotency: api/idempotency.md
@@ -278,6 +282,10 @@ nav:
       - Limitations: project/limitations.md
       - Migrating to 0.2: project/migration.md
       - Migrating to 0.3: project/migration-0.3.md
+      - API stability: project/stability.md
+      - Operations runbook: project/operations.md
+      - Threat model: project/threat-model.md
+      - Production pilot: project/pilot.md
       - Migrating from tenacity: project/migrating-from-tenacity.md
       - Migrating from pybreaker: project/migrating-from-pybreaker.md
       - Migrating from limits: project/migrating-from-limits.md
