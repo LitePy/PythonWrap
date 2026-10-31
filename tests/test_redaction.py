@@ -41,7 +41,7 @@ def test_sensitive_names(name: str) -> None:
         "authorised_by",
         "session_id",
         "session_date",
-        "training_session",
+        "study_session",
         "tokenizer",
     ],
 )
@@ -146,7 +146,7 @@ def test_cycles_depth_and_explicit_custom_segments_do_not_leak():
     payload = {"password": "secret"}
     payload["cycle"] = payload
     assert redact(payload) == {"password": "***", "cycle": "***"}
-    assert is_sensitive("training_session", ["session"])
+    assert is_sensitive("study_session", ["session"])
     assert is_sensitive("password2")
     assert is_sensitive("v2Password")
 

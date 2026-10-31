@@ -99,7 +99,7 @@ Both truncate long values (`max_length`, default 200), and both default to `DEBU
 `DEFAULT_REDACT` covers passwords, secrets, tokens, API/private keys, credentials,
 cookies, authorization, and explicit auth/session secret compound names. Ambiguous
 `auth` and `session` match bare names by default; `author`, `author_id`, `session_id`,
-`session_date`, and `training_session` stay visible. If a session id is a credential in
+`session_date`, and `study_session` stay visible. If a session id is a credential in
 your application, add that exact compound name to `redact_extra=`. Set
 `redact_match="substring"` to restore the old matching mode for a decorator.
 

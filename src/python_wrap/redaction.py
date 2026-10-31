@@ -44,7 +44,7 @@ DEFAULT_REDACT: tuple[str, ...] = (
 #: Built-in words that are too ambiguous to match inside a longer name: ``auth`` masks a
 #: bare ``auth`` argument, but not ``author``, ``author_id`` or ``authorised_by``;
 #: ``session`` masks ``session`` but not ``session_id``, ``session_date`` or
-#: ``training_session``. Compound names such as ``auth_token`` are listed explicitly in
+#: ``study_session``. Compound names such as ``auth_token`` are listed explicitly in
 #: `DEFAULT_REDACT`. Custom ``redact=`` fragments are matched normally.
 _EXACT_ONLY = frozenset({"auth", "session"})
 

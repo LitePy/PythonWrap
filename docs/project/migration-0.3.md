@@ -9,7 +9,7 @@ already installed by the application.
 
 `log_args` and `audit` now match sensitive **name segments**, including snake_case,
 camelCase and separator-delimited names. `author`, `author_id`, `authorised_by`,
-`session_id`, `session_date`, and `training_session` are no longer masked just because
+`session_id`, `session_date`, and `study_session` are no longer masked just because
 they contain `auth` or `session`. Bare `auth`/`session` and secret compound names such as
 `auth_token` and `session_key` remain masked. This default fits domain names where
 session means an activity rather than an authentication credential.

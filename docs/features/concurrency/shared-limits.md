@@ -29,8 +29,8 @@ optional `ttl=` for retention. A per-run quota is different from a rolling rate 
 ```python
 from python_wrap import RateLimiter, RedisWindow
 
-window = RedisWindow(client, key="myapp:vald-window", calls=30, period=60)
-limiter = RateLimiter(backend=window, name="vald", block=True)
+window = RedisWindow(client, key="myapp:vendor-window", calls=30, period=60)
+limiter = RateLimiter(backend=window, name="vendor", block=True)
 
 @limiter
 def fetch_trials():
