@@ -76,6 +76,11 @@ EVENT_NAMES: Mapping[str, str] = MappingProxyType(
             "A background run of a periodic function raised. Fields: run (int), "
             "exception (BaseException)."
         ),
+        "chaos.injected": (
+            "A python_wrap.chaos rule injected a fault. function is the fault point name. "
+            "Fields: kind (str): 'latency', 'exception' or 'result'; point (str); "
+            "pattern (str, the matching rule)."
+        ),
     }
 )
 

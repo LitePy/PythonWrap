@@ -195,7 +195,9 @@ nav:
       - Configuration: features/configuration.md
       - Dynamic switches: features/switches.md
       - Web helpers: features/web-helpers.md
-  - Testing: testing/index.md
+  - Testing:
+      - testing/index.md
+      - Chaos and fault injection: testing/chaos.md
   - Cookbook:
       - cookbook/index.md
       - Resilient HTTP client: cookbook/resilient-http-client.md
@@ -262,10 +264,16 @@ nav:
           - Celery: api/celery.md
           - Web helpers: api/web.md
       - Testing helpers: api/testing.md
+      - Chaos: api/chaos.md
+      - Migration tool: api/migrate.md
       - Errors: api/errors.md
   - Project:
       - Performance: project/performance.md
       - Limitations: project/limitations.md
       - Migrating to 0.2: project/migration.md
       - Migrating to 0.3: project/migration-0.3.md
+      - Migrating from tenacity: project/migrating-from-tenacity.md
+      - Migrating from pybreaker: project/migrating-from-pybreaker.md
+      - Migrating from limits: project/migrating-from-limits.md
+      - The migration tool: project/migrate-tool.md
       - Changelog: project/changelog.md

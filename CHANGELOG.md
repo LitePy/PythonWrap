@@ -16,6 +16,14 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
   describe every layer of a resilience stack and flag risky combinations: unbounded
   retries, retries of non-idempotent operations, retries without a timeout or budget,
   timeouts longer than the retry budget, misordered or duplicated layers (codes PW001-PW008).
+- `python -m python_wrap migrate` (and `python_wrap.migrate.migrate_source`): a stdlib-only
+  codemod rewriting tenacity and backoff retry decorators to `retry`, with dry-run, `--diff`
+  and `--write` modes, reporting anything it cannot translate. Full migration guides from
+  tenacity, pybreaker and limits with API mapping tables.
+- `python_wrap.chaos`: `fault_point(name)` and the process-wide `chaos` injector add latency,
+  exceptions or canned results at named points (glob patterns, rate, times, seeded
+  randomness), `chaos.open_circuit(breaker)`, and rules loaded from `PW_CHAOS` only when that
+  variable is set. New event `chaos.injected`.
 - `python_wrap.presets`: `http_client()`, `db_call()` and `third_party_api()` policies with
   documented timeouts, attempts, backoff, retry budgets and breaker thresholds;
   `idempotent=False` leaves the retry layer out.
