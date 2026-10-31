@@ -90,6 +90,15 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
   headers and RFC 9457 problem+json responses for rate-limit, open-circuit and bulkhead
   rejections, with optional FastAPI, Flask and Django glue.
 
+### Changed
+
+- The package description now matches what it is: a typed, zero-dependency resilience
+  toolkit. The `Beta` classifier stays until the 1.0 stable-core release.
+- CI: live PostgreSQL and SQL Server jobs for the SQL lease backends and transient-error
+  predicates, a framework matrix (oldest and newest Flask, FastAPI, Django, Celery,
+  httpx, requests), a benchmark comparison and soak job, and a coverage floor
+  (`fail_under = 80`).
+
 ## [0.3.0] - 2026-10-29
 
 Production integration helpers, optional distributed backends, and fixes from

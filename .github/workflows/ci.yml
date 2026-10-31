@@ -1,7 +1,8 @@
 # Continuous integration after changes land on main.
 #
-# Five jobs: lint (seconds), the test matrix, free-threaded Python with the stress
-# suite, mypy, and a packaging check.
+# Jobs: lint (seconds), the test matrix, free-threaded Python with the stress suite, mypy,
+# a packaging check, live Redis, PostgreSQL and SQL Server backends, a framework version
+# matrix and a benchmark/soak gate.
 #
 # python-wrap is pure Python with no dependencies, so the matrix is wide rather than
 # deep: every interpreter the classifiers name, on all three operating systems. Time and
@@ -200,7 +201,83 @@ jobs:
         run: uv run --no-sync pytest tests/test_redis_backends.py tests/test_fork_safety.py
 
   framework-integration:
-    name: Flask, FastAPI, Django and Celery adapters
+    # Oldest supported and newest releases of each framework, so an adapter that only
+    # works on one end of the range shows up here.
+    name: Frameworks (${{ matrix.versions.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        versions:
+          - name: oldest
+            python: "3.10"
+            pins: >-
+              --with 'flask==3.0.*' --with 'fastapi==0.115.*' --with 'httpx==0.27.*'
+              --with 'django==4.2.*' --with 'celery==5.3.*' --with 'requests==2.31.*'
+          - name: latest
+            python: "3.13"
+            pins: >-
+              --with 'flask>=3' --with 'fastapi>=0.115' --with 'httpx>=0.27,<1'
+              --with 'django>=5' --with 'celery>=5.4' --with 'requests>=2.32'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.2
+        with:
+          python-version: ${{ matrix.versions.python }}
+      - run: uv sync --group dev --frozen
+      - name: Exercise real framework request/task lifecycles and HTTP clients
+        run: >-
+          uv run --frozen ${{ matrix.versions.pins }}
+          pytest tests/test_integrations.py tests/test_http.py tests/test_web.py
+          tests/test_celery_helpers.py
+
+  sql-backends:
+    # PgAdvisoryLock, SqlAppLock and the transient-error predicates against real servers.
+    name: PostgreSQL and SQL Server backends
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: pw
+          POSTGRES_DB: pw
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s
+          --health-timeout 5s --health-retries 20
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: "CiOnly-Passw0rd"
+        ports: ["1433:1433"]
+    env:
+      PW_REQUIRE_SQL: "1"
+      # Throwaway credentials of the service containers above; not secrets.
+      PW_POSTGRES_URL: postgresql+psycopg://postgres:pw@127.0.0.1:5432/pw
+      PW_MSSQL_URL: mssql+pymssql://sa:CiOnly-Passw0rd@127.0.0.1:1433/master
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.2
+        with:
+          python-version: "3.13"
+      - run: uv sync --group dev --frozen
+      - name: Wait for SQL Server to accept logins
+        run: |
+          for i in $(seq 1 60); do
+            uv run --frozen --with pymssql python -c "import pymssql; pymssql.connect('127.0.0.1', 'sa', 'CiOnly-Passw0rd', 'master', port=1433).close()" && exit 0
+            sleep 2
+          done
+          exit 1
+      - name: Live SQL backend tests
+        run: >-
+          uv run --frozen --with 'sqlalchemy>=2' --with 'psycopg[binary]>=3.1'
+          --with 'pymssql>=2.3' pytest tests/test_sql_backends_live.py tests/test_transient_predicates.py
+
+  benchmarks:
+    # Coarse overhead regression gate next to the specialist libraries, plus a short soak.
+    # Shared runners are noisy, so the ratio is generous; investigate, do not tune it down.
+    name: Benchmarks vs tenacity/cachetools and soak
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -208,8 +285,9 @@ jobs:
         with:
           python-version: "3.13"
       - run: uv sync --group dev --frozen
-      - name: Exercise real framework request/task lifecycles
+      - name: Compare with tenacity, backoff and cachetools
         run: >-
-          uv run --frozen --with 'flask>=3' --with 'fastapi>=0.115'
-          --with 'httpx>=0.27,<1' --with 'django>=4.2' --with 'celery>=5.3'
-          pytest tests/test_integrations.py
+          uv run --frozen --with tenacity --with backoff --with cachetools
+          python benchmarks/compare.py --max-ratio 5
+      - name: Soak a policy against a flaky dependency
+        run: uv run --no-sync python benchmarks/soak.py --duration 30 --threads 16
