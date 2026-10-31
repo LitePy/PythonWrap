@@ -457,6 +457,36 @@ assert stats is not None
 assert (stats.calls, stats.attempts_total, stats.retries, stats.gave_up) == (1, 3, 2, 0)
 ```
 
+## The attempt timeline on the final error
+
+When `retry` gives up, the exception it re-raises carries the whole retry sequence.
+`attempt_history(exc)` returns one `AttemptRecord` per failed attempt: its number,
+duration, exception type name and the wait that followed. Messages are never kept, so
+the timeline is safe to log or send to an error tracker.
+
+```python
+from python_wrap import attempt_history, retry
+from python_wrap.testing import fake_clock
+
+
+@retry(max_attempts=3, delay=1, backoff=2, on=ConnectionError)
+def fetch() -> None:
+    raise ConnectionError("refused")
+
+
+with fake_clock():
+    try:
+        fetch()
+    except ConnectionError as exc:
+        for record in attempt_history(exc):
+            print(record.number, record.exception, record.next_delay)
+        assert [r.next_delay for r in attempt_history(exc)] == [1, 2, None]
+```
+
+`python_wrap.observability.annotate_span(span, exc)` copies the timeline onto an
+OpenTelemetry span, and `sentry_breadcrumbs()` records retry, breaker and timeout events as
+Sentry breadcrumbs so an error report shows what happened before the failure.
+
 ## Project-wide defaults
 
 Set `max_attempts`, `delay`, `backoff`, `max_delay`, `jitter`, `max_time`, `log_level` and `budget` once for the whole project with `python_wrap.config.configure(retry={...})`. See [Configuration](../configuration.md).

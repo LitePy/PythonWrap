@@ -1,7 +1,10 @@
 # Security policy
 
 python-wrap is a library of decorators that you wrap around your own code. It has no
-runtime dependencies, opens no sockets and reads no files, but a defect in a decorator
+runtime dependencies. The core decorators open no sockets and read no files; optional
+modules talk to backends and endpoints you configure (Redis, SQL, webhooks, metrics
+endpoints). See the [threat model](docs/project/threat-model.md) for trust boundaries and
+the serialization review. Even so, a defect in a decorator
 such as `timeout`, `rate_limit` or `validate_args` can still weaken the code around it.
 Reports are taken seriously and answered.
 
@@ -37,7 +40,8 @@ not backported.
 
 | Version | Supported |
 | --- | --- |
-| 0.2.x | yes |
+| 0.3.x | yes |
+| 0.2.x | no |
 | 0.1.x | no |
 
 Supported Python versions: 3.10 to 3.14.

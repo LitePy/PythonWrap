@@ -17,15 +17,42 @@ F = TypeVar("F", bound=Callable[..., Any])
 
 
 class MemoryResultStore:
-    """A thread-safe expiring store for local idempotency results."""
+    """A thread-safe, bounded, expiring store for local idempotency results.
 
-    def __init__(self) -> None:
+    Expired entries are swept as new ones arrive, and at most ``max_entries`` are kept:
+    when full, the entry closest to expiry is evicted first. A key whose result was
+    evicted simply runs again, so the bound trades a weaker guarantee under a flood of
+    distinct keys for memory that stays bounded (each key may come from an untrusted
+    client, for example through `python_wrap.web.IdempotencyMiddleware`).
+
+    Args:
+        max_entries: Most results kept at once (>= 1).
+
+    Raises:
+        ValueError: If ``max_entries`` is not a positive integer.
+
+    Example:
+        >>> store = MemoryResultStore(max_entries=2)
+        >>> for key in ("a", "b", "c"):
+        ...     store.set(key, key.upper(), 60)
+        >>> len(store), store.get("a"), store.get("c")
+        (2, None, 'C')
+    """
+
+    def __init__(self, max_entries: int = 10_000) -> None:
+        if isinstance(max_entries, bool) or not isinstance(max_entries, int) or max_entries < 1:
+            raise ValueError("max_entries must be a positive integer")
+        self.max_entries = max_entries
         self._data: dict[str, tuple[Any, float]] = {}
         self._lock = _fork.ForkSafeLock()
         _fork.register(self)
 
     def _reset_after_fork(self) -> None:
         self._data.clear()
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._data)
 
     def get(self, key: str) -> Any:
         with self._lock:
@@ -39,7 +66,14 @@ class MemoryResultStore:
 
     def set(self, key: str, value: Any, ttl: float) -> None:
         with self._lock:
-            self._data[key] = (value, _core.monotonic() + ttl)
+            now = _core.monotonic()
+            self._data.pop(key, None)
+            if len(self._data) >= self.max_entries:
+                for old in [k for k, (_, expires) in self._data.items() if expires <= now]:
+                    del self._data[old]
+            while len(self._data) >= self.max_entries:
+                del self._data[min(self._data, key=lambda k: self._data[k][1])]
+            self._data[key] = (value, now + ttl)
 
     def delete(self, key: str) -> bool:
         with self._lock:

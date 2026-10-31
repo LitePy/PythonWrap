@@ -381,6 +381,7 @@ class Bulkhead:
                 async with self:
                     return await func(*args, **kwargs)
 
+            async_wrapper.__python_wrap_layer__ = ("bulkhead", self)  # type: ignore[attr-defined]
             return cast(F, async_wrapper)
 
         @functools.wraps(func)
@@ -388,6 +389,7 @@ class Bulkhead:
             with self:
                 return func(*args, **kwargs)
 
+        wrapper.__python_wrap_layer__ = ("bulkhead", self)  # type: ignore[attr-defined]
         return cast(F, wrapper)
 
 

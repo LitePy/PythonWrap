@@ -66,6 +66,21 @@ additional names become `_other`. Request ids, user ids, cache keys, arguments a
 exception messages are never labels. With no subscription, existing event emission
 keeps its cheap disabled path.
 
+## Sentry breadcrumbs
+
+<!-- skip -->
+```python
+import sentry_sdk
+from python_wrap.observability import sentry_breadcrumbs
+
+sentry_sdk.init(dsn="...")
+sentry_breadcrumbs()  # retries, breaker changes, timeouts and rejections become breadcrumbs
+```
+
+Exception fields are reduced to type names; arguments, results and messages are never
+sent. Pass `prefixes=` to choose which events are recorded, and call `.close()` on the
+returned handle to stop.
+
 ## Slow-call detector
 
 ```python
@@ -105,6 +120,40 @@ registry does not keep a component alive. It reports breaker state, bulkhead cou
 and cache statistics without calling a registered application function. An unknown
 component is marked registered but unchecked. Use `register_check(name, callable)` to
 opt into backend probes. A probe failure reports the exception type, not its message.
+
+### Overall status and health endpoints
+
+`summary(critical=...)` rolls the report up into one status a load balancer or dashboard
+can use: `ok`, `degraded` (only optional components unhealthy, still HTTP 200) or `down`
+(a critical component unhealthy, HTTP 503). `wsgi_app()` and `asgi_app()` serve that
+summary as JSON:
+
+```python
+from python_wrap import CircuitBreaker, HealthRegistry
+
+registry = HealthRegistry()
+registry.register_check("database", lambda: True)
+search = CircuitBreaker(name="search")
+registry.register("search", search)
+search.force_open()
+
+summary = registry.summary(critical=["database"])
+assert summary["status"] == "degraded" and summary["http_status"] == 200
+assert summary["unhealthy"] == ["search"]
+```
+
+<!-- skip -->
+```python
+from fastapi import FastAPI
+from python_wrap import health
+
+app = FastAPI()
+app.mount("/health", health.asgi_app(critical=["database"]))
+```
+
+Pair it with the [Prometheus exporter](exporters.md), which publishes the same
+components as `python_wrap_health_up` gauges, and the sample Grafana dashboard in
+`docs/assets/grafana-dashboard.json`.
 
 HTTP health routes are opt-in through the framework adapters. Apply authentication and
 choose what dependency details your application should disclose. Registry reports are

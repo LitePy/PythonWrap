@@ -252,3 +252,11 @@ You do not need these to migrate, but they replace common hand-written code:
 - `python_wrap.testing`: `fast_mode`, `FakeClock`, `spy` and pytest fixtures.
 
 See the [changelog](changelog.md) for the full list.
+
+## Coming from another library?
+
+- [Migrating from tenacity](migrating-from-tenacity.md) (and `backoff`)
+- [Migrating from pybreaker](migrating-from-pybreaker.md)
+- [Migrating from limits](migrating-from-limits.md)
+- [The migration tool](migrate-tool.md): `python -m python_wrap migrate` rewrites tenacity and
+  backoff decorators for you.

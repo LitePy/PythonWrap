@@ -171,6 +171,20 @@ class Policy:
             roles=roles,
         )
 
+    def explain(self, *, idempotent: bool = True) -> Any:
+        """Describe each layer and flag risky combinations; see `python_wrap.doctor.explain`.
+
+        Args:
+            idempotent: False when the protected operation must not run twice (any
+                retry is then reported as an error).
+
+        Returns:
+            A `python_wrap.doctor.Report`: ``print()`` it, or check ``.ok`` in a test.
+        """
+        from python_wrap.doctor import explain
+
+        return explain(self, idempotent=idempotent)
+
     def __repr__(self) -> str:
         order = " > ".join(self.order) or "(empty)"
         label = f"{self._name!r}, " if self._name else ""

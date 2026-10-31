@@ -10,6 +10,12 @@ Testing helpers live in ``python_wrap.testing`` and the event catalogue in
 import logging
 from contextlib import AbstractContextManager
 
+from .adaptive import (
+    AdaptiveLimiter,
+    LoadShed,
+    PerKeyLimiter,
+    per_key,
+)
 from .aio import (
     RaceFailed,
     amap_iter,
@@ -17,6 +23,15 @@ from .aio import (
     map_async,
     race,
     run_sync,
+)
+from .alerts import (
+    WebhookAlerter,
+)
+from .async_cache import (
+    AsyncCacheStore,
+    AsyncMemoryStore,
+    AsyncRedisStore,
+    amemoize,
 )
 from .batching import (
     AsyncBatched,
@@ -119,9 +134,21 @@ from .health import (
 from .hedging import (
     hedge,
 )
+from .http import (
+    HttpRetryPolicy,
+)
 from .idempotency import (
     MemoryResultStore,
     idempotent,
+)
+from .lifecycle import (
+    ShutdownError,
+    ShutdownManager,
+    ShutdownReport,
+    shutdown,
+)
+from .local_state import (
+    SQLiteBreakerState,
 )
 from .logs import (
     DEFAULT_REDACT,
@@ -157,8 +184,13 @@ from .policy import (
 )
 from .predicates import (
     Predicate,
+    db_transient,
+    error_code,
     in_cause_chain,
     message_contains,
+    mysql_transient,
+    postgres_transient,
+    sqlserver_transient,
     sqlstate,
 )
 from .processing import (
@@ -181,11 +213,13 @@ from .redaction import (
 )
 from .retry import (
     Attempt,
+    AttemptRecord,
     RetryBudget,
     RetryBudgetStats,
     Retrying,
     RetryState,
     RetryStats,
+    attempt_history,
     fallback,
     http_status,
     retry,
@@ -242,13 +276,18 @@ logging.getLogger("python_wrap").addHandler(logging.NullHandler())
 __all__ = [
     "DEFAULT_REDACT",
     "INJECTED",
+    "AdaptiveLimiter",
     "AlreadyRunning",
     "ArgumentTypeError",
     "AsyncBatched",
     "AsyncBuffered",
+    "AsyncCacheStore",
     "AsyncDebounced",
+    "AsyncMemoryStore",
     "AsyncPeriodic",
+    "AsyncRedisStore",
     "Attempt",
+    "AttemptRecord",
     "AuditRecord",
     "BatchError",
     "BatchResult",
@@ -275,9 +314,11 @@ __all__ = [
     "Expiring",
     "FeatureDisabled",
     "HealthRegistry",
+    "HttpRetryPolicy",
     "Lease",
     "LeaseLost",
     "Limited",
+    "LoadShed",
     "LocalLease",
     "Memoized",
     "MemoryCheckpoint",
@@ -285,6 +326,7 @@ __all__ = [
     "MemoryResultStore",
     "Once",
     "Outcome",
+    "PerKeyLimiter",
     "Periodic",
     "PgAdvisoryLock",
     "Policy",
@@ -308,15 +350,22 @@ __all__ = [
     "RetryState",
     "RetryStats",
     "Retrying",
+    "SQLiteBreakerState",
+    "ShutdownError",
+    "ShutdownManager",
+    "ShutdownReport",
     "SqlAppLock",
     "Timeout",
     "TimeoutExpired",
     "TimingRecord",
     "Transaction",
     "ValidationError",
+    "WebhookAlerter",
     "__version__",
     "amap_iter",
+    "amemoize",
     "aprocess_batches",
+    "attempt_history",
     "audit",
     "batch_calls",
     "benchmark",
@@ -333,11 +382,13 @@ __all__ = [
     "count_calls",
     "current_log_context",
     "current_transaction",
+    "db_transient",
     "deadline",
     "debounce",
     "deprecate",
     "disabled",
     "enforce_types",
+    "error_code",
     "expiring",
     "fallback",
     "gather_limit",
@@ -360,11 +411,14 @@ __all__ = [
     "memoize",
     "message_contains",
     "mock_data",
+    "mysql_transient",
     "no_debug",
     "once",
+    "per_key",
     "periodic",
     "policies",
     "policy",
+    "postgres_transient",
     "process_batches",
     "profile",
     "race",
@@ -382,8 +436,10 @@ __all__ = [
     "run_in_thread",
     "run_sync",
     "shared_rate_limit",
+    "shutdown",
     "single_instance",
     "singleflight",
+    "sqlserver_transient",
     "sqlstate",
     "subscribe",
     "suppress",

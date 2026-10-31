@@ -30,11 +30,13 @@ ExceptionTypes = type[BaseException] | tuple[type[BaseException], ...]
 
 __all__ = [
     "Attempt",
+    "AttemptRecord",
     "RetryBudget",
     "RetryBudgetStats",
     "RetryState",
     "RetryStats",
     "Retrying",
+    "attempt_history",
     "fallback",
     "http_status",
     "retry",
@@ -185,6 +187,8 @@ class RetryStats:
 
 
 _STATS_ATTR = "__retry_stats__"
+# (role, settings) read by python_wrap.doctor to explain a decorated function.
+_LAYER_ATTR = "__python_wrap_layer__"
 
 
 def retry_stats(func: Callable[..., Any]) -> RetryStats | None:
@@ -416,7 +420,7 @@ def retry_after_header(value: Any, *, json_key: str | None = None) -> float | No
     * a ``retry_after`` attribute;
     * a ``Retry-After`` header (case-insensitive), on the object itself or on
       ``exc.response``;
-    * with ``json_key=``, that key in the response's JSON body (vendor-specific APIs put
+    * with ``json_key=``, that key in the response's JSON body (some APIs put
       ``retry_after`` there). A failing ``.json()`` is ignored.
 
     Values may be seconds or an HTTP-date; dates become seconds from now. Works with
@@ -517,8 +521,14 @@ _NEVER_RETRY = (
 )
 
 
+#: Longest wait a `delay_from` hint (such as a server's ``Retry-After``) may impose when
+#: ``max_delay`` is not set. A hostile or broken upstream could otherwise park a worker
+#: for days with one header. Set ``max_delay`` to choose another bound.
+HINT_CEILING = 600.0
+
+
 def _parse_hint(value: Any) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or math.isnan(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
         return None
     return max(float(value), 0.0)
 
@@ -660,7 +670,7 @@ class _Engine:
                     )
                 hint = None
             if hint is not None:
-                return hint if self.max_delay is None else min(hint, self.max_delay)
+                return min(hint, HINT_CEILING if self.max_delay is None else self.max_delay)
         if self.delays is not None:
             delay = self.delays[min(attempt - 1, len(self.delays) - 1)]
             return _compute_delay(1, delay, 1.0, self.max_delay, self.jitter)
@@ -823,6 +833,81 @@ class _Engine:
         return wait
 
 
+_HISTORY_ATTR = "__python_wrap_attempts__"
+
+
+@dataclass(frozen=True)
+class AttemptRecord:
+    """One failed attempt of a `retry`-decorated call, as kept by `attempt_history`.
+
+    Only the exception's type name is kept (never its message), so the record is safe to
+    log or send to an error tracker.
+
+    Attributes:
+        number: The attempt number, 1-based.
+        duration: Seconds the attempt took.
+        exception: The exception's qualified type name.
+        next_delay: Seconds waited before the next attempt, or None for the last one.
+    """
+
+    number: int
+    duration: float
+    exception: str
+    next_delay: float | None
+
+
+def _remember(
+    history: list[AttemptRecord],
+    attempt: int,
+    began: float,
+    exc: BaseException,
+    wait: float | None,
+) -> None:
+    kind = type(exc)
+    history.append(
+        AttemptRecord(
+            attempt, _core.perf_counter() - began, f"{kind.__module__}.{kind.__qualname__}", wait
+        )
+    )
+    if wait is None:
+        # Exceptions with __slots__ or a read-only __dict__ simply carry no history.
+        with contextlib.suppress(AttributeError, TypeError):
+            setattr(exc, _HISTORY_ATTR, tuple(history))
+
+
+def attempt_history(exc: BaseException) -> tuple[AttemptRecord, ...]:
+    """The attempt timeline a `retry` decorator attached to the exception it re-raised.
+
+    When `retry` gives up, the exception it re-raises carries one `AttemptRecord` per
+    failed attempt (durations, exception types and the waits in between), so a
+    postmortem or an error tracker sees the whole retry sequence, not just the last error.
+
+    Args:
+        exc: Any exception.
+
+    Returns:
+        The records, oldest first; empty if the exception did not come out of `retry`.
+
+    Example:
+        ```python
+        from python_wrap import attempt_history, retry
+
+        @retry(max_attempts=3, delay=0, on=ConnectionError)
+        def fetch() -> None:
+            raise ConnectionError("refused")
+
+        try:
+            fetch()
+        except ConnectionError as exc:
+            timeline = attempt_history(exc)
+        assert [record.number for record in timeline] == [1, 2, 3]
+        assert timeline[-1].next_delay is None
+        ```
+    """
+    history = getattr(exc, _HISTORY_ATTR, ())
+    return history if isinstance(history, tuple) else ()
+
+
 def _check_budget(budget: Any) -> None:
     if budget is not None and not isinstance(budget, RetryBudget):
         raise TypeError(f"budget must be a RetryBudget or None, got {budget!r}")
@@ -939,7 +1024,8 @@ def retry(
         delay: Base wait in seconds before the second attempt.
         backoff: Multiplier applied to the wait after each failure (>= 1).
         max_delay: Upper bound for the backoff wait (before jitter is added); also caps
-            waits returned by `delay_from`.
+            waits returned by `delay_from` (which are otherwise capped at
+            ``HINT_CEILING``, 600 s; non-finite hints fall back to the backoff).
         jitter: Up to this many random extra seconds are added to each wait.
         max_time: Total time budget in seconds, measured from the first attempt. If the
             next wait would run past it, the last exception is re-raised instead.
@@ -999,6 +1085,20 @@ def retry(
     _check_budget(budget)
     delays = _validate_delays(delays)
 
+    settings = {
+        "max_attempts": max_attempts,
+        "delay": delay,
+        "backoff": backoff,
+        "max_delay": max_delay,
+        "jitter": jitter,
+        "max_time": max_time,
+        "delays": delays,
+        "on": on,
+        "retry_if": retry_if is not None,
+        "retry_if_result": retry_if_result is not None,
+        "budget": budget is not None,
+    }
+
     def decorate(f: Callable[P, R]) -> Callable[P, R]:
         stats = RetryStats()
         engine = _Engine(
@@ -1031,12 +1131,15 @@ def retry(
             async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
                 started = engine.start_call()
                 attempt = 1
+                history: list[AttemptRecord] = []
                 while True:
                     engine.start_attempt()
+                    began = _core.perf_counter()
                     try:
                         result = await af(*args, **kwargs)
                     except on as exc:
                         wait = await engine.afailure(attempt, exc, started)
+                        _remember(history, attempt, began, exc, wait)
                         if wait is None:
                             raise
                     else:
@@ -1051,6 +1154,7 @@ def retry(
                     attempt += 1
 
             setattr(async_wrapper, _STATS_ATTR, stats)
+            setattr(async_wrapper, _LAYER_ATTR, ("retry", settings))
             return cast("Callable[P, R]", async_wrapper)
 
         engine.check_sync(*engine.async_hooks)
@@ -1059,12 +1163,15 @@ def retry(
         def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
             started = engine.start_call()
             attempt = 1
+            history: list[AttemptRecord] = []
             while True:
                 engine.start_attempt()
+                began = _core.perf_counter()
                 try:
                     result = f(*args, **kwargs)
                 except on as exc:
                     wait = engine.failure(attempt, exc, started)
+                    _remember(history, attempt, began, exc, wait)
                     if wait is None:
                         raise
                 else:
@@ -1079,8 +1186,10 @@ def retry(
                 attempt += 1
 
         setattr(wrapper, _STATS_ATTR, stats)
+        setattr(wrapper, _LAYER_ATTR, ("retry", settings))
         return wrapper
 
+    setattr(decorate, _LAYER_ATTR, ("retry", settings))
     return decorate if func is None else decorate(func)
 
 

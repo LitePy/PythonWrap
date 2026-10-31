@@ -535,6 +535,7 @@ class Timeout:
                     return await _await_with_grace(func(*args, **kwargs), label, seconds, grace)
                 return await _await_with_deadline(func(*args, **kwargs), label, seconds)
 
+            async_wrapper.__python_wrap_layer__ = ("timeout", self)  # type: ignore[attr-defined]
             return cast(F, async_wrapper)
 
         @functools.wraps(func)
@@ -549,6 +550,7 @@ class Timeout:
                     return func(*args, **kwargs)
             return _call_in_worker(func, label, seconds, *args, **kwargs)
 
+        wrapper.__python_wrap_layer__ = ("timeout", self)  # type: ignore[attr-defined]
         return cast(F, wrapper)
 
     # -- sync context manager -----------------------------------------------------------
@@ -1099,6 +1101,7 @@ class RateLimiter:
                 return await func(*args, **kwargs)
 
             async_wrapper.__rate_limiter__ = self  # type: ignore[attr-defined]
+            async_wrapper.__python_wrap_layer__ = ("limiter", self)  # type: ignore[attr-defined]
             return cast(F, async_wrapper)
 
         @functools.wraps(func)
@@ -1108,6 +1111,7 @@ class RateLimiter:
             return func(*args, **kwargs)
 
         wrapper.__rate_limiter__ = self  # type: ignore[attr-defined]
+        wrapper.__python_wrap_layer__ = ("limiter", self)  # type: ignore[attr-defined]
         return cast(F, wrapper)
 
 

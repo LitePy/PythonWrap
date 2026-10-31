@@ -149,16 +149,20 @@ nav:
       - Resilience:
           - features/resilience/index.md
           - Retry: features/resilience/retry.md
+          - HTTP clients: features/resilience/http-clients.md
           - Circuit breaker: features/resilience/circuit-breaker.md
           - Timeout and deadline: features/resilience/timeout.md
           - Fallback and suppress: features/resilience/fallback.md
           - Hedged requests: features/resilience/hedge.md
           - Policies: features/resilience/policies.md
           - Named policies and predicates: features/resilience/named-policies.md
+          - Presets and the policy doctor: features/resilience/presets-and-doctor.md
+          - Circuit breakers across processes: features/resilience/multi-process-breakers.md
       - Caching and batching:
           - features/caching/index.md
           - Memoize: features/caching/memoize.md
           - Shared stores and credentials: features/caching/stores-and-credentials.md
+          - Async cache stores: features/caching/async-stores.md
           - Once: features/caching/once.md
           - Cached property: features/caching/cached-property.md
           - Singleflight: features/caching/singleflight.md
@@ -168,18 +172,24 @@ nav:
           - Rate limits: features/concurrency/rate-limits.md
           - Throttle and debounce: features/concurrency/throttle-debounce.md
           - Bulkheads: features/concurrency/bulkheads.md
+          - Adaptive limits: features/concurrency/adaptive-limits.md
+          - Graceful shutdown: features/concurrency/graceful-shutdown.md
           - Async helpers: features/concurrency/async-helpers.md
           - Run in a thread: features/concurrency/run-in-thread.md
           - Periodic tasks: features/concurrency/periodic.md
           - Leases and idempotency: features/concurrency/leases-and-idempotency.md
           - Shared limits and quotas: features/concurrency/shared-limits.md
           - Buffered writes: features/concurrency/buffered-writes.md
+          - Migrating a lock helper: features/concurrency/lock-compat.md
       - Observability:
           - features/observability/index.md
           - Logging: features/observability/logging.md
           - Audit: features/observability/audit.md
           - Timing and profiling: features/observability/timing.md
           - Metrics and events: features/observability/metrics.md
+          - Exporters: features/observability/exporters.md
+          - Live dashboard: features/observability/dashboard.md
+          - Circuit breaker alerts: features/observability/alerts.md
           - Context, telemetry and health: features/observability/production.md
       - Correctness:
           - features/correctness/index.md
@@ -189,7 +199,10 @@ nav:
       - Developer tools: features/devtools.md
       - Configuration: features/configuration.md
       - Dynamic switches: features/switches.md
-  - Testing: testing/index.md
+      - Web helpers: features/web-helpers.md
+  - Testing:
+      - testing/index.md
+      - Chaos and fault injection: testing/chaos.md
   - Cookbook:
       - cookbook/index.md
       - Resilient HTTP client: cookbook/resilient-http-client.md
@@ -211,11 +224,15 @@ nav:
           - Hedging: api/hedging.md
           - Policies: api/policy.md
           - Named registry: api/policies.md
+          - Presets: api/presets.md
+          - Doctor: api/doctor.md
           - Predicates: api/predicates.md
+          - HTTP clients: api/http.md
       - Caching and batching:
           - Caching: api/caching.md
           - Batching: api/batching.md
           - Redis stores: api/stores.md
+          - Async cache: api/async_cache.md
           - Expiring credentials: api/credentials.md
           - Buffered writers: api/buffering.md
           - Batch processing: api/processing.md
@@ -223,11 +240,15 @@ nav:
           - Concurrency: api/concurrency.md
           - Async helpers: api/aio.md
           - Bulkhead: api/bulkhead.md
+          - Adaptive limits: api/adaptive.md
+          - Graceful shutdown: api/lifecycle.md
           - Periodic: api/periodic.md
           - Coordination: api/coordination.md
           - Idempotency: api/idempotency.md
           - Quotas and shared windows: api/quotas.md
           - Shared backends: api/shared.md
+          - Single-host backends: api/local_state.md
+          - Lock helper compatibility: api/compat.md
       - Observability:
           - Logging and audit: api/logs.md
           - Timing and profiling: api/timing.md
@@ -236,6 +257,9 @@ nav:
           - Redaction: api/redaction.md
           - OpenTelemetry adapter: api/observability.md
           - Health registry: api/health.md
+          - Exporters: api/exporters.md
+          - Dashboard: api/dashboard.md
+          - Alerts: api/alerts.md
           - Slow calls: api/slow.md
       - Correctness:
           - Validation: api/validation.md
@@ -248,11 +272,22 @@ nav:
           - FastAPI and ASGI: api/fastapi.md
           - Django: api/django.md
           - Celery: api/celery.md
+          - Web helpers: api/web.md
       - Testing helpers: api/testing.md
+      - Chaos: api/chaos.md
+      - Migration tool: api/migrate.md
       - Errors: api/errors.md
   - Project:
       - Performance: project/performance.md
       - Limitations: project/limitations.md
       - Migrating to 0.2: project/migration.md
       - Migrating to 0.3: project/migration-0.3.md
+      - API stability: project/stability.md
+      - Operations runbook: project/operations.md
+      - Threat model: project/threat-model.md
+      - Production pilot: project/pilot.md
+      - Migrating from tenacity: project/migrating-from-tenacity.md
+      - Migrating from pybreaker: project/migrating-from-pybreaker.md
+      - Migrating from limits: project/migrating-from-limits.md
+      - The migration tool: project/migrate-tool.md
       - Changelog: project/changelog.md

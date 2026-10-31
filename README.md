@@ -47,6 +47,27 @@ uv add python-wrap
 
 Python 3.10 or newer.
 
+## Coming in the next release
+
+Unreleased on `main`; see the [CHANGELOG](https://github.com/LitePy/PythonWrap/blob/main/CHANGELOG.md#unreleased).
+
+| Need | API |
+| --- | --- |
+| Sensible numbers without guessing | `presets.http_client()`, `presets.db_call()`, `presets.third_party_api()` |
+| Catch unsafe stacks before production | `Policy.explain()`, `python -m python_wrap doctor` (unbounded or non-idempotent retries, missing timeouts/budgets, misordering) |
+| HTTP clients | `python_wrap.http`: method-safe retrying transports for httpx, a `requests` adapter, `http_retry` for aiohttp |
+| Database errors worth retrying | `db_transient`, `postgres_transient`, `mysql_transient`, `sqlserver_transient` |
+| Async caches that never block the loop | `amemoize` with `AsyncRedisStore` (`redis.asyncio`) |
+| Metrics and dashboards | `PrometheusExporter`, `StatsDExporter`, live `Dashboard`, Grafana sample, `health.summary()` endpoints |
+| Safe POST retries end to end | `IdempotencyMiddleware` (ASGI/WSGI), RateLimit headers and problem+json helpers |
+| Multi-process and Celery deployments | `SQLiteBreakerState`, `celery.shared_breaker`, `celery.retry_task` |
+| Overload and shutdown | `AdaptiveLimiter`, `per_key`, graceful `shutdown.drain()` |
+| Postmortems and testing | `attempt_history(exc)`, Sentry breadcrumbs, `python_wrap.chaos` fault injection, breaker alerts to Slack/Teams |
+| Coming from tenacity/backoff | `python -m python_wrap migrate` codemod and migration guides |
+
+The [stable core](https://pythonwrap.readthedocs.io/en/latest/project/stability/) (retry,
+circuit breaker, timeout, policies, presets) is now frozen ahead of 1.0.
+
 ## New in 0.3
 
 The toolkit now includes production integration helpers alongside the existing decorators:
@@ -448,7 +469,7 @@ python-wrap is a broad toolkit; the others are deeper in one area. Use them when
 | [cachetools](https://github.com/tkem/cachetools) | You need other eviction policies (LFU, FIFO, RR), explicit cache objects or custom locks | `memoize` gives LRU + TTL, `cache_info()`, async in-flight dedupe, signature-bound keys and `cached_property(ttl=)` |
 | [async-lru](https://github.com/aio-libs/async-lru) | You only cache coroutines and want a tiny dependency | Same async dedupe, also for sync code, with TTL, per-item TTL and exception caching |
 | [aiolimiter](https://github.com/mjpieters/aiolimiter) | You only need an asyncio leaky-bucket limiter | Sliding window for sync and async, per-key buckets, shared `RateLimiter`, `block=True`, plus `Bulkhead` for concurrency |
-| [pybreaker](https://github.com/danielfm/pybreaker) | You need listeners or circuit state shared across processes (Redis storage) | A typed `CircuitBreaker` with async, `exclude=`, `success_threshold` and `.stats`, no dependency |
+| [pybreaker](https://github.com/danielfm/pybreaker) | You already depend on its listener and storage APIs | A typed `CircuitBreaker` with async, `exclude=`, `success_threshold`, `.stats`, and shared state through Redis or SQLite, no dependency |
 | [functools](https://docs.python.org/3/library/functools.html) | A plain `lru_cache` or `cache` on a sync function with hashable arguments is enough. Prefer it for that | Adds TTL, async, unhashable arguments and `cache_delete` |
 
 None of them cover bounded `gather`, bulkheads, batching, hedging, policies or test helpers; python-wrap trades per-area depth for one consistent, typed, dependency-free API.
