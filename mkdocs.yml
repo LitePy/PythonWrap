@@ -157,6 +157,7 @@ nav:
           - Policies: features/resilience/policies.md
           - Named policies and predicates: features/resilience/named-policies.md
           - Presets and the policy doctor: features/resilience/presets-and-doctor.md
+          - Circuit breakers across processes: features/resilience/multi-process-breakers.md
       - Caching and batching:
           - features/caching/index.md
           - Memoize: features/caching/memoize.md
@@ -177,6 +178,7 @@ nav:
           - Leases and idempotency: features/concurrency/leases-and-idempotency.md
           - Shared limits and quotas: features/concurrency/shared-limits.md
           - Buffered writes: features/concurrency/buffered-writes.md
+          - Migrating a lock helper: features/concurrency/lock-compat.md
       - Observability:
           - features/observability/index.md
           - Logging: features/observability/logging.md
@@ -185,6 +187,7 @@ nav:
           - Metrics and events: features/observability/metrics.md
           - Exporters: features/observability/exporters.md
           - Live dashboard: features/observability/dashboard.md
+          - Circuit breaker alerts: features/observability/alerts.md
           - Context, telemetry and health: features/observability/production.md
       - Correctness:
           - features/correctness/index.md
@@ -240,6 +243,8 @@ nav:
           - Idempotency: api/idempotency.md
           - Quotas and shared windows: api/quotas.md
           - Shared backends: api/shared.md
+          - Single-host backends: api/local_state.md
+          - Lock helper compatibility: api/compat.md
       - Observability:
           - Logging and audit: api/logs.md
           - Timing and profiling: api/timing.md
@@ -250,6 +255,7 @@ nav:
           - Health registry: api/health.md
           - Exporters: api/exporters.md
           - Dashboard: api/dashboard.md
+          - Alerts: api/alerts.md
           - Slow calls: api/slow.md
       - Correctness:
           - Validation: api/validation.md

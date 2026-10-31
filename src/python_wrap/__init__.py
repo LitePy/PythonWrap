@@ -18,6 +18,9 @@ from .aio import (
     race,
     run_sync,
 )
+from .alerts import (
+    WebhookAlerter,
+)
 from .async_cache import (
     AsyncCacheStore,
     AsyncMemoryStore,
@@ -131,6 +134,9 @@ from .http import (
 from .idempotency import (
     MemoryResultStore,
     idempotent,
+)
+from .local_state import (
+    SQLiteBreakerState,
 )
 from .logs import (
     DEFAULT_REDACT,
@@ -329,12 +335,14 @@ __all__ = [
     "RetryState",
     "RetryStats",
     "Retrying",
+    "SQLiteBreakerState",
     "SqlAppLock",
     "Timeout",
     "TimeoutExpired",
     "TimingRecord",
     "Transaction",
     "ValidationError",
+    "WebhookAlerter",
     "__version__",
     "amap_iter",
     "amemoize",

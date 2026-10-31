@@ -34,6 +34,15 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
 - `HealthRegistry.summary(critical=...)` rolls component health up into `ok`/`degraded`/
   `down` with a matching HTTP status, served as JSON by `health.wsgi_app()` and
   `health.asgi_app()` (checks run off the event loop).
+- `SQLiteBreakerState`: share circuit breaker state between processes on one host (prefork
+  Celery children, gunicorn/uvicorn workers) without Redis, with the same semantics as
+  `RedisBreakerState`; guide for multi-process breaker deployments.
+- `WebhookAlerter`: breaker-open (and recovery) alerts to Slack, Microsoft Teams (Adaptive
+  Card) or JSON webhooks, delivered off the calling thread with a per-breaker cooldown and
+  no exception text or URLs in payloads.
+- `python_wrap.compat`: `named_lock(name, suffix)`, `acquire_lock`, `release_lock`,
+  `RunLocks` and `configure_locks`, a low-diff replacement for hand-rolled `SET NX`/`DEL`
+  lock helpers with owner-checked release and auto-renewal.
 - Celery helpers: `retry_countdown` and `retry_task` schedule Celery task retries from
   `request.retries` with explicit delays or capped backoff, honouring a dependency's
   `retry_after`/`Retry-After`; `shared_breaker` builds a breaker whose state is shared by
