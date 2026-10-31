@@ -149,6 +149,7 @@ nav:
       - Resilience:
           - features/resilience/index.md
           - Retry: features/resilience/retry.md
+          - HTTP clients: features/resilience/http-clients.md
           - Circuit breaker: features/resilience/circuit-breaker.md
           - Timeout and deadline: features/resilience/timeout.md
           - Fallback and suppress: features/resilience/fallback.md
@@ -213,6 +214,7 @@ nav:
           - Policies: api/policy.md
           - Named registry: api/policies.md
           - Predicates: api/predicates.md
+          - HTTP clients: api/http.md
       - Caching and batching:
           - Caching: api/caching.md
           - Batching: api/batching.md

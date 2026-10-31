@@ -1,5 +1,10 @@
 # A resilient HTTP client
 
+!!! tip
+    For ready-made httpx transports, a `requests` adapter and method-safety rules, see
+    [HTTP clients](../features/resilience/http-clients.md). This recipe shows how the
+    building blocks fit together by hand.
+
 ## The problem
 
 Your service calls other services. They return 503 during deploys, drop connections, answer slowly, and sometimes stay down for minutes. A bare `requests.get` turns every one of those into an error for your user, and a naive retry loop makes an outage worse by hammering the dependency.

@@ -16,6 +16,11 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
   `sqlserver_transient` (pyodbc SQLSTATEs and native numbers such as deadlock 1205 and
   Azure SQL 40613), their union `db_transient` (also SQLAlchemy `connection_invalidated`)
   and `error_code(...)` for driver error numbers. No driver is imported.
+- `python_wrap.http`: method-safe HTTP retries. `HttpRetryPolicy` retries idempotent
+  methods (or any request carrying an `Idempotency-Key`) on transport errors and 408/425/
+  429/5xx, honouring `Retry-After`, deadlines and `RetryBudget`. `RetryTransport` and
+  `AsyncRetryTransport` plug into httpx, `mount_retries` into a `requests.Session`, and
+  `http_retry` wraps aiohttp-style or hand-written clients. No HTTP library is imported.
 - `python_wrap.web`: `IdempotencyMiddleware` (ASGI) and `WsgiIdempotencyMiddleware` dedupe
   requests carrying an `Idempotency-Key`, replaying stored responses, answering 409 for a
   concurrent duplicate and 422 for a reused key with a different body.

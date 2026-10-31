@@ -119,6 +119,9 @@ from .health import (
 from .hedging import (
     hedge,
 )
+from .http import (
+    HttpRetryPolicy,
+)
 from .idempotency import (
     MemoryResultStore,
     idempotent,
@@ -280,6 +283,7 @@ __all__ = [
     "Expiring",
     "FeatureDisabled",
     "HealthRegistry",
+    "HttpRetryPolicy",
     "Lease",
     "LeaseLost",
     "Limited",
