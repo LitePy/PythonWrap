@@ -43,6 +43,14 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
 - `python_wrap.compat`: `named_lock(name, suffix)`, `acquire_lock`, `release_lock`,
   `RunLocks` and `configure_locks`, a low-diff replacement for hand-rolled `SET NX`/`DEL`
   lock helpers with owner-checked release and auto-renewal.
+- `AdaptiveLimiter`: an AIMD adaptive concurrency limit (latency target, error-driven
+  decrease, low-priority shedding) that sheds excess load with `LoadShed`; `PerKeyLimiter`
+  and `per_key` give each tenant its own limiter or bulkhead with LRU eviction. New events
+  `adaptive.limit_changed` and `adaptive.shed`.
+- Graceful shutdown: `shutdown` (`ShutdownManager`) drains registered periodic tasks,
+  buffered writers, batchers, debouncers, bulkheads and callables in priority order within
+  a time budget, with SIGTERM/SIGINT handler and `atexit` installation and a per-item
+  `ShutdownReport`. New `lifecycle.*` events.
 - Celery helpers: `retry_countdown` and `retry_task` schedule Celery task retries from
   `request.retries` with explicit delays or capped backoff, honouring a dependency's
   `retry_after`/`Retry-After`; `shared_breaker` builds a breaker whose state is shared by

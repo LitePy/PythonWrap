@@ -76,6 +76,22 @@ EVENT_NAMES: Mapping[str, str] = MappingProxyType(
             "A background run of a periodic function raised. Fields: run (int), "
             "exception (BaseException)."
         ),
+        "adaptive.limit_changed": (
+            "An AdaptiveLimiter changed its concurrency limit. function is the limiter name. "
+            "Fields: old (int), new (int)."
+        ),
+        "adaptive.shed": (
+            "An AdaptiveLimiter rejected a call over its limit (LoadShed). "
+            "Fields: limit (int), in_flight (int)."
+        ),
+        "lifecycle.drain_started": "A shutdown drain began. Fields: items (int).",
+        "lifecycle.item_done": (
+            "One registered item finished draining. function is the item name. "
+            "Fields: status (str): 'ok', 'error' or 'timeout'; seconds (float)."
+        ),
+        "lifecycle.drain_finished": (
+            "A shutdown drain completed. Fields: ok (bool), seconds (float)."
+        ),
         "chaos.injected": (
             "A python_wrap.chaos rule injected a fault. function is the fault point name. "
             "Fields: kind (str): 'latency', 'exception' or 'result'; point (str); "

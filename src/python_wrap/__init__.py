@@ -10,6 +10,12 @@ Testing helpers live in ``python_wrap.testing`` and the event catalogue in
 import logging
 from contextlib import AbstractContextManager
 
+from .adaptive import (
+    AdaptiveLimiter,
+    LoadShed,
+    PerKeyLimiter,
+    per_key,
+)
 from .aio import (
     RaceFailed,
     amap_iter,
@@ -134,6 +140,12 @@ from .http import (
 from .idempotency import (
     MemoryResultStore,
     idempotent,
+)
+from .lifecycle import (
+    ShutdownError,
+    ShutdownManager,
+    ShutdownReport,
+    shutdown,
 )
 from .local_state import (
     SQLiteBreakerState,
@@ -264,6 +276,7 @@ logging.getLogger("python_wrap").addHandler(logging.NullHandler())
 __all__ = [
     "DEFAULT_REDACT",
     "INJECTED",
+    "AdaptiveLimiter",
     "AlreadyRunning",
     "ArgumentTypeError",
     "AsyncBatched",
@@ -305,6 +318,7 @@ __all__ = [
     "Lease",
     "LeaseLost",
     "Limited",
+    "LoadShed",
     "LocalLease",
     "Memoized",
     "MemoryCheckpoint",
@@ -312,6 +326,7 @@ __all__ = [
     "MemoryResultStore",
     "Once",
     "Outcome",
+    "PerKeyLimiter",
     "Periodic",
     "PgAdvisoryLock",
     "Policy",
@@ -336,6 +351,9 @@ __all__ = [
     "RetryStats",
     "Retrying",
     "SQLiteBreakerState",
+    "ShutdownError",
+    "ShutdownManager",
+    "ShutdownReport",
     "SqlAppLock",
     "Timeout",
     "TimeoutExpired",
@@ -396,6 +414,7 @@ __all__ = [
     "mysql_transient",
     "no_debug",
     "once",
+    "per_key",
     "periodic",
     "policies",
     "policy",
@@ -417,6 +436,7 @@ __all__ = [
     "run_in_thread",
     "run_sync",
     "shared_rate_limit",
+    "shutdown",
     "single_instance",
     "singleflight",
     "sqlserver_transient",
