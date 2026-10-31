@@ -30,11 +30,13 @@ ExceptionTypes = type[BaseException] | tuple[type[BaseException], ...]
 
 __all__ = [
     "Attempt",
+    "AttemptRecord",
     "RetryBudget",
     "RetryBudgetStats",
     "RetryState",
     "RetryStats",
     "Retrying",
+    "attempt_history",
     "fallback",
     "http_status",
     "retry",
@@ -825,6 +827,81 @@ class _Engine:
         return wait
 
 
+_HISTORY_ATTR = "__python_wrap_attempts__"
+
+
+@dataclass(frozen=True)
+class AttemptRecord:
+    """One failed attempt of a `retry`-decorated call, as kept by `attempt_history`.
+
+    Only the exception's type name is kept (never its message), so the record is safe to
+    log or send to an error tracker.
+
+    Attributes:
+        number: The attempt number, 1-based.
+        duration: Seconds the attempt took.
+        exception: The exception's qualified type name.
+        next_delay: Seconds waited before the next attempt, or None for the last one.
+    """
+
+    number: int
+    duration: float
+    exception: str
+    next_delay: float | None
+
+
+def _remember(
+    history: list[AttemptRecord],
+    attempt: int,
+    began: float,
+    exc: BaseException,
+    wait: float | None,
+) -> None:
+    kind = type(exc)
+    history.append(
+        AttemptRecord(
+            attempt, _core.perf_counter() - began, f"{kind.__module__}.{kind.__qualname__}", wait
+        )
+    )
+    if wait is None:
+        # Exceptions with __slots__ or a read-only __dict__ simply carry no history.
+        with contextlib.suppress(AttributeError, TypeError):
+            setattr(exc, _HISTORY_ATTR, tuple(history))
+
+
+def attempt_history(exc: BaseException) -> tuple[AttemptRecord, ...]:
+    """The attempt timeline a `retry` decorator attached to the exception it re-raised.
+
+    When `retry` gives up, the exception it re-raises carries one `AttemptRecord` per
+    failed attempt (durations, exception types and the waits in between), so a
+    postmortem or an error tracker sees the whole retry sequence, not just the last error.
+
+    Args:
+        exc: Any exception.
+
+    Returns:
+        The records, oldest first; empty if the exception did not come out of `retry`.
+
+    Example:
+        ```python
+        from python_wrap import attempt_history, retry
+
+        @retry(max_attempts=3, delay=0, on=ConnectionError)
+        def fetch() -> None:
+            raise ConnectionError("refused")
+
+        try:
+            fetch()
+        except ConnectionError as exc:
+            timeline = attempt_history(exc)
+        assert [record.number for record in timeline] == [1, 2, 3]
+        assert timeline[-1].next_delay is None
+        ```
+    """
+    history = getattr(exc, _HISTORY_ATTR, ())
+    return history if isinstance(history, tuple) else ()
+
+
 def _check_budget(budget: Any) -> None:
     if budget is not None and not isinstance(budget, RetryBudget):
         raise TypeError(f"budget must be a RetryBudget or None, got {budget!r}")
@@ -1047,12 +1124,15 @@ def retry(
             async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
                 started = engine.start_call()
                 attempt = 1
+                history: list[AttemptRecord] = []
                 while True:
                     engine.start_attempt()
+                    began = _core.perf_counter()
                     try:
                         result = await af(*args, **kwargs)
                     except on as exc:
                         wait = await engine.afailure(attempt, exc, started)
+                        _remember(history, attempt, began, exc, wait)
                         if wait is None:
                             raise
                     else:
@@ -1076,12 +1156,15 @@ def retry(
         def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
             started = engine.start_call()
             attempt = 1
+            history: list[AttemptRecord] = []
             while True:
                 engine.start_attempt()
+                began = _core.perf_counter()
                 try:
                     result = f(*args, **kwargs)
                 except on as exc:
                     wait = engine.failure(attempt, exc, started)
+                    _remember(history, attempt, began, exc, wait)
                     if wait is None:
                         raise
                 else:

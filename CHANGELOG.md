@@ -27,6 +27,10 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
 - `python_wrap.presets`: `http_client()`, `db_call()` and `third_party_api()` policies with
   documented timeouts, attempts, backoff, retry budgets and breaker thresholds;
   `idempotent=False` leaves the retry layer out.
+- `attempt_history(exc)`: the exception `retry` re-raises carries an `AttemptRecord` per
+  failed attempt (duration, exception type name, following wait). `observability.annotate_span`
+  copies it onto an OpenTelemetry span and `observability.sentry_breadcrumbs()` records
+  python-wrap events as Sentry breadcrumbs, with exceptions reduced to type names.
 - Celery helpers: `retry_countdown` and `retry_task` schedule Celery task retries from
   `request.retries` with explicit delays or capped backoff, honouring a dependency's
   `retry_after`/`Retry-After`; `shared_breaker` builds a breaker whose state is shared by

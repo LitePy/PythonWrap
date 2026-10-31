@@ -66,6 +66,21 @@ additional names become `_other`. Request ids, user ids, cache keys, arguments a
 exception messages are never labels. With no subscription, existing event emission
 keeps its cheap disabled path.
 
+## Sentry breadcrumbs
+
+<!-- skip -->
+```python
+import sentry_sdk
+from python_wrap.observability import sentry_breadcrumbs
+
+sentry_sdk.init(dsn="...")
+sentry_breadcrumbs()  # retries, breaker changes, timeouts and rejections become breadcrumbs
+```
+
+Exception fields are reduced to type names; arguments, results and messages are never
+sent. Pass `prefixes=` to choose which events are recorded, and call `.close()` on the
+returned handle to stop.
+
 ## Slow-call detector
 
 ```python
