@@ -18,6 +18,12 @@ from .aio import (
     race,
     run_sync,
 )
+from .async_cache import (
+    AsyncCacheStore,
+    AsyncMemoryStore,
+    AsyncRedisStore,
+    amemoize,
+)
 from .batching import (
     AsyncBatched,
     Batched,
@@ -254,8 +260,11 @@ __all__ = [
     "ArgumentTypeError",
     "AsyncBatched",
     "AsyncBuffered",
+    "AsyncCacheStore",
     "AsyncDebounced",
+    "AsyncMemoryStore",
     "AsyncPeriodic",
+    "AsyncRedisStore",
     "Attempt",
     "AuditRecord",
     "BatchError",
@@ -325,6 +334,7 @@ __all__ = [
     "ValidationError",
     "__version__",
     "amap_iter",
+    "amemoize",
     "aprocess_batches",
     "audit",
     "batch_calls",

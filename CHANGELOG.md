@@ -16,6 +16,10 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
   `sqlserver_transient` (pyodbc SQLSTATEs and native numbers such as deadlock 1205 and
   Azure SQL 40613), their union `db_transient` (also SQLAlchemy `connection_invalidated`)
   and `error_code(...)` for driver error numbers. No driver is imported.
+- `amemoize`, an async-native cache for `async def` functions whose store is awaited, so
+  Redis I/O no longer blocks the event loop: `AsyncCacheStore` protocol, `AsyncMemoryStore`
+  (LRU + TTL) and `AsyncRedisStore` for `redis.asyncio` clients, with singleflight for
+  concurrent misses and `json_codec()` for caches that must not unpickle.
 - `python_wrap.http`: method-safe HTTP retries. `HttpRetryPolicy` retries idempotent
   methods (or any request carrying an `Idempotency-Key`) on transport errors and 408/425/
   429/5xx, honouring `Retry-After`, deadlines and `RetryBudget`. `RetryTransport` and
@@ -38,19 +42,19 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
 
 ## [0.3.0] - 2026-10-29
 
-Production integration helpers, optional distributed backends, and fixes from the
-application fit review. The package keeps zero runtime dependencies; applications
+Production integration helpers, optional distributed backends, and fixes from
+integration testing. The package keeps zero runtime dependencies; applications
 supply Redis clients, SQLAlchemy engines, frameworks and telemetry providers.
 
 ### Added
 
-- Application-fit follow-up: explicit `retry`/`retrying(delays=[...])` schedules,
+- Explicit `retry`/`retrying(delays=[...])` schedules,
   repeating the final wait, and `log_values=False` for retry diagnostics that omit
   exception/result contents and tracebacks, including failing hooks/hints.
 - Opt-in `memoize(copy_result=True)` isolates mutable cached results on write and
   delivery, including concurrent callers and explicit cache reads.
-- Existing FastAPI application adoption guide covering tenant keys, response adapters,
-  job delay contracts, and durable outbox/cache boundaries.
+- Adoption guide for existing FastAPI services covering tenant-aware cache keys, response
+  adapters, job delay schedules and boundaries with existing durable infrastructure.
 
 - `ContextFilter`, `bind` and `unbind` for context on application log records, plus optional
   Flask, FastAPI/ASGI, Django and Celery lifecycle adapters.

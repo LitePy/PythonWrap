@@ -160,6 +160,7 @@ nav:
           - features/caching/index.md
           - Memoize: features/caching/memoize.md
           - Shared stores and credentials: features/caching/stores-and-credentials.md
+          - Async cache stores: features/caching/async-stores.md
           - Once: features/caching/once.md
           - Cached property: features/caching/cached-property.md
           - Singleflight: features/caching/singleflight.md
@@ -221,6 +222,7 @@ nav:
           - Caching: api/caching.md
           - Batching: api/batching.md
           - Redis stores: api/stores.md
+          - Async cache: api/async_cache.md
           - Expiring credentials: api/credentials.md
           - Buffered writers: api/buffering.md
           - Batch processing: api/processing.md
