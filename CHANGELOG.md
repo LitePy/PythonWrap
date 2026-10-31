@@ -10,6 +10,13 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
 
 ## [Unreleased]
 
+### Added
+
+- Ready-made transient database error predicates: `postgres_transient`, `mysql_transient`,
+  `sqlserver_transient` (pyodbc SQLSTATEs and native numbers such as deadlock 1205 and
+  Azure SQL 40613), their union `db_transient` (also SQLAlchemy `connection_invalidated`)
+  and `error_code(...)` for driver error numbers. No driver is imported.
+
 ## [0.3.0] - 2026-10-29
 
 Production integration helpers, optional distributed backends, and fixes from the
