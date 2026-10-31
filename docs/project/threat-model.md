@@ -65,10 +65,33 @@ Regression tests: `tests/test_redaction.py`, `tests/test_retry_log_privacy.py`,
 - Unbounded growth: caches (`maxsize`), exporter series (`max_series`), dashboard function
   table, per-key limiters (`max_keys`) and the idempotency middleware body buffer
   (`max_body`) are all bounded; report any structure documented as bounded that is not.
-- `Retry-After` values from servers are capped (`max_retry_after`, `max_delay`) so a hostile
+- `Retry-After` values from servers are capped (`max_retry_after`, `max_delay`, and for
+  `retry(delay_from=...)` `HINT_CEILING`, 600 s, when `max_delay` is unset) so a hostile
   upstream cannot park a worker indefinitely.
+- `MemoryResultStore` keeps at most `max_entries` results (default 10,000).
 - Retries are bounded by `max_attempts`/`max_time` and can share a `RetryBudget`; the
   doctor flags unbounded retries (PW001).
+
+## Idempotency middleware
+
+Idempotency keys come from untrusted clients. The middleware:
+
+- partitions keys by `scope=` or, by default, a digest of `Authorization` and `Cookie`,
+  so one client can never replay another client's response (pass `scope=` with your
+  authenticated tenant/user id for the strongest isolation);
+- fingerprints method, path, query string and body, so a reused key with different input
+  is rejected with 422;
+- never stores `Set-Cookie` or hop-by-hop headers, and never stores 5xx responses;
+- bounds request bodies with `max_body`, including chunked WSGI bodies.
+
+Stored responses are kept as-is in the configured store: do not use the middleware on
+endpoints whose responses carry secrets unless that store is trusted.
+
+## Alerts and outbound calls
+
+`WebhookAlerter` accepts only `http`/`https` URLs, never logs the full URL, sends no
+exception messages, and escapes Slack control characters. The URL is operator
+configuration: treat it as trusted, as with any webhook (it can reach internal hosts).
 
 ## Operational exposure
 
@@ -79,6 +102,14 @@ behind your existing auth. `Dashboard.serve()` binds to `127.0.0.1` by default.
 `python_wrap.chaos` injects failures only when rules are installed in code or the
 `PW_CHAOS` variable is set; it is inert otherwise. Do not set `PW_CHAOS` in production
 deployments unless you are running a deliberate game day.
+
+## Accepted risks
+
+- `RedisStore`/`AsyncRedisStore` default to pickle for backward compatibility. Only use them
+  with a Redis instance you fully trust, or pass `json_codec()`.
+- `PW_CHAOS` and policy files may name an exception as `module:Class`; resolving it imports
+  that module. These are deployment configuration, never request input, and anything that
+  is not an exception class is rejected.
 
 ## Not yet done
 

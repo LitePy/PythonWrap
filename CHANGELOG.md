@@ -90,6 +90,34 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
   headers and RFC 9457 problem+json responses for rate-limit, open-circuit and bulkhead
   rejections, with optional FastAPI, Flask and Django glue.
 
+### Security
+
+Findings of a full package review (bandit, ruff `S`, pip-audit, a secret scan and zizmor,
+plus a manual review); each has a regression test in `tests/test_security_fixes.py`.
+
+- `IdempotencyMiddleware`/`WsgiIdempotencyMiddleware` no longer store or replay
+  `Set-Cookie` and hop-by-hop headers, so a replay can never hand one client's session
+  cookie to another (high).
+- Without `scope=`, idempotency keys are now partitioned by a digest of the request's
+  `Authorization` and `Cookie` headers, so two clients that send the same key never
+  receive each other's stored response (high).
+- The request fingerprint now includes the query string: the same key and body sent to a
+  different query is a 422 mismatch instead of a replay (medium).
+- The WSGI middleware reads chunked request bodies (no `Content-Length`) up to `max_body`
+  and fingerprints them, instead of treating them as empty (medium).
+- `MemoryResultStore` is bounded (`max_entries`, default 10,000), so a flood of distinct
+  client-supplied keys cannot exhaust memory (medium).
+- `problem_response` no longer copies internal breaker or bulkhead names from exception
+  messages into 503 bodies sent to clients (low).
+- A `delay_from` hint such as `Retry-After` is capped at `HINT_CEILING` (600 s) when
+  `max_delay` is not set, and non-finite hints fall back to the backoff, so one header
+  cannot park a worker for days (medium).
+- Slack webhook alerts escape `&`, `<` and `>`, so a breaker name or context value cannot
+  mention `@channel` or inject a link (low).
+- Workflows: every action is pinned to a commit SHA, `actions/checkout` runs with
+  `persist-credentials: false`, the release build no longer uses a cache, and a step
+  output is passed through the environment instead of being expanded into a script.
+
 ### Changed
 
 - The package description now matches what it is: a typed, zero-dependency resilience
