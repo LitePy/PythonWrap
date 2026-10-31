@@ -189,6 +189,7 @@ nav:
       - Developer tools: features/devtools.md
       - Configuration: features/configuration.md
       - Dynamic switches: features/switches.md
+      - Web helpers: features/web-helpers.md
   - Testing: testing/index.md
   - Cookbook:
       - cookbook/index.md
@@ -248,6 +249,7 @@ nav:
           - FastAPI and ASGI: api/fastapi.md
           - Django: api/django.md
           - Celery: api/celery.md
+          - Web helpers: api/web.md
       - Testing helpers: api/testing.md
       - Errors: api/errors.md
   - Project:

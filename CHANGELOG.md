@@ -16,6 +16,12 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
   `sqlserver_transient` (pyodbc SQLSTATEs and native numbers such as deadlock 1205 and
   Azure SQL 40613), their union `db_transient` (also SQLAlchemy `connection_invalidated`)
   and `error_code(...)` for driver error numbers. No driver is imported.
+- `python_wrap.web`: `IdempotencyMiddleware` (ASGI) and `WsgiIdempotencyMiddleware` dedupe
+  requests carrying an `Idempotency-Key`, replaying stored responses, answering 409 for a
+  concurrent duplicate and 422 for a reused key with a different body.
+- `ratelimit_headers`, `too_many_requests` and `problem_response` build IETF `RateLimit-*`
+  headers and RFC 9457 problem+json responses for rate-limit, open-circuit and bulkhead
+  rejections, with optional FastAPI, Flask and Django glue.
 
 ## [0.3.0] - 2026-10-29
 
