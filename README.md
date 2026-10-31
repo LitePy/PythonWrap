@@ -486,6 +486,19 @@ None of them cover bounded `gather`, bulkheads, batching, hedging, policies or t
 
 0.2.0 fixes decorators that did not do what their names promised (`transactional`, `revert_on_failure`, async `timing`) and makes a few breaking changes: `run_in_thread` returns a `Future`, `benchmark` is a function, `retry_on_exception` is deprecated and bounded, `rate_limit` raises `RateLimitExceeded`, and the logging decorators default to `DEBUG`. Python 3.8 and 3.9 are no longer supported. `from python_wrap.decorators import ...` still works. See the [migration guide](https://pythonwrap.readthedocs.io/en/latest/project/migration/).
 
+## Security
+
+python-wrap has no runtime dependencies and makes no network calls of its own. Optional stores (Redis, SQLite) and exporters only talk to services you configure. Logging helpers redact secrets by default (`password`, `token`, `api_key`, ...), and cache keys and idempotency keys are never logged raw. Read the [threat model](https://pythonwrap.readthedocs.io/en/latest/project/threat-model/) before sharing caches or breaker state across trust boundaries, and report vulnerabilities privately as described in [SECURITY.md](https://github.com/LitePy/PythonWrap/blob/main/SECURITY.md).
+
+## Limits
+
+- In-process by default: caches, rate limits and circuit breakers are per process unless you opt into a shared store (`RedisStore`, `SQLiteBreakerState`).
+- Retries are only safe for idempotent work; `python -m python_wrap doctor` flags risky stacks.
+- Sync timeouts use `SIGALRM` on the Unix main thread; elsewhere a worker thread is used and cannot be stopped, so make long work cooperative.
+- The API of the stable core is frozen ahead of 1.0; other modules may still change between minor releases.
+
+See the full list of [known limitations](https://pythonwrap.readthedocs.io/en/latest/project/limitations/).
+
 ## Contributing
 
 Bug reports, ideas and pull requests are welcome. Read [CONTRIBUTING.md](https://github.com/LitePy/PythonWrap/blob/main/CONTRIBUTING.md) for the development setup and checks, and [SECURITY.md](https://github.com/LitePy/PythonWrap/blob/main/SECURITY.md) for reporting vulnerabilities.
