@@ -181,6 +181,8 @@ nav:
           - Audit: features/observability/audit.md
           - Timing and profiling: features/observability/timing.md
           - Metrics and events: features/observability/metrics.md
+          - Exporters: features/observability/exporters.md
+          - Live dashboard: features/observability/dashboard.md
           - Context, telemetry and health: features/observability/production.md
       - Correctness:
           - features/correctness/index.md
@@ -239,6 +241,8 @@ nav:
           - Redaction: api/redaction.md
           - OpenTelemetry adapter: api/observability.md
           - Health registry: api/health.md
+          - Exporters: api/exporters.md
+          - Dashboard: api/dashboard.md
           - Slow calls: api/slow.md
       - Correctness:
           - Validation: api/validation.md

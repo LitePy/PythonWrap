@@ -21,6 +21,14 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
   429/5xx, honouring `Retry-After`, deadlines and `RetryBudget`. `RetryTransport` and
   `AsyncRetryTransport` plug into httpx, `mount_retries` into a `requests.Session`, and
   `http_retry` wraps aiohttp-style or hand-written clients. No HTTP library is imported.
+- `python_wrap.exporters`: `PrometheusExporter` turns the event stream into Prometheus
+  text-format metrics (retries, give-ups, timeouts, rejections by kind, cache hits, breaker
+  state gauges, health gauges) with WSGI/ASGI `/metrics` endpoints, a `prometheus_client`
+  bridge and a cap on label cardinality; `StatsDExporter` sends non-blocking UDP counters,
+  timings and gauges with optional DogStatsD tags.
+- `python_wrap.dashboard.Dashboard`: a live, self-contained resilience page (breaker
+  states, retry and rejection rates, bulkhead load, recent events) over WSGI/ASGI or a
+  local `serve()`, plus a sample Grafana dashboard in `docs/assets/grafana-dashboard.json`.
 - `python_wrap.web`: `IdempotencyMiddleware` (ASGI) and `WsgiIdempotencyMiddleware` dedupe
   requests carrying an `Idempotency-Key`, replaying stored responses, answering 409 for a
   concurrent duplicate and 422 for a reused key with a different body.
