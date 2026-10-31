@@ -8,7 +8,14 @@ Testing helpers live in ``python_wrap.testing`` and the event catalogue in
 """
 
 import logging
+from contextlib import AbstractContextManager
 
+from .adaptive import (
+    AdaptiveLimiter,
+    LoadShed,
+    PerKeyLimiter,
+    per_key,
+)
 from .aio import (
     RaceFailed,
     amap_iter,
@@ -17,10 +24,25 @@ from .aio import (
     race,
     run_sync,
 )
+from .alerts import (
+    WebhookAlerter,
+)
+from .async_cache import (
+    AsyncCacheStore,
+    AsyncMemoryStore,
+    AsyncRedisStore,
+    amemoize,
+)
 from .batching import (
     AsyncBatched,
     Batched,
     batch_calls,
+)
+from .buffering import (
+    AsyncBuffered,
+    Buffered,
+    BufferStats,
+    buffered,
 )
 from .bulkhead import (
     Bulkhead,
@@ -65,6 +87,21 @@ from .config import (
     get_config,
     reset_config,
 )
+from .coordination import (
+    AlreadyRunning,
+    Lease,
+    LeaseLost,
+    LocalLease,
+    PgAdvisoryLock,
+    RedisLock,
+    RedisSemaphore,
+    SqlAppLock,
+    single_instance,
+)
+from .credentials import (
+    Expiring,
+    expiring,
+)
 from .deadline import (
     Deadline,
     deadline,
@@ -90,18 +127,41 @@ from .events import (
     listening,
     subscribe,
 )
+from .health import (
+    HealthRegistry,
+    health,
+)
 from .hedging import (
     hedge,
+)
+from .http import (
+    HttpRetryPolicy,
+)
+from .idempotency import (
+    MemoryResultStore,
+    idempotent,
+)
+from .lifecycle import (
+    ShutdownError,
+    ShutdownManager,
+    ShutdownReport,
+    shutdown,
+)
+from .local_state import (
+    SQLiteBreakerState,
 )
 from .logs import (
     DEFAULT_REDACT,
     AuditRecord,
+    ContextFilter,
     audit,
+    bind,
     current_log_context,
     log_args,
     log_context,
     log_return,
     trace,
+    unbind,
 )
 from .metrics import (
     CallStats,
@@ -113,24 +173,67 @@ from .periodic import (
     Periodic,
     periodic,
 )
+from .policies import (
+    PolicyRegistry,
+    policies,
+    resilient,
+)
 from .policy import (
     Policy,
     policy,
 )
+from .predicates import (
+    Predicate,
+    db_transient,
+    error_code,
+    in_cause_chain,
+    message_contains,
+    mysql_transient,
+    postgres_transient,
+    sqlserver_transient,
+    sqlstate,
+)
+from .processing import (
+    BatchResult,
+    MemoryCheckpoint,
+    Outcome,
+    RedisCheckpoint,
+    aprocess_batches,
+    process_batches,
+)
+from .quotas import (
+    Quota,
+    QuotaExhausted,
+    RedisWindow,
+    shared_rate_limit,
+)
+from .redaction import (
+    is_sensitive,
+    redact,
+)
 from .retry import (
     Attempt,
+    AttemptRecord,
     RetryBudget,
     RetryBudgetStats,
     Retrying,
     RetryState,
     RetryStats,
+    attempt_history,
     fallback,
+    http_status,
     retry,
     retry_after_header,
     retry_on_exception,
     retry_stats,
     retrying,
     suppress,
+)
+from .shared import (
+    RedisBreakerState,
+)
+from .slow import (
+    timed,
 )
 from .state import (
     INJECTED,
@@ -139,6 +242,15 @@ from .state import (
     require_transaction,
     revert_on_failure,
     transactional,
+)
+from .stores import (
+    RedisStore,
+)
+from .switches import (
+    EnvSource,
+    FeatureDisabled,
+    RedisSource,
+    switch,
 )
 from .timing import (
     BenchmarkResult,
@@ -156,7 +268,7 @@ from .validation import (
     validate_args,
 )
 
-__version__ = "0.2.1"
+__version__ = "0.3.0"
 
 # A library must never configure logging; this only silences "no handler" warnings.
 logging.getLogger("python_wrap").addHandler(logging.NullHandler())
@@ -164,15 +276,25 @@ logging.getLogger("python_wrap").addHandler(logging.NullHandler())
 __all__ = [
     "DEFAULT_REDACT",
     "INJECTED",
+    "AdaptiveLimiter",
+    "AlreadyRunning",
     "ArgumentTypeError",
     "AsyncBatched",
+    "AsyncBuffered",
+    "AsyncCacheStore",
     "AsyncDebounced",
+    "AsyncMemoryStore",
     "AsyncPeriodic",
+    "AsyncRedisStore",
     "Attempt",
+    "AttemptRecord",
     "AuditRecord",
     "BatchError",
+    "BatchResult",
     "Batched",
     "BenchmarkResult",
+    "BufferStats",
+    "Buffered",
     "Bulkhead",
     "BulkheadFull",
     "CacheInfo",
@@ -184,35 +306,72 @@ __all__ = [
     "CircuitProtected",
     "CircuitState",
     "CircuitStats",
+    "ContextFilter",
     "Counted",
     "Deadline",
     "Debounced",
+    "EnvSource",
+    "Expiring",
+    "FeatureDisabled",
+    "HealthRegistry",
+    "HttpRetryPolicy",
+    "Lease",
+    "LeaseLost",
     "Limited",
+    "LoadShed",
+    "LocalLease",
     "Memoized",
+    "MemoryCheckpoint",
     "MemoryRecord",
+    "MemoryResultStore",
     "Once",
+    "Outcome",
+    "PerKeyLimiter",
     "Periodic",
+    "PgAdvisoryLock",
     "Policy",
+    "PolicyRegistry",
+    "Predicate",
     "PythonWrapError",
+    "Quota",
+    "QuotaExhausted",
     "RaceFailed",
     "RateLimitExceeded",
     "RateLimiter",
+    "RedisBreakerState",
+    "RedisCheckpoint",
+    "RedisLock",
+    "RedisSemaphore",
+    "RedisSource",
+    "RedisStore",
+    "RedisWindow",
     "RetryBudget",
     "RetryBudgetStats",
     "RetryState",
     "RetryStats",
     "Retrying",
+    "SQLiteBreakerState",
+    "ShutdownError",
+    "ShutdownManager",
+    "ShutdownReport",
+    "SqlAppLock",
     "Timeout",
     "TimeoutExpired",
     "TimingRecord",
     "Transaction",
     "ValidationError",
+    "WebhookAlerter",
     "__version__",
     "amap_iter",
+    "amemoize",
+    "aprocess_batches",
+    "attempt_history",
     "audit",
     "batch_calls",
     "benchmark",
     "benchmark_async",
+    "bind",
+    "buffered",
     "cache",
     "cached_property",
     "check_type",
@@ -223,15 +382,24 @@ __all__ = [
     "count_calls",
     "current_log_context",
     "current_transaction",
+    "db_transient",
     "deadline",
     "debounce",
     "deprecate",
+    "disabled",
     "enforce_types",
+    "error_code",
+    "expiring",
     "fallback",
     "gather_limit",
     "get_config",
+    "health",
     "hedge",
+    "http_status",
+    "idempotent",
+    "in_cause_chain",
     "invalidate",
+    "is_sensitive",
     "limit_concurrency",
     "limiter_of",
     "listening",
@@ -241,16 +409,24 @@ __all__ = [
     "map_async",
     "measure_memory",
     "memoize",
+    "message_contains",
     "mock_data",
+    "mysql_transient",
     "no_debug",
     "once",
+    "per_key",
     "periodic",
+    "policies",
     "policy",
+    "postgres_transient",
+    "process_batches",
     "profile",
     "race",
     "rate_limit",
+    "redact",
     "require_transaction",
     "reset_config",
+    "resilient",
     "retry",
     "retry_after_header",
     "retry_on_exception",
@@ -259,14 +435,29 @@ __all__ = [
     "revert_on_failure",
     "run_in_thread",
     "run_sync",
+    "shared_rate_limit",
+    "shutdown",
+    "single_instance",
     "singleflight",
+    "sqlserver_transient",
+    "sqlstate",
     "subscribe",
     "suppress",
+    "switch",
     "throttle",
+    "timed",
     "timeout",
     "timing",
     "trace",
     "transactional",
+    "unbind",
     "validate_args",
     "wrap_methods",
 ]
+
+
+def disabled() -> AbstractContextManager[None]:
+    """Temporarily bypass caches, retry attempts and rate limits; see testing.disabled."""
+    from .testing import disabled as scope
+
+    return scope()

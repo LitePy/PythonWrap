@@ -59,6 +59,7 @@ The wait before attempt `n + 1` is `min(delay * backoff ** (n - 1), max_delay) +
 | --- | --- | --- |
 | `max_attempts` | `3` | Total calls allowed. `None` retries forever. |
 | `delay` | `1.0` | Base wait in seconds. |
+| `delays` | `None` | Explicit nonempty delay sequence; repeat the last entry. Overrides `delay`/`backoff`, with the same cap and jitter. |
 | `backoff` | `1.0` | Multiplier applied after each failure (use `2` for exponential). |
 | `max_delay` | `None` | Cap on the backoff wait (before jitter). |
 | `jitter` | `0.0` | Up to this many random extra seconds, so many clients do not retry in lockstep. |
@@ -66,12 +67,37 @@ The wait before attempt `n + 1` is `min(delay * backoff ** (n - 1), max_delay) +
 | `on` | `Exception` | Exception type(s) that trigger a retry. Anything else propagates immediately. |
 | `retry_if` | `None` | Extra predicate on the exception; retry only if it returns `True`. May be `async def` for async functions. |
 | `retry_if_result` | `None` | Predicate on the return value; `True` means "retry". The last value is returned when retries run out. May be `async def` for async functions. |
-| `on_retry` | `None` | Called with a `RetryState` before each wait. May be `async def` for async functions. |
-| `delay_from` | `None` | `exc -> seconds or None`: exact wait for this attempt (e.g. `Retry-After`). |
+| `on_retry` | `None` | Called with a `RetryState` before each wait. May be async for async functions. Ordinary hook errors are logged and swallowed. |
+| `delay_from` | `None` | Exception or rejected result → seconds or None: exact wait for this attempt (e.g. `Retry-After`). |
 | `budget` | `None` | A `RetryBudget` shared with other retried code, so retries stay a fraction of traffic. |
 | `logger` | package logger | Logger or logger name for the per-retry message. |
 | `log_level` | `WARNING` | Level of the per-retry message; `None` disables it. |
+| `log_values` | `True` | Set `False` for exception/result type names only, including hint/hook failures. Also suppresses traceback logging. |
 | `log_exc_info` | `False` | Attach the traceback to the per-retry log record. |
+
+## Job-specific delay schedules
+
+Use `delays=[5, 30, 120]` when the job contract specifies exact waits instead of an
+exponential curve. With `max_attempts=3`, waits are **5 and 30**: there is no wait
+after the final failure. More failures repeat the last entry. Each invocation starts
+from the first entry, and the sequence is copied when the decorator or iterator is
+created. Values must be finite nonnegative seconds; use `[0]` for immediate retries.
+`retrying` accepts the same option.
+
+A valid `delay_from` hint takes priority over the schedule, without jitter. Otherwise
+`max_delay` caps the scheduled wait before adding `jitter`. All attempt/time/deadline
+and retry-budget limits still apply.
+
+## Logging around credentials
+
+Use `log_values=False` when exception messages or response representations can contain
+credentials, URLs with tokens, or customer data. Retry messages then include only the
+exception/result type. Hint/hook failures also omit messages and tracebacks, even if
+`log_exc_info=True`. The default remains compatible with existing logging.
+
+This controls the retry engine's own logs. Stats, events, predicates and callbacks still
+receive the original objects. Keep custom callbacks, function names, event subscribers,
+and the application's final exception handler free of secrets too.
 
 ## Choosing what to retry
 
@@ -239,9 +265,9 @@ assert stats is not None and stats.budget_exhausted > 0
 
 ## Honouring Retry-After
 
-Servers that answer 429 or 503 often say how long to wait. Pass `delay_from` a function that maps the exception to a number of seconds, or to `None` to fall back to the normal backoff. A number is the exact wait for that attempt (no backoff, no jitter), still capped by `max_delay` and `max_time`.
+Servers that answer 429 or 503 often say how long to wait. Pass `delay_from` a synchronous function that maps the exception or rejected result to a number of seconds, or to `None` to fall back to the normal backoff. A number is the exact wait for that attempt (no backoff, no jitter), still capped by `max_delay` and `max_time`.
 
-`retry_after_header` reads `exc.retry_after` or `exc.response.headers["Retry-After"]` (seconds or an HTTP-date) and never raises, so it works with `httpx.HTTPStatusError`, `requests.HTTPError` and similar without importing them. The example uses a stand-in exception with the same shape:
+`retry_after_header` reads `.retry_after` or a `Retry-After` header on the object itself or its `.response` (seconds or an HTTP-date). It never raises, so it works with returned responses and `httpx.HTTPStatusError`/`requests.HTTPError` without importing those clients. The example uses a stand-in exception with the same shape:
 
 ```python
 from python_wrap import retry
@@ -268,7 +294,47 @@ def fetch() -> str:
 assert fetch() == "payload"
 ```
 
-Any function works as `delay_from`, e.g. `delay_from=lambda exc: getattr(exc, "wait", None)`. If it raises, the normal backoff is used.
+A callback that returns None or raises uses normal backoff. An exception-only callback
+should check the input type now that result retries can pass a response or any other
+rejected value, including None.
+
+### Returned responses
+
+`http_status` matches `.status_code` or `.status`, so HTTP clients need not raise just
+to retry a 429/503 response:
+
+```python
+from types import SimpleNamespace
+from python_wrap import http_status, retry, retry_after_header
+from python_wrap.testing import fake_clock
+
+responses = iter([
+    SimpleNamespace(status_code=429, headers={"Retry-After": "7"}),
+    SimpleNamespace(status_code=200, headers={}),
+])
+
+@retry(retry_if_result=http_status(429, 503), delay_from=retry_after_header,
+       max_attempts=2, delay=1)
+def request():
+    return next(responses)
+
+with fake_clock() as clock:
+    assert request().status_code == 200
+assert clock.sleeps == [7.0]
+```
+
+For APIs with a body field, use
+`delay_from=lambda outcome: retry_after_header(outcome, json_key="retry_after")`.
+JSON decoding must be synchronous; this sync hint helper cannot await an async
+response decoder. Hints still respect `max_delay`, `max_time`, and a surrounding deadline.
+
+An ordinary `on_retry` exception is logged and swallowed. This prevents a failed
+bookkeeping hook from replacing the original failure or rejected result. Cancellation,
+KeyboardInterrupt and SystemExit still propagate. Use `retry_if` to decide whether a
+failure is retryable, rather than intentionally raising from a notification hook.
+
+`CircuitOpenError` is never retried in 0.3, even with a broad `on=` filter.
+See [named policies and composable predicates](named-policies.md) for driver-error rules.
 
 ## Time budget
 
@@ -390,6 +456,36 @@ stats = retry_stats(fetch)
 assert stats is not None
 assert (stats.calls, stats.attempts_total, stats.retries, stats.gave_up) == (1, 3, 2, 0)
 ```
+
+## The attempt timeline on the final error
+
+When `retry` gives up, the exception it re-raises carries the whole retry sequence.
+`attempt_history(exc)` returns one `AttemptRecord` per failed attempt: its number,
+duration, exception type name and the wait that followed. Messages are never kept, so
+the timeline is safe to log or send to an error tracker.
+
+```python
+from python_wrap import attempt_history, retry
+from python_wrap.testing import fake_clock
+
+
+@retry(max_attempts=3, delay=1, backoff=2, on=ConnectionError)
+def fetch() -> None:
+    raise ConnectionError("refused")
+
+
+with fake_clock():
+    try:
+        fetch()
+    except ConnectionError as exc:
+        for record in attempt_history(exc):
+            print(record.number, record.exception, record.next_delay)
+        assert [r.next_delay for r in attempt_history(exc)] == [1, 2, None]
+```
+
+`python_wrap.observability.annotate_span(span, exc)` copies the timeline onto an
+OpenTelemetry span, and `sentry_breadcrumbs()` records retry, breaker and timeout events as
+Sentry breadcrumbs so an error report shows what happened before the failure.
 
 ## Project-wide defaults
 

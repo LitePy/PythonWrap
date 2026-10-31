@@ -32,7 +32,7 @@ Retry (with `Retry-After`), circuit breaker, timeout, cache, rate limit, bulkhea
 - **Resilience that behaves.** `retry` honours `Retry-After`, a time budget and cancellation; a shared `deadline()` caps a whole request; `policy(...)` stacks the protections in the right order for you.
 - **Zero dependencies.** Pure Python, nothing to audit or pin.
 - **Typed.** Decorators preserve the wrapped signature (`ParamSpec`), and stacking keeps the exact type (`@retry` over `@memoize` still has `.cache_info()`). Ships `py.typed`, checked with `mypy --strict`.
-- **Sync and async, one API.** Works on `def`, `async def` and methods. Async wrappers stay coroutine functions and never block the event loop.
+- **Sync and async, one API.** Works on `def`, `async def` and methods. Async wrappers stay coroutine functions; built-in async paths avoid blocking the event loop. Synchronous external cache stores need the [documented I/O care](https://pythonwrap.readthedocs.io/en/latest/features/caching/stores-and-credentials/#synchronous-store-io).
 - **Fast.** Cache hits and validation skip signature binding on the hot path ([numbers](https://pythonwrap.readthedocs.io/en/latest/project/performance/)).
 - **Observable and testable.** One event stream for retries, cache, circuit, limiters and timeouts; `python_wrap.testing` makes tests instant and deterministic.
 - **Never configures your logging**, is thread-safe, and is tested on Python 3.10 to 3.14 on Linux, macOS and Windows.
@@ -46,6 +46,47 @@ uv add python-wrap
 ```
 
 Python 3.10 or newer.
+
+## Coming in the next release
+
+Unreleased on `main`; see the [CHANGELOG](https://github.com/LitePy/PythonWrap/blob/main/CHANGELOG.md#unreleased).
+
+| Need | API |
+| --- | --- |
+| Sensible numbers without guessing | `presets.http_client()`, `presets.db_call()`, `presets.third_party_api()` |
+| Catch unsafe stacks before production | `Policy.explain()`, `python -m python_wrap doctor` (unbounded or non-idempotent retries, missing timeouts/budgets, misordering) |
+| HTTP clients | `python_wrap.http`: method-safe retrying transports for httpx, a `requests` adapter, `http_retry` for aiohttp |
+| Database errors worth retrying | `db_transient`, `postgres_transient`, `mysql_transient`, `sqlserver_transient` |
+| Async caches that never block the loop | `amemoize` with `AsyncRedisStore` (`redis.asyncio`) |
+| Metrics and dashboards | `PrometheusExporter`, `StatsDExporter`, live `Dashboard`, Grafana sample, `health.summary()` endpoints |
+| Safe POST retries end to end | `IdempotencyMiddleware` (ASGI/WSGI), RateLimit headers and problem+json helpers |
+| Multi-process and Celery deployments | `SQLiteBreakerState`, `celery.shared_breaker`, `celery.retry_task` |
+| Overload and shutdown | `AdaptiveLimiter`, `per_key`, graceful `shutdown.drain()` |
+| Postmortems and testing | `attempt_history(exc)`, Sentry breadcrumbs, `python_wrap.chaos` fault injection, breaker alerts to Slack/Teams |
+| Coming from tenacity/backoff | `python -m python_wrap migrate` codemod and migration guides |
+
+The [stable core](https://pythonwrap.readthedocs.io/en/latest/project/stability/) (retry,
+circuit breaker, timeout, policies, presets) is now frozen ahead of 1.0.
+
+## New in 0.3
+
+The toolkit now includes production integration helpers alongside the existing decorators:
+
+| Need | API |
+| --- | --- |
+| Context on app logs and request/task lifecycle | `ContextFilter`, `bind`, `unbind`; optional Flask/FastAPI/Django/Celery adapters |
+| Shared result caching and credential refresh | `RedisStore`, `expiring` |
+| One configuration per dependency | `policies.register(...)`, `@resilient("name")`, composable error predicates |
+| Coordinate workers and duplicate deliveries | `single_instance`, owner-checked leases, `idempotent` |
+| Shared capacity and budgets | `RedisWindow`, `Quota`, `RedisBreakerState`, `Bulkhead(backend=...)` |
+| Background writes and resumable input processing | `buffered`, `process_batches`, `aprocess_batches` |
+| Operate integrations safely | Dynamic `switch`, `timed`, explicit health registry and optional OpenTelemetry adapter |
+
+The package still has **no runtime dependencies**. Optional adapters use your application's
+existing Redis client, SQLAlchemy engine, framework or OpenTelemetry providers. Distributed
+leases and stored results do not promise exactly-once external side effects after a crash
+or lease expiry. Read the [0.3 migration guide](https://pythonwrap.readthedocs.io/en/latest/project/migration-0.3/)
+for redaction matching changes, unknown cache counts and worker lifecycle.
 
 ## 30-second tour
 
@@ -428,7 +469,7 @@ python-wrap is a broad toolkit; the others are deeper in one area. Use them when
 | [cachetools](https://github.com/tkem/cachetools) | You need other eviction policies (LFU, FIFO, RR), explicit cache objects or custom locks | `memoize` gives LRU + TTL, `cache_info()`, async in-flight dedupe, signature-bound keys and `cached_property(ttl=)` |
 | [async-lru](https://github.com/aio-libs/async-lru) | You only cache coroutines and want a tiny dependency | Same async dedupe, also for sync code, with TTL, per-item TTL and exception caching |
 | [aiolimiter](https://github.com/mjpieters/aiolimiter) | You only need an asyncio leaky-bucket limiter | Sliding window for sync and async, per-key buckets, shared `RateLimiter`, `block=True`, plus `Bulkhead` for concurrency |
-| [pybreaker](https://github.com/danielfm/pybreaker) | You need listeners or circuit state shared across processes (Redis storage) | A typed `CircuitBreaker` with async, `exclude=`, `success_threshold` and `.stats`, no dependency |
+| [pybreaker](https://github.com/danielfm/pybreaker) | You already depend on its listener and storage APIs | A typed `CircuitBreaker` with async, `exclude=`, `success_threshold`, `.stats`, and shared state through Redis or SQLite, no dependency |
 | [functools](https://docs.python.org/3/library/functools.html) | A plain `lru_cache` or `cache` on a sync function with hashable arguments is enough. Prefer it for that | Adds TTL, async, unhashable arguments and `cache_delete` |
 
 None of them cover bounded `gather`, bulkheads, batching, hedging, policies or test helpers; python-wrap trades per-area depth for one consistent, typed, dependency-free API.

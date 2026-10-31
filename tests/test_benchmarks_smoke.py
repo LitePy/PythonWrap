@@ -45,3 +45,34 @@ def test_benchmark_json_output() -> None:
     names = [r["name"] for r in data["results"]]
     assert names == ["bare call", "once (hit)"]
     assert data["results"][1]["sync_ns"] > 0
+
+
+def test_compare_script_runs_without_optional_libraries() -> None:
+    script = SCRIPT.parent / "compare.py"
+    proc = subprocess.run(
+        [sys.executable, str(script), "--number", "200", "--repeat", "1", "--json"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    data = json.loads(proc.stdout)
+    assert "python-wrap" in data["ns_per_call"]["cache hit"]
+    assert "python-wrap" in data["ns_per_call"]["retry (success)"]
+
+
+def test_soak_script_keeps_retries_bounded() -> None:
+    script = SCRIPT.parent / "soak.py"
+    proc = subprocess.run(
+        [sys.executable, str(script), "--duration", "1.5", "--threads", "4", "--period", "0.3",
+         "--json"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )  # fmt: skip
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    report = json.loads(proc.stdout)
+    assert report["calls"] > 0
+    assert report["amplification"] <= 2.0

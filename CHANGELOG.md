@@ -10,6 +10,180 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
 
 ## [Unreleased]
 
+### Added
+
+- `Policy.explain()`, `python_wrap.doctor.doctor(func)` and `python -m python_wrap doctor`
+  describe every layer of a resilience stack and flag risky combinations: unbounded
+  retries, retries of non-idempotent operations, retries without a timeout or budget,
+  timeouts longer than the retry budget, misordered or duplicated layers (codes PW001-PW008).
+- `python -m python_wrap migrate` (and `python_wrap.migrate.migrate_source`): a stdlib-only
+  codemod rewriting tenacity and backoff retry decorators to `retry`, with dry-run, `--diff`
+  and `--write` modes, reporting anything it cannot translate. Full migration guides from
+  tenacity, pybreaker and limits with API mapping tables.
+- `python_wrap.chaos`: `fault_point(name)` and the process-wide `chaos` injector add latency,
+  exceptions or canned results at named points (glob patterns, rate, times, seeded
+  randomness), `chaos.open_circuit(breaker)`, and rules loaded from `PW_CHAOS` only when that
+  variable is set. New event `chaos.injected`.
+- `python_wrap.presets`: `http_client()`, `db_call()` and `third_party_api()` policies with
+  documented timeouts, attempts, backoff, retry budgets and breaker thresholds;
+  `idempotent=False` leaves the retry layer out.
+- `attempt_history(exc)`: the exception `retry` re-raises carries an `AttemptRecord` per
+  failed attempt (duration, exception type name, following wait). `observability.annotate_span`
+  copies it onto an OpenTelemetry span and `observability.sentry_breadcrumbs()` records
+  python-wrap events as Sentry breadcrumbs, with exceptions reduced to type names.
+- `HealthRegistry.summary(critical=...)` rolls component health up into `ok`/`degraded`/
+  `down` with a matching HTTP status, served as JSON by `health.wsgi_app()` and
+  `health.asgi_app()` (checks run off the event loop).
+- `SQLiteBreakerState`: share circuit breaker state between processes on one host (prefork
+  Celery children, gunicorn/uvicorn workers) without Redis, with the same semantics as
+  `RedisBreakerState`; guide for multi-process breaker deployments.
+- `WebhookAlerter`: breaker-open (and recovery) alerts to Slack, Microsoft Teams (Adaptive
+  Card) or JSON webhooks, delivered off the calling thread with a per-breaker cooldown and
+  no exception text or URLs in payloads.
+- `python_wrap.compat`: `named_lock(name, suffix)`, `acquire_lock`, `release_lock`,
+  `RunLocks` and `configure_locks`, a low-diff replacement for hand-rolled `SET NX`/`DEL`
+  lock helpers with owner-checked release and auto-renewal.
+- `AdaptiveLimiter`: an AIMD adaptive concurrency limit (latency target, error-driven
+  decrease, low-priority shedding) that sheds excess load with `LoadShed`; `PerKeyLimiter`
+  and `per_key` give each tenant its own limiter or bulkhead with LRU eviction. New events
+  `adaptive.limit_changed` and `adaptive.shed`.
+- Graceful shutdown: `shutdown` (`ShutdownManager`) drains registered periodic tasks,
+  buffered writers, batchers, debouncers, bulkheads and callables in priority order within
+  a time budget, with SIGTERM/SIGINT handler and `atexit` installation and a per-item
+  `ShutdownReport`. New `lifecycle.*` events.
+- `benchmarks/soak.py` (policy soak test against a simulated flaky dependency, checking
+  retry amplification, breaker recovery and memory) and `benchmarks/compare.py` (overhead
+  next to tenacity, backoff, cachetools and `functools.lru_cache`, with a ratio gate).
+- Project docs: API stability and deprecation policy with the declared stable core pinned
+  by `tests/test_stability.py`, a threat model and serialization/redaction review, an
+  operations runbook with troubleshooting and the stored key formats, and a production
+  pilot guide.
+- Celery helpers: `retry_countdown` and `retry_task` schedule Celery task retries from
+  `request.retries` with explicit delays or capped backoff, honouring a dependency's
+  `retry_after`/`Retry-After`; `shared_breaker` builds a breaker whose state is shared by
+  all prefork children.
+- Ready-made transient database error predicates: `postgres_transient`, `mysql_transient`,
+  `sqlserver_transient` (pyodbc SQLSTATEs and native numbers such as deadlock 1205 and
+  Azure SQL 40613), their union `db_transient` (also SQLAlchemy `connection_invalidated`)
+  and `error_code(...)` for driver error numbers. No driver is imported.
+- `amemoize`, an async-native cache for `async def` functions whose store is awaited, so
+  Redis I/O no longer blocks the event loop: `AsyncCacheStore` protocol, `AsyncMemoryStore`
+  (LRU + TTL) and `AsyncRedisStore` for `redis.asyncio` clients, with singleflight for
+  concurrent misses and `json_codec()` for caches that must not unpickle.
+- `python_wrap.http`: method-safe HTTP retries. `HttpRetryPolicy` retries idempotent
+  methods (or any request carrying an `Idempotency-Key`) on transport errors and 408/425/
+  429/5xx, honouring `Retry-After`, deadlines and `RetryBudget`. `RetryTransport` and
+  `AsyncRetryTransport` plug into httpx, `mount_retries` into a `requests.Session`, and
+  `http_retry` wraps aiohttp-style or hand-written clients. No HTTP library is imported.
+- `python_wrap.exporters`: `PrometheusExporter` turns the event stream into Prometheus
+  text-format metrics (retries, give-ups, timeouts, rejections by kind, cache hits, breaker
+  state gauges, health gauges) with WSGI/ASGI `/metrics` endpoints, a `prometheus_client`
+  bridge and a cap on label cardinality; `StatsDExporter` sends non-blocking UDP counters,
+  timings and gauges with optional DogStatsD tags.
+- `python_wrap.dashboard.Dashboard`: a live, self-contained resilience page (breaker
+  states, retry and rejection rates, bulkhead load, recent events) over WSGI/ASGI or a
+  local `serve()`, plus a sample Grafana dashboard in `docs/assets/grafana-dashboard.json`.
+- `python_wrap.web`: `IdempotencyMiddleware` (ASGI) and `WsgiIdempotencyMiddleware` dedupe
+  requests carrying an `Idempotency-Key`, replaying stored responses, answering 409 for a
+  concurrent duplicate and 422 for a reused key with a different body.
+- `ratelimit_headers`, `too_many_requests` and `problem_response` build IETF `RateLimit-*`
+  headers and RFC 9457 problem+json responses for rate-limit, open-circuit and bulkhead
+  rejections, with optional FastAPI, Flask and Django glue.
+
+### Security
+
+Findings of a full package review (bandit, ruff `S`, pip-audit, a secret scan and zizmor,
+plus a manual review); each has a regression test in `tests/test_security_fixes.py`.
+
+- `IdempotencyMiddleware`/`WsgiIdempotencyMiddleware` no longer store or replay
+  `Set-Cookie` and hop-by-hop headers, so a replay can never hand one client's session
+  cookie to another (high).
+- Without `scope=`, idempotency keys are now partitioned by a digest of the request's
+  `Authorization` and `Cookie` headers, so two clients that send the same key never
+  receive each other's stored response (high).
+- The request fingerprint now includes the query string: the same key and body sent to a
+  different query is a 422 mismatch instead of a replay (medium).
+- The WSGI middleware reads chunked request bodies (no `Content-Length`) up to `max_body`
+  and fingerprints them, instead of treating them as empty (medium).
+- `MemoryResultStore` is bounded (`max_entries`, default 10,000), so a flood of distinct
+  client-supplied keys cannot exhaust memory (medium).
+- `problem_response` no longer copies internal breaker or bulkhead names from exception
+  messages into 503 bodies sent to clients (low).
+- A `delay_from` hint such as `Retry-After` is capped at `HINT_CEILING` (600 s) when
+  `max_delay` is not set, and non-finite hints fall back to the backoff, so one header
+  cannot park a worker for days (medium).
+- Slack webhook alerts escape `&`, `<` and `>`, so a breaker name or context value cannot
+  mention `@channel` or inject a link (low).
+- Workflows: every action is pinned to a commit SHA, `actions/checkout` runs with
+  `persist-credentials: false`, the release build no longer uses a cache, and a step
+  output is passed through the environment instead of being expanded into a script.
+
+### Changed
+
+- The package description now matches what it is: a typed, zero-dependency resilience
+  toolkit. The `Beta` classifier stays until the 1.0 stable-core release.
+- CI: live PostgreSQL and SQL Server jobs for the SQL lease backends and transient-error
+  predicates, a framework matrix (oldest and newest Flask, FastAPI, Django, Celery,
+  httpx, requests), a benchmark comparison and soak job, and a coverage floor
+  (`fail_under = 80`).
+
+## [0.3.0] - 2026-10-29
+
+Production integration helpers, optional distributed backends, and fixes from
+integration testing. The package keeps zero runtime dependencies; applications
+supply Redis clients, SQLAlchemy engines, frameworks and telemetry providers.
+
+### Added
+
+- Explicit `retry`/`retrying(delays=[...])` schedules,
+  repeating the final wait, and `log_values=False` for retry diagnostics that omit
+  exception/result contents and tracebacks, including failing hooks/hints.
+- Opt-in `memoize(copy_result=True)` isolates mutable cached results on write and
+  delivery, including concurrent callers and explicit cache reads.
+- Adoption guide for existing FastAPI services covering tenant-aware cache keys, response
+  adapters, job delay schedules and boundaries with existing durable infrastructure.
+
+- `ContextFilter`, `bind` and `unbind` for context on application log records, plus optional
+  Flask, FastAPI/ASGI, Django and Celery lifecycle adapters.
+- Deep `redact` and `is_sensitive` helpers, opt-in `deep=True` argument redaction;
+  result-based `Retry-After` and `http_status`;
+  composable `Predicate`, `sqlstate`, `message_contains` and `in_cause_chain` helpers.
+- `RedisStore`, early-refresh `expiring` credential loaders, named `PolicyRegistry`,
+  global `policies`, and call-time `resilient` policy resolution.
+- Owner-checked local/Redis leases, `single_instance`, PostgreSQL advisory and SQL Server
+  application-lock adapters, and retained-result `idempotent` execution.
+- Redis sliding windows, run `Quota` budgets, shared breaker state, failure windows,
+  and lease-backed shared bulkhead capacity. `CircuitBreaker.force_open()` supports
+  maintenance and tests.
+- Bounded sync/async `buffered` writers, per-item batch processing outcomes and explicit
+  memory/Redis checkpoints, and dynamic environment/Redis switches.
+- Opt-in OpenTelemetry event spans and bounded-label metrics, `timed` slow-call detection,
+  an explicit weak health registry, `disabled`, `assert_retried` and `assert_cache_hit`.
+- Feature guides, public API pages, worker-lifecycle recipes and a 0.3 migration guide.
+
+### Fixed
+
+- Redaction no longer masks harmless author/activity-session names by substring.
+  Deep redaction masks cycles and uninspected containers at its depth limit.
+- Retry hints can inspect rejected return values; a failing ordinary `on_retry` hook
+  is logged instead of replacing the protected function's outcome.
+- Registered local locks and in-flight coordination are rebuilt after POSIX fork;
+  inherited periodic loops require explicit child startup.
+- External cache deadlines use the live wall clock. The unsafe handwritten Redis
+  recipe is replaced by a namespaced adapter that does not scan for statistics.
+
+### Behavior changes
+
+- Default log argument redaction matches whole name segments. Use
+  `redact_match="substring"` for the old mode, and explicitly list actual credentials
+  named `session_id` in applications where that name is sensitive.
+- `CacheInfo.currsize` may be None for an external store with an unknown size.
+- `CircuitOpenError` is never retried. Ordinary `on_retry` failures are swallowed after
+  logging; hook cancellation and process-exit exceptions still propagate.
+- Default coordination remains in-process. Shared backends are explicit, clients need
+  finite timeouts, and leases/idempotency cannot guarantee exactly-once effects across
+  crashes or lease expiry. See the migration and limitation guides.
+
 ## [0.2.1] - 2026-10-29
 
 Publishes the completed 0.2 release under a fresh version, preserving the older
@@ -317,6 +491,7 @@ Core:
 
 Initial release.
 
-[Unreleased]: https://github.com/LitePy/PythonWrap/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/LitePy/PythonWrap/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/LitePy/PythonWrap/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/LitePy/PythonWrap/compare/v0.1.0...v0.2.1
 [0.1.0]: https://github.com/LitePy/PythonWrap/releases/tag/v0.1.0

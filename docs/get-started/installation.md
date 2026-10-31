@@ -79,3 +79,10 @@ Version 0.2 renames and restructures some APIs. The [migration guide](../project
 ## Next
 
 Build something with it in the [Quickstart](quickstart.md), or find the decorator for your problem in [Choosing a decorator](choosing.md).
+
+## Upgrading to 0.3
+
+Read the [0.3 migration guide](../project/migration-0.3.md) before upgrading an application.
+It covers name-segment redaction, Retry-After on returned responses, hook failure
+behavior, unknown external-cache counts and explicit worker lifecycle. Redis,
+SQLAlchemy, frameworks and OpenTelemetry remain optional application dependencies.

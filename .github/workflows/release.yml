@@ -30,13 +30,16 @@ jobs:
       version: ${{ steps.meta.outputs.version }}
       prerelease: ${{ steps.meta.outputs.prerelease }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v10.3.2
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
-          enable-cache: true
-          cache-dependency-glob: "uv.lock"
+          # No cache in the release build: a poisoned cache must never reach a
+          # published artifact.
+          enable-cache: false
           python-version: "3.13"
 
       # Read the version from the file rather than importing the package: the build
@@ -66,6 +69,16 @@ jobs:
             fi
           fi
 
+      - name: Install Redis for the release integration gate
+        run: sudo apt-get update && sudo apt-get install -y redis-server
+
+      - name: Verify distributed coordination before publishing
+        env:
+          PW_REQUIRE_REDIS: "1"
+        run: |
+          uv sync --frozen --group dev
+          uv run --no-sync pytest tests/test_redis_backends.py tests/test_distributed_contracts.py tests/test_fork_safety.py
+
       - name: Build
         run: uv build
 
@@ -73,13 +86,15 @@ jobs:
         run: uvx twine check --strict dist/*
 
       - name: Smoke-test the wheel in a clean environment
+        env:
+          PACKAGE_VERSION: ${{ steps.meta.outputs.version }}
         run: |
           python3 -m zipfile -l dist/*.whl | grep -q 'python_wrap/py.typed'
           uv venv "$RUNNER_TEMP/smoke" --python 3.13
           uv pip install --python "$RUNNER_TEMP/smoke" dist/*.whl
-          "$RUNNER_TEMP/smoke/bin/python" -I scripts/check_installed.py "${{ steps.meta.outputs.version }}"
+          "$RUNNER_TEMP/smoke/bin/python" -I scripts/check_installed.py "$PACKAGE_VERSION"
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: dist
           path: dist/
@@ -97,11 +112,11 @@ jobs:
       # The OIDC token Trusted Publishing exchanges for a short-lived upload token.
       id-token: write
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: dist
           path: dist/
-      - uses: pypa/gh-action-pypi-publish@v1.14.3
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
         with:
           repository-url: https://test.pypi.org/legacy/
           # Re-running after a failed attempt should not be blocked by files that
@@ -114,8 +129,10 @@ jobs:
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.3.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           python-version: "3.13"
       - name: Install the exact published version without fallback indexes
@@ -146,11 +163,11 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: dist
           path: dist/
-      - uses: pypa/gh-action-pypi-publish@v1.14.3
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
         with:
           # PEP 740 attestations, signed by the same OIDC identity.
           attestations: true
@@ -161,8 +178,10 @@ jobs:
     if: github.ref_type == 'tag' && needs.build.outputs.prerelease == 'false'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.3.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           python-version: "3.13"
       - name: Install the exact published version
@@ -193,9 +212,11 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: dist
           path: dist/

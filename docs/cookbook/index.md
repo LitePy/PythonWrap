@@ -33,3 +33,8 @@ New to python-wrap? Start with the [resilient HTTP client](resilient-http-client
 * **State belongs to the function.** Caches, breakers and rate-limit windows are created once per decorated function and shared by every caller in the process. That is the point, and also the first thing to reset in tests.
 * **Libraries do not configure logging.** Recipes that print or collect logs set up their own handlers, as your application should.
 * **Be explicit about what is safe to repeat.** `retry`, `hedge` and `race` may run an operation more than once. Use them for reads and idempotent writes.
+
+## Framework lifecycle
+
+[Framework integrations](framework-integrations.md) cover Flask, FastAPI/ASGI, Django
+and Celery request/task context, cooperative deadlines and explicit worker startup.

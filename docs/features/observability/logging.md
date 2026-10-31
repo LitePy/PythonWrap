@@ -96,7 +96,12 @@ Both truncate long values (`max_length`, default 200), and both default to `DEBU
 
 `log_args` (and [`audit`](audit.md)) mask parameters whose **name contains** any of the redaction fragments, case-insensitively. The masked value is shown as `'***'`.
 
-The default list is `DEFAULT_REDACT`: `password`, `passwd`, `secret`, `token`, `api_key`, `apikey`, `authorization`, `auth`, `credential`, `private_key`, `cookie`, `session`.
+`DEFAULT_REDACT` covers passwords, secrets, tokens, API/private keys, credentials,
+cookies, authorization, and explicit auth/session secret compound names. Ambiguous
+`auth` and `session` match bare names by default; `author`, `author_id`, `session_id`,
+`session_date`, and `study_session` stay visible. If a session id is a credential in
+your application, add that exact compound name to `redact_extra=`. Set
+`redact_match="substring"` to restore the old matching mode for a decorator.
 
 ```python
 import logging
@@ -148,7 +153,49 @@ assert args["ssn"] == "***" and args["password"] == "***" and args["name"] == "a
 To apply the same names to every `log_args` and `audit` in the project, set them once with `configure(redact_extra=[...])` (or replace the whole list with `configure(redact=[...])`); see [Project-wide configuration](../configuration.md).
 
 !!! warning "`redact=` replaces the defaults"
-    Passing `redact=("ssn",)` masks only `ssn`; `password` is no longer masked. Prefer `redact_extra=`. Redaction works by parameter **name**; it does not scan values, and it does not touch what the function itself logs or returns.
+    Passing `redact=("ssn",)` masks only `ssn`; `password` is no longer masked. Prefer `redact_extra=`. Redaction matches parameter names and, with `deep=True`, nested mapping keys. It does not search arbitrary strings or touch what the function itself logs or returns.
+
+### Nested payloads
+
+The standalone `redact` returns a masked copy of nested mappings and containers. It
+masks cycles and containers beyond `max_depth` instead of exposing uninspected data.
+`log_args` and `audit` redact only top-level argument names by default to keep their
+fast path. Set `deep=True` to also mask sensitive keys inside argument mappings and
+containers, using the same configured fragments and `redact_match` mode. The standalone
+helper is useful when preparing payloads outside a decorator. Deep argument redaction
+does not redact `audit(include_result=True)` results or exception messages; sanitize
+those explicitly before logging if they can contain secrets.
+
+```python
+from python_wrap import is_sensitive, redact
+
+assert not is_sensitive("author_id")
+assert is_sensitive("authToken")
+assert redact({"author": "ana", "body": {"password": "secret"}}) == {
+    "author": "ana", "body": {"password": "***"}
+}
+```
+
+```python
+from python_wrap import audit
+
+records = []
+
+@audit(deep=True, sink=records.append)
+def update_profile(payload):
+    return "updated"
+
+update_profile({"author": "ana", "credentials": {"password": "secret"}})
+assert records[0].arguments == {
+    "payload": {"author": "ana", "credentials": "***"}
+}
+```
+
+### Application-wide record context
+
+[`ContextFilter`, `bind` and `unbind`](production.md#context-on-every-application-log)
+extend the same context to arbitrary application log records. Attach the filter to a
+handler; explicit record attributes win over context defaults.
 
 ## `trace`
 

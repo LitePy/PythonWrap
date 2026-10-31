@@ -44,7 +44,7 @@ from typing import (
     overload,
 )
 
-from python_wrap import _core
+from python_wrap import _core, _fork
 from python_wrap import deadline as _deadline
 from python_wrap._core import F, P, R
 from python_wrap.errors import RateLimitExceeded, TimeoutExpired
@@ -535,6 +535,7 @@ class Timeout:
                     return await _await_with_grace(func(*args, **kwargs), label, seconds, grace)
                 return await _await_with_deadline(func(*args, **kwargs), label, seconds)
 
+            async_wrapper.__python_wrap_layer__ = ("timeout", self)  # type: ignore[attr-defined]
             return cast(F, async_wrapper)
 
         @functools.wraps(func)
@@ -549,6 +550,7 @@ class Timeout:
                     return func(*args, **kwargs)
             return _call_in_worker(func, label, seconds, *args, **kwargs)
 
+        wrapper.__python_wrap_layer__ = ("timeout", self)  # type: ignore[attr-defined]
         return cast(F, wrapper)
 
     # -- sync context manager -----------------------------------------------------------
@@ -771,8 +773,13 @@ class _SlidingWindow:
 
     def __init__(self, limits: tuple[Limit, ...]) -> None:
         self.limits = limits
-        self._lock = threading.Lock()
+        self._lock = _fork.ForkSafeLock()
         self._buckets: dict[Hashable, tuple[deque[float], ...]] = {}
+        self._since_sweep = 0
+        _fork.register(self)
+
+    def _reset_after_fork(self) -> None:
+        self._buckets.clear()
         self._since_sweep = 0
 
     def acquire(self, key: Hashable) -> float:
@@ -898,11 +905,17 @@ class RateLimiter:
         limits: Iterable[Limit] | None = None,
         block: bool = False,
         name: str | None = None,
+        backend: Any = None,
     ) -> None:
+        if backend is not None and calls is None and limits is None:
+            calls, period = backend.calls, backend.period
+        self._backend = backend
         self.limits = _limits(calls, period, limits)
+        if backend is not None and self.limits != ((backend.calls, backend.period),):
+            raise ValueError("limiter limits must match its backend's calls and period")
         self.block = block
         self.name = name
-        self._window = _SlidingWindow(self.limits)
+        self._window: Any = backend if backend is not None else _SlidingWindow(self.limits)
 
     def __repr__(self) -> str:
         return f"RateLimiter(name={self.name!r}, limits={list(self.limits)!r})"
@@ -961,7 +974,11 @@ class RateLimiter:
         """`_take` for coroutines: waits with ``await``."""
         if _core.overrides.disable_rate_limits:
             return True
-        wait = self._window.acquire(key)
+        wait = (
+            await asyncio.to_thread(self._window.acquire, key)
+            if self._backend is not None
+            else self._window.acquire(key)
+        )
         if wait <= 0:
             return True
         if not block:
@@ -977,9 +994,16 @@ class RateLimiter:
             await _core.async_sleep(wait)
             if _core.overrides.disable_rate_limits:
                 break
-            wait = self._window.acquire(key)
+            wait = (
+                await asyncio.to_thread(self._window.acquire, key)
+                if self._backend is not None
+                else self._window.acquire(key)
+            )
             if wait > 0 and _core.overrides.no_sleep:
-                self._window.admit(key)  # as in `_take`: never spin under fast_mode()
+                if self._backend is not None:
+                    await asyncio.to_thread(self._window.admit, key)
+                else:
+                    self._window.admit(key)
                 break
         _core.emit("rate_limit.waited", label, seconds=_core.monotonic() - start)
         return True
@@ -1077,6 +1101,7 @@ class RateLimiter:
                 return await func(*args, **kwargs)
 
             async_wrapper.__rate_limiter__ = self  # type: ignore[attr-defined]
+            async_wrapper.__python_wrap_layer__ = ("limiter", self)  # type: ignore[attr-defined]
             return cast(F, async_wrapper)
 
         @functools.wraps(func)
@@ -1086,6 +1111,7 @@ class RateLimiter:
             return func(*args, **kwargs)
 
         wrapper.__rate_limiter__ = self  # type: ignore[attr-defined]
+        wrapper.__python_wrap_layer__ = ("limiter", self)  # type: ignore[attr-defined]
         return cast(F, wrapper)
 
 
@@ -1312,7 +1338,7 @@ def throttle(interval: float) -> _ThrottleDecorator:
         raise ValueError(f"throttle interval must be positive, got {interval!r}")
 
     def decorate(func: Callable[..., Any]) -> Callable[..., Any]:
-        lock = threading.Lock()
+        lock = _fork.ForkSafeLock()
         last_start: float | None = None
         last_result: Any = None
 
@@ -1462,7 +1488,7 @@ _Pending = tuple[tuple[Any, ...], dict[str, Any]]
 
 
 def _debounce_sync(func: Callable[..., Any], wait: float) -> Callable[..., None]:
-    lock = threading.Lock()
+    lock = _fork.ForkSafeLock()
     timer: threading.Timer | None = None
     pending: _Pending | None = None
 
@@ -1502,6 +1528,12 @@ def _debounce_sync(func: Callable[..., Any], wait: float) -> Callable[..., None]
             call = take()
         return None if call is None else func(*call[0], **call[1])
 
+    def reset_after_fork() -> None:
+        nonlocal timer, pending
+        timer = None
+        pending = None
+
+    wrapper.__dict__["_fork_reset"] = _fork.register_reset(reset_after_fork)
     wrapper.cancel = cancel  # type: ignore[attr-defined]
     wrapper.flush = flush  # type: ignore[attr-defined]
     return wrapper
@@ -1522,7 +1554,7 @@ def _debounce_async(func: Callable[..., Awaitable[Any]], wait: float) -> Callabl
     )
     # Several loops (in several threads) share `bursts`; each burst itself is only ever
     # touched from its own loop's thread.
-    bursts_lock = threading.Lock()
+    bursts_lock = _fork.ForkSafeLock()
 
     async def run(burst: _AsyncBurst) -> Any:
         loop = asyncio.get_running_loop()
@@ -1603,6 +1635,7 @@ def _debounce_async(func: Callable[..., Awaitable[Any]], wait: float) -> Callabl
             burst.timer = None
         return await run(burst)
 
+    wrapper.__dict__["_fork_reset"] = _fork.register_reset(bursts.clear)
     wrapper.cancel = cancel  # type: ignore[attr-defined]
     wrapper.flush = flush  # type: ignore[attr-defined]
     return wrapper
@@ -1686,8 +1719,12 @@ class _Flights(Generic[T]):
     """Thread-side bookkeeping for singleflight: key -> (in-flight future, leader thread)."""
 
     def __init__(self) -> None:
-        self.lock = threading.Lock()
+        self.lock = _fork.ForkSafeLock()
         self.inflight: dict[Hashable, tuple[concurrent.futures.Future[T], int]] = {}
+        _fork.register(self)
+
+    def _reset_after_fork(self) -> None:
+        self.inflight.clear()
 
 
 class _AsyncFlight:
@@ -1802,7 +1839,7 @@ def singleflight(
             flights_by_loop: weakref.WeakKeyDictionary[
                 asyncio.AbstractEventLoop, dict[Hashable, _AsyncFlight]
             ] = weakref.WeakKeyDictionary()
-            loops_lock = threading.Lock()  # loops in several threads share the mapping
+            loops_lock = _fork.ForkSafeLock()  # loops in several threads share the mapping
 
             @functools.wraps(f)
             async def async_wrapper(*args: P.args, **kwargs: P.kwargs) -> Any:
@@ -1846,6 +1883,7 @@ def singleflight(
                 new.task = _start_task(loop, run())
                 return await _await_flight(new, waiter)
 
+            async_wrapper.__dict__["_fork_reset"] = _fork.register_reset(flights_by_loop.clear)
             return cast(Callable[P, R], async_wrapper)
 
         flights: _Flights[R] = _Flights()

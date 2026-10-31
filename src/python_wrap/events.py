@@ -23,6 +23,7 @@ Listener = Callable[[Event], None]
 #: function's qualified name unless noted). The docs page renders this mapping.
 EVENT_NAMES: Mapping[str, str] = MappingProxyType(
     {
+        "timing.slow": "A call exceeded its slow-call threshold. Fields: seconds (float).",
         "retry.attempt_failed": (
             "An attempt failed and another will follow. Fields: attempt (int, 1-based), "
             "exception (BaseException, or None for a value rejected by retry_if_result), "
@@ -74,6 +75,27 @@ EVENT_NAMES: Mapping[str, str] = MappingProxyType(
         "periodic.failed": (
             "A background run of a periodic function raised. Fields: run (int), "
             "exception (BaseException)."
+        ),
+        "adaptive.limit_changed": (
+            "An AdaptiveLimiter changed its concurrency limit. function is the limiter name. "
+            "Fields: old (int), new (int)."
+        ),
+        "adaptive.shed": (
+            "An AdaptiveLimiter rejected a call over its limit (LoadShed). "
+            "Fields: limit (int), in_flight (int)."
+        ),
+        "lifecycle.drain_started": "A shutdown drain began. Fields: items (int).",
+        "lifecycle.item_done": (
+            "One registered item finished draining. function is the item name. "
+            "Fields: status (str): 'ok', 'error' or 'timeout'; seconds (float)."
+        ),
+        "lifecycle.drain_finished": (
+            "A shutdown drain completed. Fields: ok (bool), seconds (float)."
+        ),
+        "chaos.injected": (
+            "A python_wrap.chaos rule injected a fault. function is the fault point name. "
+            "Fields: kind (str): 'latency', 'exception' or 'result'; point (str); "
+            "pattern (str, the matching rule)."
         ),
     }
 )

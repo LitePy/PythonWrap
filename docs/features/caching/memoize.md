@@ -63,6 +63,44 @@ fetch_user(Client(), 1)
 assert fetch_user.cache_info().hits == 1
 ```
 
+### Mutable result isolation
+
+By default, cached results are shared by reference. Use `copy_result=True` for
+JSON-shaped data that callers may modify:
+
+```python
+from python_wrap import memoize
+
+source = {"items": [1]}
+
+@memoize(copy_result=True)
+def load() -> dict:
+    return source
+
+first = load()
+first["items"].append(2)
+source["items"].append(3)
+assert load() == {"items": [1]}
+peek = load.cache_get()
+peek["items"].clear()
+assert load() == {"items": [1]}
+```
+
+PythonWrap takes a deep copy before storing a successful value, then gives each
+caller another copy. The first result, cache hits, `cache_get`, concurrent async
+miss waiters and stale refreshes all follow this rule. Cached exceptions retain
+their identity. When caching is disabled, the original function result is returned.
+
+Copies run outside cache locks and follow Python's `deepcopy` protocol. Custom
+objects can deliberately retain identity; this option is appropriate for ordinary
+data containers, not database sessions or HTTP clients. A copy failure raises a
+`TypeError` with the original cause rather than silently sharing the value. Copying
+adds CPU/memory cost, so it is opt-in. An external store's own serialization may
+already supply some isolation, but does not by itself isolate shared async waiters.
+
+For tenant data, also include the authenticated tenant and relevant configuration
+generation in the key. Copying does not provide authorization or tenant partitioning.
+
 ## Expiry and size
 
 ```python
@@ -92,6 +130,7 @@ assert calls == ["a", "b", "c", "c"]
 | `ttl` | Seconds (or a `datetime.timedelta`) an entry stays valid. `None` never expires. |
 | `typed` | If `True`, `f(1)` and `f(1.0)` are cached separately. |
 | `key` | Custom `key(*args, **kwargs)` returning a hashable key. |
+| `copy_result` | Deep-copy successful values on write and delivery; default `False`. |
 | `cache_exceptions` | Exception class (or tuple) to cache like a result. |
 | `exception_ttl` | Seconds a cached exception stays valid (defaults to `ttl`). |
 | `stale_ttl` | Seconds after `ttl` during which a stale value is still served while it is refreshed in the background. See [Serving stale values](#serving-stale-values-while-refreshing). |
@@ -283,44 +322,29 @@ What a store can rely on, and what it must do:
 - Exceptions raised by the store propagate to the caller.
 - `maxsize` (LRU) only applies to the built-in store: passing both `store=` and `maxsize=` raises `TypeError`.
 
-A sketch of a Redis adapter, using the `redis` package (not a python-wrap dependency):
+Use the shipped `RedisStore` when a cache needs to be shared between workers:
 
 <!-- skip -->
 ```python
-import pickle
 import redis
-from python_wrap import memoize
+from python_wrap import RedisStore, memoize
 
-class RedisStore:
-    def __init__(self, client: redis.Redis, prefix: str) -> None:
-        self.client, self.prefix = client, prefix
+client = redis.Redis(socket_timeout=2, socket_connect_timeout=2)
 
-    def _key(self, key) -> bytes:
-        return self.prefix.encode() + pickle.dumps(key)  # keys are tuples, not strings
-
-    def get(self, key):
-        raw = self.client.get(self._key(key))
-        return None if raw is None else pickle.loads(raw)
-
-    def set(self, key, entry, ttl):
-        expire = None if ttl is None else max(1, int(ttl) + 1)
-        self.client.set(self._key(key), pickle.dumps(entry), ex=expire)
-
-    def delete(self, key):
-        return bool(self.client.delete(self._key(key)))
-
-    def clear(self):
-        for k in self.client.scan_iter(match=self.prefix + "*"):
-            self.client.delete(k)
-
-    def __len__(self):
-        return sum(1 for _ in self.client.scan_iter(match=self.prefix + "*"))
-
-@memoize(store=RedisStore(redis.Redis(), prefix="pricing:"), ttl=300)
-def price(sku: str) -> float: ...
+@memoize(store=RedisStore(client, prefix="pricing:v1:", fail_open=False), ttl=300)
+def price(sku: str) -> float:
+    return load_price(sku)
 ```
 
-`pickle.dumps` of a key is only stable when the arguments pickle deterministically (strings, numbers, tuples of them), so prefer simple arguments or a `key=` that returns a string. Only unpickle data from a store you trust.
+Keys are hashed by default and `clear()` escapes the namespace before scanning it.
+`cache_info().currsize` is **None** for `RedisStore`: statistics do not scan Redis.
+External deadlines use the live Unix wall clock. The adapter defaults to pickle for
+values, so only decode data from a trusted store or provide a safe application serializer.
+
+Store methods are synchronous and a network-backed store can block an async event loop.
+Configure finite client timeouts and use a local cache for latency-sensitive async code.
+See [shared caches and credentials](stores-and-credentials.md) for serialization,
+failure modes, unknown counts and credential refresh.
 
 ## Per-instance method caches
 

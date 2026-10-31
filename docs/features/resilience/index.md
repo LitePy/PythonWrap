@@ -54,3 +54,8 @@ Calls to networks, disks and other services fail, stall or get slow. These decor
 | All of the above on one call, in the right order | [`policy`](policies.md) |
 
 These combine well, and order matters: the usual stack is fallback outside, then circuit breaker, then retry, then timeout inside. [Policies](policies.md) apply that order for you, and [Stacking](../../get-started/stacking.md) explains why.
+
+## Named configuration
+
+[Named policies and predicates](named-policies.md) add a runtime registry and reusable
+exception classifications. Existing deadlines, fallbacks and immutable policies still compose with them.

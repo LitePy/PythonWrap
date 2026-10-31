@@ -63,3 +63,9 @@ A rate limit counts calls over **time**; a bulkhead counts calls **in flight**. 
 
 - [Timeout](../resilience/timeout.md) and [Hedge](../resilience/hedge.md) for deadlines and parallel retries.
 - [Testing](../../testing/index.md) for `fast_mode()`, `fake_clock()` and `disable_rate_limits()`.
+
+## Worker coordination
+
+- [Leases, single-instance work and idempotency](leases-and-idempotency.md).
+- [Shared Redis windows, quotas, breaker state and bulkheads](shared-limits.md).
+- [Bounded background batch writers](buffered-writes.md).

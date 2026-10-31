@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "python-wrap"
 dynamic = ["version"]
-description = "Everyday Python decorators that just work: retry, memoize, timeout, rate limiting, circuit breakers and more. Typed, async-aware, zero dependencies."
+description = "A typed, zero-dependency resilience toolkit: retry, circuit breakers, timeouts, rate limits, caching, bulkheads and policies, with sync and async parity."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
@@ -13,6 +13,7 @@ license-files = ["LICENSE"]
 authors = [{ name = "Mahmoud Ahmed", email = "pythondeveloper6@gmail.com" }]
 maintainers = [{ name = "Mahmoud Ahmed", email = "pythondeveloper6@gmail.com" }]
 keywords = [
+    "resilience",
     "decorators",
     "retry",
     "memoize",
@@ -102,6 +103,8 @@ branch = true
 
 [tool.coverage.report]
 show_missing = true
+# A floor, not a target: platform-specific branches are skipped on some CI cells.
+fail_under = 80
 exclude_also = ["if TYPE_CHECKING:", "@overload", "raise NotImplementedError", "\\.\\.\\."]
 
 [tool.ruff]

@@ -24,7 +24,6 @@ import asyncio
 import functools
 import inspect
 import math
-import threading
 import time
 import types
 from collections.abc import Awaitable, Callable, Iterator
@@ -32,7 +31,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Generic, NoReturn, ParamSpec, TypeVar, overload
 
-from python_wrap import _core
+from python_wrap import _core, _fork
 
 try:
     import pytest as _pytest
@@ -43,9 +42,12 @@ __all__ = [
     "Call",
     "FakeClock",
     "Spy",
+    "assert_cache_hit",
+    "assert_retried",
     "disable_caching",
     "disable_rate_limits",
     "disable_retries",
+    "disabled",
     "eventually",
     "eventually_sync",
     "fake_clock",
@@ -71,7 +73,7 @@ _UNSET = _Unset()
 # --------------------------------------------------------------------------- overrides
 
 
-_scope_lock = threading.Lock()
+_scope_lock = _fork.ForkSafeLock()
 # Per overridden field: the value before the first active scope, and the stack of
 # (scope token, value) for every scope currently active on it.
 _baseline: dict[str, Any] = {}
@@ -260,8 +262,8 @@ class FakeClock:
     start: float = field(default_factory=lambda: float(math.ceil(time.monotonic())))
     now: float = field(init=False)
     sleeps: list[float] = field(default_factory=list)
-    _lock: threading.Lock = field(
-        default_factory=threading.Lock, init=False, repr=False, compare=False
+    _lock: _fork.ForkSafeLock = field(
+        default_factory=_fork.ForkSafeLock, init=False, repr=False, compare=False
     )
 
     def __reduce__(self) -> NoReturn:
@@ -304,7 +306,7 @@ class FakeClock:
 
 @contextmanager
 def fake_clock(clock: FakeClock | None = None) -> Iterator[FakeClock]:
-    """Patch `_core.monotonic/perf_counter/sleep/async_sleep` with a `FakeClock`.
+    """Patch core monotonic, performance, wall-clock and sleep sources with a FakeClock.
 
     The previous time sources are restored on exit, so it nests.
 
@@ -334,11 +336,12 @@ def fake_clock(clock: FakeClock | None = None) -> Iterator[FakeClock]:
         ```
     """
     clock = clock if clock is not None else FakeClock()
-    names = ("monotonic", "perf_counter", "sleep", "async_sleep")
+    names = ("monotonic", "perf_counter", "wall_time", "sleep", "async_sleep")
     with _core.overrides_lock:
         saved = {name: getattr(_core, name) for name in names}
         _core.monotonic = clock.time
         _core.perf_counter = clock.time
+        _core.wall_time = clock.time
         _core.sleep = clock.sleep
         _core.async_sleep = clock.async_sleep
     try:
@@ -376,7 +379,7 @@ class Spy(Generic[P, R]):
     def __init__(self, func: Callable[P, R]) -> None:
         self._func = func
         self.calls: list[Call] = []
-        self._lock = threading.Lock()
+        self._lock = _fork.ForkSafeLock()
         functools.update_wrapper(self, func)
 
     @property
@@ -660,3 +663,26 @@ if _pytest is not None:
         """Run the test under `fast_mode()`."""
         with fast_mode():
             yield
+
+
+def disabled() -> _Scope:
+    """Temporarily bypass retries, caches and rate limits; deadlines remain real."""
+    return overrides(max_attempts=1, disable_caching=True, disable_rate_limits=True)
+
+
+def assert_retried(func: Any, *, times: int) -> None:
+    """Assert the retry counter since the last reset (times means extra attempts)."""
+    from python_wrap.retry import retry_stats
+
+    stats = retry_stats(func)
+    if stats is None:
+        raise AssertionError("function is not decorated with retry")
+    if stats.retries != times:
+        raise AssertionError(f"expected {times} retries, got {stats.retries}")
+
+
+def assert_cache_hit(func: Any, *, times: int = 1) -> None:
+    """Assert the total cache hits since cache_clear/reset."""
+    hits = func.cache_info().hits
+    if hits != times:
+        raise AssertionError(f"expected {times} cache hits, got {hits}")

@@ -75,7 +75,28 @@ If your function has a `tx` parameter, it is passed as the keyword `tx=`. Put `t
 
 Decorated functions pickle by reference, so the rules are those of plain functions: the function must be reachable by its module and qualified name. Functions defined inside another function, lambdas, and functions defined in `__main__` of an interactive session cannot be sent to a `"spawn"` worker.
 
-State does not cross processes. Each worker has its own cache, rate limiter, circuit breaker, bulkhead and counters; there is no pool-wide limit. `CircuitBreaker`, `RateLimiter`, `Bulkhead`, `RetryBudget`, `Transaction`, `Policy` and `testing.FakeClock` raise `TypeError` when pickled or copied. A `cached_property` value is not pickled with its instance and is computed again after unpickling. See [Process pools and pickling](../get-started/async-and-methods.md#process-pools-and-pickling).
+With default backends, each worker has its own cache, rate limiter, circuit breaker,
+bulkhead and counters. A pool-wide limit requires an explicitly shared backend. Forked
+workers also need the [documented child-reset lifecycle](migration-0.3.md#forked-workers). `CircuitBreaker`, `RateLimiter`, `Bulkhead`, `RetryBudget`, `Transaction`, `Policy` and `testing.FakeClock` raise `TypeError` when pickled or copied. A `cached_property` value is not pickled with its instance and is computed again after unpickling. See [Process pools and pickling](../get-started/async-and-methods.md#process-pools-and-pickling).
+
+## Optional distributed coordination
+
+Default state remains local to each worker. Redis backends are explicit and all workers
+must use matching names, prefixes and configuration. Backend connection timeouts remain
+the application's responsibility. A lost/expired lease cannot cancel an external write,
+and idempotency result storage cannot close the crash gap between an external effect
+and recording its result. Use downstream fencing, database uniqueness or transactions
+when that gap matters. [Coordination details](../features/concurrency/leases-and-idempotency.md).
+
+`max_waiting` on a shared bulkhead is per process; the backend enforces global active
+capacity. Shared bulkhead `active`/`waiting` statistics are local. External cache counts
+can be unknown (`CacheInfo.currsize is None`), and synchronous Redis cache operations
+can block an async wrapper. An explicit health registry is a structural snapshot, not
+proof that a remote service will accept the next request.
+
+Buffered submissions are in-memory and not durable. Shutdown has a bounded drain,
+failed writes are counted, and pending parent records are discarded in forked children.
+Use a durable broker when accepted work must survive a process crash.
 
 ## Other things to know
 

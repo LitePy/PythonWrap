@@ -63,7 +63,7 @@ asyncio.run(test_something())
 
 ## Fake clock
 
-`fake_clock()` replaces `_core.monotonic`, `_core.perf_counter`, `_core.sleep` and `_core.async_sleep`. Sleeping advances the clock and records the duration, so you can assert the exact backoff schedule. The async sleep yields to the event loop, so other tasks still run.
+`fake_clock()` replaces `_core.monotonic`, `_core.perf_counter`, `_core.wall_time`, `_core.sleep` and `_core.async_sleep`. Sleeping advances the clock and records the duration, so you can assert the exact backoff schedule. The async sleep yields to the event loop, so other tasks still run.
 
 ```python
 from python_wrap import retry
@@ -406,3 +406,40 @@ def test_old_api_warns():
 ```
 
 `deprecate` points the warning at the caller's line, so `-W error::DeprecationWarning` shows which test line used the old API.
+
+## Bypass and assertions
+
+`disabled()` combines single-attempt retry, cache bypass, and disabled rate limits.
+It does not remove real deadlines, stop background workers, or bypass distributed leases.
+The same helper is available as `python_wrap.disabled` and `python_wrap.testing.disabled`.
+
+```python
+from python_wrap import disabled, memoize, retry
+from python_wrap.testing import assert_cache_hit, assert_retried
+
+attempts = []
+
+@retry(max_attempts=2, delay=0)
+def flaky():
+    attempts.append(1)
+    if len(attempts) == 1:
+        raise ValueError("temporary")
+    return 7
+
+assert flaky() == 7
+assert_retried(flaky, times=1)       # extra attempts, not total attempts
+
+@memoize
+def cached():
+    return 1
+
+assert cached() == cached() == 1
+assert_cache_hit(cached, times=1)
+with disabled():
+    assert cached() == 1
+assert_cache_hit(cached, times=1)    # bypass did not increment cache hits
+```
+
+The assertions compare totals since the component's last reset, not a hidden baseline
+for a particular call. Reset counters/caches between tests. `breaker.force_open()` can
+exercise fallback behavior directly, and `breaker.reset()` restores normal operation.

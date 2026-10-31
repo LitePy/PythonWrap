@@ -11,11 +11,10 @@ from __future__ import annotations
 import contextlib
 import difflib
 import logging
-import threading
 from collections.abc import Iterable, Iterator, Mapping
 from typing import Any
 
-from python_wrap import _core
+from python_wrap import _core, _fork
 
 __all__ = ["configure", "configured", "get_config", "reset_config"]
 
@@ -34,7 +33,7 @@ _RETRY_KEYS = (
     "budget",
 )
 
-_lock = threading.RLock()
+_lock = _fork.ForkSafeRLock()
 _state: dict[str, Any] = {}
 
 

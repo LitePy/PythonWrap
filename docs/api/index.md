@@ -11,7 +11,7 @@ For explanations and examples, start from the matching [feature page](../feature
 
 | Module | Contents |
 | --- | --- |
-| [retry](retry.md) | `retry`, `retrying`, `retry_stats`, `retry_after_header`, `fallback`, `suppress`, `retry_on_exception`, `Attempt`, `RetryState`, `RetryStats`, `Retrying` |
+| [retry](retry.md) | `retry`, `retrying`, `retry_stats`, `retry_after_header`, `http_status`, `fallback`, `suppress`, `retry_on_exception`, `Attempt`, `RetryState`, `RetryStats`, `Retrying` |
 | [circuit](circuit.md) | `CircuitBreaker`, `circuit_breaker`, `CircuitState`, `CircuitStats`, `CircuitProtected` |
 | [deadline](deadline.md) | `deadline`, `remaining`, `check`, `Deadline` |
 | [hedging](hedging.md) | `hedge` |
@@ -37,7 +37,7 @@ For explanations and examples, start from the matching [feature page](../feature
 
 | Module | Contents |
 | --- | --- |
-| [logs](logs.md) | `log_args`, `log_return`, `trace`, `audit`, `AuditRecord`, `log_context`, `current_log_context`, `DEFAULT_REDACT` |
+| [logs](logs.md) | `log_args`, `log_return`, `trace`, `audit`, `AuditRecord`, `log_context`, `current_log_context`, `ContextFilter`, `bind`, `unbind`, `DEFAULT_REDACT` |
 | [timing](timing.md) | `timing`, `benchmark`, `benchmark_async`, `measure_memory`, `profile`, `TimingRecord`, `BenchmarkResult`, `MemoryRecord` |
 | [metrics](metrics.md) | `count_calls`, `CallStats`, `Counted` |
 | [events](events.md) | `subscribe`, `listening`, `filter_events`, `Event`, `EVENT_NAMES` |
@@ -55,5 +55,34 @@ For explanations and examples, start from the matching [feature page](../feature
 | --- | --- |
 | [config](config.md) | `configure`, `configured`, `get_config`, `reset_config` |
 | [devtools](devtools.md) | `deprecate`, `mock_data`, `compose`, `wrap_methods`, `no_debug` |
-| [testing](testing.md) | `fast_mode`, `fake_clock`, `FakeClock`, `disable_retries`, `disable_rate_limits`, `disable_caching`, `overrides`, `spy`, `spy_on`, `eventually`, `eventually_sync` |
+| [testing](testing.md) | `fast_mode`, `fake_clock`, `FakeClock`, `disabled`, `assert_retried`, `assert_cache_hit`, `disable_retries`, `disable_rate_limits`, `disable_caching`, `overrides`, `spy`, `spy_on`, `eventually`, `eventually_sync` |
 | [errors](errors.md) | `PythonWrapError`, `TimeoutExpired`, `RateLimitExceeded`, `CircuitOpenError`, `BulkheadFull`, `BatchError`, `ValidationError`, `ArgumentTypeError` |
+
+## Production integration helpers (0.3)
+
+| Module | Contents |
+| --- | --- |
+| [stores](stores.md) | `RedisStore` |
+| [credentials](credentials.md) | `expiring`, `Expiring` |
+| [redaction](redaction.md) | `redact`, `is_sensitive`, `segments`, `DEFAULT_REDACT` |
+| [policies](policies.md) | `PolicyRegistry`, `policies`, `resilient` |
+| [predicates](predicates.md) | `Predicate`, `in_cause_chain`, `sqlstate`, `message_contains` |
+| [coordination](coordination.md) | `Lease`, `LocalLease`, `RedisLock`, `RedisSemaphore`, `PgAdvisoryLock`, `SqlAppLock`, `single_instance`, `AlreadyRunning`, `LeaseLost` |
+| [idempotency](idempotency.md) | `idempotent`, `MemoryResultStore` |
+| [quotas](quotas.md) | `Quota`, `QuotaExhausted`, `RedisWindow`, `shared_rate_limit` |
+| [shared](shared.md) | `RedisBreakerState`, `SharedBulkhead` (used by `Bulkhead(backend=...)`) |
+| [buffering](buffering.md) | `buffered`, `Buffered`, `AsyncBuffered`, `BufferStats` |
+| [processing](processing.md) | `process_batches`, `aprocess_batches`, `Outcome`, `BatchResult`, `MemoryCheckpoint`, `RedisCheckpoint` |
+| [switches](switches.md) | `switch`, `EnvSource`, `RedisSource`, `FeatureDisabled` |
+| [observability](observability.md) | `enable`, `Telemetry` |
+| [health](health.md) | `HealthRegistry`, `health` |
+| [slow](slow.md) | `timed` |
+| [flask](flask.md) | `init_app` |
+| [fastapi](fastapi.md) | `install`, `ContextMiddleware` |
+| [django](django.md) | `ContextMiddleware` |
+| [celery](celery.md) | `install`, `TaskContext` |
+
+Framework helpers and OpenTelemetry `enable` are imported from their submodules.
+The top-level objects `policies` and `health` are registries, just as `retry`, `policy`,
+and `deadline` are top-level helpers that share names with modules. Import individual
+submodule helpers with `from python_wrap.<module> import ...`.
