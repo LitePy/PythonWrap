@@ -249,3 +249,9 @@ def test_cli_doctor(capsys, monkeypatch):
     assert cli(["nope"]) == 2
     assert cli([]) == 2
     assert cli(["--help"]) == 0
+
+
+def test_cli_dispatches_migrate(tmp_path, capsys):
+    source = tmp_path / "jobs.py"
+    source.write_text("def f():\n    return 1\n")
+    assert cli(["migrate", str(tmp_path)]) == 0
