@@ -42,6 +42,50 @@ __all__ = [
 _PROBLEM = "application/problem+json"
 _MAX_KEY_LENGTH = 255
 _PREFIX = "python-wrap:http-idem:"
+# Response headers that are never stored for replay: cookies belong to the client that
+# triggered the first execution (replaying them could hand one client's session to
+# another), and hop-by-hop headers describe a single connection, not the response.
+_UNSTORED_HEADERS = frozenset(
+    {
+        "set-cookie",
+        "set-cookie2",
+        "connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-connection",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+        "idempotent-replayed",
+    }
+)
+_READ_CHUNK = 65_536
+
+
+def _credentials_digest(source: Any) -> str:
+    """Default key partition: a digest of the request's Authorization and Cookie headers.
+
+    Without an explicit ``scope=`` two clients that happen to send the same
+    Idempotency-Key must never receive each other's stored response, so keys are
+    partitioned by the credentials the request carried (anonymous requests share one
+    partition). Pass ``scope=`` to partition by an authenticated tenant/user id instead,
+    which also keeps a key stable across token refreshes.
+    """
+    values: list[str] = []
+    if isinstance(source, dict) and "headers" in source and "type" in source:  # ASGI scope
+        found = {
+            bytes(name).lower(): bytes(value)
+            for name, value in source.get("headers") or ()
+            if bytes(name).lower() in (b"authorization", b"cookie")
+        }
+        values = [found.get(b"authorization", b"").decode("latin-1"),
+                  found.get(b"cookie", b"").decode("latin-1")]  # fmt: skip
+    elif isinstance(source, dict):  # WSGI environ
+        values = [str(source.get("HTTP_AUTHORIZATION", "")), str(source.get("HTTP_COOKIE", ""))]
+    if not any(values):
+        return ""
+    return hashlib.sha256("\0".join(values).encode("utf-8", "replace")).hexdigest()
 
 
 # --------------------------------------------------------------------------- problems
@@ -94,13 +138,22 @@ class _Core:
         self.scope, self.max_body = scope, max_body
 
     def storage_key(self, source: Any, method: str, path: str, key: str) -> str:
-        who = self.scope(source) if self.scope is not None else ""
+        who = self.scope(source) if self.scope is not None else _credentials_digest(source)
         raw = "\0".join((str(who), method, path, key))
         return _PREFIX + hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     @staticmethod
-    def fingerprint(body: bytes) -> str:
-        return hashlib.sha256(body).hexdigest()
+    def fingerprint(body: bytes, query: str = "") -> str:
+        """Digest of everything that makes two requests "the same" besides the key.
+
+        The query string is part of it, so the same key and body sent to
+        ``/pay?amount=1`` and ``/pay?amount=1000`` is a mismatch (422), not a replay.
+        """
+        digest = hashlib.sha256()
+        digest.update(len(query).to_bytes(8, "big"))
+        digest.update(query.encode("latin-1", "replace"))
+        digest.update(body)
+        return digest.hexdigest()
 
     def check_key(self, key: str | None) -> tuple[int, list[tuple[str, str]], bytes] | None:
         if key is None:
@@ -143,7 +196,7 @@ class _Core:
         return {
             "fp": fp,
             "status": status,
-            "headers": [[k, v] for k, v in headers],
+            "headers": [[k, v] for k, v in headers if k.lower() not in _UNSTORED_HEADERS],
             "body": body.decode("latin-1"),
         }
 
@@ -156,9 +209,7 @@ class _Core:
     @staticmethod
     def replay_parts(found: dict[str, Any]) -> tuple[int, list[tuple[str, str]], bytes]:
         headers = [
-            (str(k), str(v))
-            for k, v in found["headers"]
-            if str(k).lower() not in {"idempotent-replayed"}
+            (str(k), str(v)) for k, v in found["headers"] if str(k).lower() not in _UNSTORED_HEADERS
         ]
         headers.append(("Idempotent-Replayed", "true"))
         return int(found["status"]), headers, str(found["body"]).encode("latin-1")
@@ -172,10 +223,11 @@ class IdempotencyMiddleware:
 
     For a request with the header and a matching method the response of the first
     execution is stored and replayed (with ``Idempotent-Replayed: true``) for later
-    requests with the same key and the same body. The same key with a different body
-    gets 422; a concurrent in-flight duplicate gets 409 with ``Retry-After: 1``.
-    Responses with status >= 500 are not stored so clients can retry. Requests without
-    the header stream through untouched.
+    requests with the same key, the same query string and the same body. The same key
+    with a different body or query gets 422; a concurrent in-flight duplicate gets 409
+    with ``Retry-After: 1``. Responses with status >= 500 are not stored so clients can
+    retry. ``Set-Cookie`` and hop-by-hop headers are never stored or replayed. Requests
+    without the header stream through untouched.
 
     Args:
         app: The wrapped ASGI application.
@@ -190,6 +242,8 @@ class IdempotencyMiddleware:
         header: Request header carrying the key.
         required: Reject matching requests without the header with 400.
         scope: ``callable(asgi_scope) -> str`` partitioning keys, e.g. by tenant/user.
+            By default keys are partitioned by a digest of the request's
+            ``Authorization`` and ``Cookie`` headers, so clients never share entries.
             Keys must be scoped by authenticated identity.
         max_body: Largest request body buffered for fingerprinting; larger gets 413.
 
@@ -286,7 +340,8 @@ class IdempotencyMiddleware:
             chunks.append(part)
             more = bool(message.get("more_body", False))
         body = b"".join(chunks)
-        fp = core.fingerprint(body)
+        query = bytes(scope.get("query_string", b"")).decode("latin-1")
+        fp = core.fingerprint(body, query)
         skey = core.storage_key(scope, method, str(scope.get("path", "")), key)
 
         async def run(fn: Callable[..., Any], *args: Any) -> Any:
@@ -351,7 +406,10 @@ class WsgiIdempotencyMiddleware:
     """WSGI counterpart of `IdempotencyMiddleware` with identical semantics.
 
     Works with Flask and Django's WSGI entry point. Responses of idempotent requests are
-    buffered (they are stored anyway); requests without the header are untouched.
+    buffered (they are stored anyway); requests without the header are untouched. A
+    chunked request body (no ``Content-Length``) is read, up to ``max_body``, when the
+    server marks the input as terminated (``wsgi.input_terminated``) or the request
+    declares ``Transfer-Encoding: chunked``.
 
     Args:
         app: The wrapped WSGI application.
@@ -362,7 +420,8 @@ class WsgiIdempotencyMiddleware:
         methods: HTTP methods the header applies to.
         header: Request header carrying the key.
         required: Reject matching requests without the header with 400.
-        scope: ``callable(environ) -> str`` partitioning keys by tenant/user.
+        scope: ``callable(environ) -> str`` partitioning keys by tenant/user. By
+            default keys are partitioned by the ``Authorization``/``Cookie`` headers.
         max_body: Largest request body buffered; larger gets 413.
 
     Example:
@@ -414,6 +473,42 @@ class WsgiIdempotencyMiddleware:
         start_response(f"{status} {phrase}", out)
         return [body]
 
+    @staticmethod
+    def _read_body(environ: dict[str, Any], limit: int) -> bytes | None:
+        """Read the request body, never more than ``limit`` bytes; None when larger.
+
+        A body without ``Content-Length`` (chunked transfer encoding) is read to its end
+        when the server marks the input as terminated (``wsgi.input_terminated``, as
+        Gunicorn, Werkzeug and mod_wsgi do) or the request is chunked. Otherwise reading
+        past ``Content-Length`` could block, so the body is taken as empty, as WSGI
+        requires.
+        """
+        stream = environ.get("wsgi.input")
+        raw_length = str(environ.get("CONTENT_LENGTH") or "").strip()
+        if raw_length:
+            try:
+                length = int(raw_length)
+            except ValueError:
+                length = -1
+            if length < 0:
+                length = 0
+            if length > limit:
+                return None
+            return bytes(stream.read(length)) if stream is not None and length > 0 else b""
+        chunked = "chunked" in str(environ.get("HTTP_TRANSFER_ENCODING", "")).lower()
+        if stream is None or not (environ.get("wsgi.input_terminated") or chunked):
+            return b""
+        parts: list[bytes] = []
+        size = 0
+        while True:
+            part = bytes(stream.read(min(_READ_CHUNK, limit + 1 - size)))
+            if not part:
+                return b"".join(parts)
+            size += len(part)
+            if size > limit:
+                return None
+            parts.append(part)
+
     def __call__(
         self, environ: dict[str, Any], start_response: Callable[..., Any]
     ) -> Iterable[bytes]:
@@ -428,15 +523,10 @@ class WsgiIdempotencyMiddleware:
             return self._respond(start_response, problem)
         if key is None:
             return self.app(environ, start_response)  # type: ignore[no-any-return]
-        try:
-            length = int(environ.get("CONTENT_LENGTH") or 0)
-        except ValueError:
-            length = 0
-        if length > core.max_body:
+        body = self._read_body(environ, core.max_body)
+        if body is None:
             return self._respond(start_response, core.too_large())
-        stream = environ.get("wsgi.input")
-        body = stream.read(length) if stream is not None and length > 0 else b""
-        fp = core.fingerprint(body)
+        fp = core.fingerprint(body, str(environ.get("QUERY_STRING", "")))
         path = str(environ.get("SCRIPT_NAME", "")) + str(environ.get("PATH_INFO", ""))
         skey = core.storage_key(environ, method, path, key)
 
@@ -567,14 +657,16 @@ def problem_response(exc: BaseException) -> tuple[int, dict[str, str], bytes]:
         return too_many_requests(exc)
     if isinstance(exc, CircuitOpenError):
         wait = _retry_seconds(exc.retry_after)
-        title = "Service Unavailable"
     elif isinstance(exc, BulkheadFull):
-        wait, title = 1, "Service Unavailable"
+        wait = 1
     else:
         raise TypeError(f"no problem response for {type(exc).__name__}")
     headers = {"Content-Type": _PROBLEM, "Retry-After": str(wait)}
-    return 503, headers, _problem_body(503, title, str(exc) or None)
+    # The exception message names internal breakers/bulkheads; clients get a fixed text.
+    return 503, headers, _problem_body(503, "Service Unavailable", _UNAVAILABLE_DETAIL)
 
+
+_UNAVAILABLE_DETAIL = "the service is temporarily unavailable; retry later"
 
 _HANDLED: tuple[type[BaseException], ...] = (RateLimitExceeded, CircuitOpenError, BulkheadFull)
 

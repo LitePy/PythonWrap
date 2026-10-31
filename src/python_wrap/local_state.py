@@ -192,7 +192,9 @@ class SQLiteBreakerState:
         halfmax, target = breaker.half_open_max_calls, breaker.success_threshold
 
         conn.execute("INSERT OR IGNORE INTO breakers (name) VALUES (?)", (name,))
-        row = conn.execute(f"SELECT {', '.join(_COLUMNS)} FROM breakers WHERE name=?", (name,))
+        # _COLUMNS is a module constant; the only value is bound as a parameter.
+        query = f"SELECT {', '.join(_COLUMNS)} FROM breakers WHERE name=?"  # nosec B608
+        row = conn.execute(query, (name,))
         (
             state,
             gen,

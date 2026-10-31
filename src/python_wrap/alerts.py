@@ -203,7 +203,9 @@ class WebhookAlerter:
         if self.format == "slack":
             lines = [text, f"time: {stamp}"]
             lines += [f"{k}: {v}" for k, v in self.context.items()]
-            return {"text": "\n".join(lines)}
+            # Slack treats <...> as links and mentions (<!channel>); escape so a breaker
+            # name or context value can never ping a channel or render a link.
+            return {"text": _slack_escape("\n".join(lines))}
         if self.format == "teams":
             facts = [
                 {"title": "Breaker", "value": name},
@@ -269,7 +271,8 @@ class WebhookAlerter:
         import urllib.request
 
         request = urllib.request.Request(url, data=body, headers=dict(headers), method="POST")
-        with urllib.request.urlopen(request, timeout=self.timeout) as response:
+        # The scheme is validated as http/https in __init__.
+        with urllib.request.urlopen(request, timeout=self.timeout) as response:  # nosec B310
             response.read()
 
     def flush(self, timeout: float | None = None) -> bool:
@@ -283,3 +286,8 @@ class WebhookAlerter:
         """
         with self._idle:
             return self._idle.wait_for(lambda: self._pending == 0, timeout)
+
+
+def _slack_escape(text: str) -> str:
+    """Escape the three characters Slack's message formatting treats as control."""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")

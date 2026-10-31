@@ -521,8 +521,14 @@ _NEVER_RETRY = (
 )
 
 
+#: Longest wait a `delay_from` hint (such as a server's ``Retry-After``) may impose when
+#: ``max_delay`` is not set. A hostile or broken upstream could otherwise park a worker
+#: for days with one header. Set ``max_delay`` to choose another bound.
+HINT_CEILING = 600.0
+
+
 def _parse_hint(value: Any) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or math.isnan(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
         return None
     return max(float(value), 0.0)
 
@@ -664,7 +670,7 @@ class _Engine:
                     )
                 hint = None
             if hint is not None:
-                return hint if self.max_delay is None else min(hint, self.max_delay)
+                return min(hint, HINT_CEILING if self.max_delay is None else self.max_delay)
         if self.delays is not None:
             delay = self.delays[min(attempt - 1, len(self.delays) - 1)]
             return _compute_delay(1, delay, 1.0, self.max_delay, self.jitter)
@@ -1018,7 +1024,8 @@ def retry(
         delay: Base wait in seconds before the second attempt.
         backoff: Multiplier applied to the wait after each failure (>= 1).
         max_delay: Upper bound for the backoff wait (before jitter is added); also caps
-            waits returned by `delay_from`.
+            waits returned by `delay_from` (which are otherwise capped at
+            ``HINT_CEILING``, 600 s; non-finite hints fall back to the backoff).
         jitter: Up to this many random extra seconds are added to each wait.
         max_time: Total time budget in seconds, measured from the first attempt. If the
             next wait would run past it, the last exception is re-raised instead.
