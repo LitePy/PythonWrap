@@ -80,6 +80,23 @@ circuit breaker, timeout, policies, presets) is now frozen ahead of 1.0.
 | Buffered writes that survive a crash | `buffered(..., journal=SQLiteJournal(...))`, `replay()` |
 | Reject annotations that cannot be checked | `enforce_types(strict=True)`, TypedDict and Protocol checks |
 
+### Built for AI agents and LLM apps
+
+| Need | API |
+| --- | --- |
+| Retry LLM calls the right way (429/529, Retry-After, never 4xx) | `llm_retry`, `presets.llm_client()` |
+| Cap tokens and dollars per call, user or run | `Budget`, `@budget`, `token_rate_limit` |
+| Fall back across models, cache answers, time out streams | `fallback_models`, `llm_cache`, `stream_timeout` |
+| Make agent tools safe to retry and replay | `@tool`, `ToolPolicy`, approval hook, dry-run |
+| Stop runaway loops | `agent_run(max_steps=, max_seconds=, max_repeats=)` |
+| Trace, redact and replay LLM and tool calls | `traced_llm`, `traced_tool`, `Redactor`, `AuditTape`, `replay` |
+| Test agents in milliseconds | `fake_llm`, `chaos.llm` faults, `fake_clock` |
+| Let coding agents use python-wrap correctly | `llms.txt`, `python -m python_wrap api / recipe / guide / mcp` |
+
+No provider SDK is imported: responses and errors are read by duck typing, so it works with
+any client. See [AI and agents](https://pythonwrap.readthedocs.io/en/latest/features/ai/llm-calls/)
+and the `examples/` folder.
+
 Install the beta with `pip install --pre python-wrap`. See the
 [changelog](https://pythonwrap.readthedocs.io/en/latest/project/changelog/) for details.
 
