@@ -202,6 +202,9 @@ plus a manual review); each has a regression test in `tests/test_security_fixes.
 
 ### Fixed
 
+- `SQLiteBreakerState`: concurrent first connections (threads or processes opening the same
+  database at once) could fail with `sqlite3.OperationalError: database is locked` while
+  switching to WAL. Setup now retries until `busy_timeout` has elapsed.
 - `retry_after_header`: an unparseable `Retry-After` value (free text, or a Python-only
   form such as `1_0`) is now ignored on its own, so the `json_key=` body fallback still
   applies instead of the whole lookup being abandoned.
