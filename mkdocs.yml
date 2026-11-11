@@ -200,6 +200,8 @@ nav:
       - Configuration: features/configuration.md
       - Dynamic switches: features/switches.md
       - Web helpers: features/web-helpers.md
+  - AI & agents:
+      - Testing agents: features/ai/testing-agents.md
   - Testing:
       - testing/index.md
       - Chaos and fault injection: testing/chaos.md
@@ -275,6 +277,7 @@ nav:
           - Web helpers: api/web.md
       - Testing helpers: api/testing.md
       - Chaos: api/chaos.md
+      - LLM testing: api/llm_testing.md
       - Migration tool: api/migrate.md
       - Errors: api/errors.md
   - Project:

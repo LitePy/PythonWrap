@@ -20,6 +20,12 @@ cancellation, per-instance state for `throttle`/`debounce`/`rate_limit`, single-
 
 ### Added
 
+- LLM test doubles: `fake_llm` / `FakeProvider` (scripted replies, sync/async/streaming with
+  `fake_clock`-driven delays, call recording, Anthropic- and OpenAI-style usage, token and call
+  assertions) and `chaos.llm` fault rules (`rate_limit`, `overloaded`, `server_error`, `timeout`,
+  `malformed_json`, `slow_first_token`, `stalled_stream`, `invalid_tool_call`, `refusal`),
+  also loadable from `PW_CHAOS` via an `"llm"` key. Look-alike errors live in
+  `python_wrap.llm_testing`.
 - Cooperative cancellation for sync `timeout`: `CancelToken`, `cancel_requested()`,
   `checkpoint()` and `current_token()`. The token is cancelled when the limit is hit, so a
   function that cannot be stopped preemptively (worker-thread fallback, Windows) can stop
