@@ -153,6 +153,13 @@ from .lifecycle import (
     ShutdownReport,
     shutdown,
 )
+from .llm_testing import (
+    FakeProvider,
+    FakeResponse,
+    FakeStream,
+    LLMFaults,
+    fake_llm,
+)
 from .local_state import (
     SQLiteBreakerState,
 )
@@ -321,9 +328,13 @@ __all__ = [
     "Debounced",
     "EnvSource",
     "Expiring",
+    "FakeProvider",
+    "FakeResponse",
+    "FakeStream",
     "FeatureDisabled",
     "HealthRegistry",
     "HttpRetryPolicy",
+    "LLMFaults",
     "Lease",
     "LeaseLost",
     "Limited",
@@ -404,6 +415,7 @@ __all__ = [
     "enforce_types",
     "error_code",
     "expiring",
+    "fake_llm",
     "fallback",
     "gather_limit",
     "get_config",
