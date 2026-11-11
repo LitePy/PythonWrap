@@ -226,6 +226,7 @@ nav:
       - Existing FastAPI application: cookbook/existing-fastapi-app.md
       - Resilient LLM client: cookbook/resilient-llm-client.md
       - Agent tool layer: cookbook/agent-tool-layer.md
+      - Around the real SDKs: cookbook/sdk-adapters.md
       - Building with AI coding agents: cookbook/building-with-agents.md
       - Example projects: cookbook/example-projects.md
   - API reference:

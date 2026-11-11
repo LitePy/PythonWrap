@@ -114,6 +114,7 @@ Install with `pip install python-wrap` (Python 3.10+, no runtime dependencies). 
 - [Existing FastAPI application](https://pythonwrap.readthedocs.io/cookbook/existing-fastapi-app/): PythonWrap can standardize resilience controls and diagnostics around service functions.
 - [Resilient LLM client](https://pythonwrap.readthedocs.io/cookbook/resilient-llm-client/): Calling a model API in production fails in ways ordinary HTTP does not: rate limits that tell you exactly how long to wait, "overloaded" errors that clear in seconds, refusals t...
 - [Agent tool layer](https://pythonwrap.readthedocs.io/cookbook/agent-tool-layer/): An agent loop calls a model, the model asks for tools, tools change the world.
+- [Around the real SDKs](https://pythonwrap.readthedocs.io/cookbook/sdk-adapters/): The other recipes use fakes so they run anywhere.
 - [Building with AI coding agents](https://pythonwrap.readthedocs.io/cookbook/building-with-agents/): An AI coding agent that adds retries, caching or rate limits to your code tends to guess: unbounded retries, retried POSTs, decorators in the wrong order.
 - [Example projects](https://pythonwrap.readthedocs.io/cookbook/example-projects/): The recipes in this cookbook are single files.
 
