@@ -2028,7 +2028,6 @@ def test_cleanup_grace_decorator_outer_cancel_during_grace_consumes_child() -> N
     assert unhandled == []
 
 
-<<<<<<< HEAD
 # -- cooperative cancellation and SIGALRM conflicts ----------------------------------------
 
 import signal as _signal  # noqa: E402
@@ -2160,7 +2159,8 @@ def test_nested_timeouts_do_not_warn():
         _warnings.simplefilter("error", SignalTimerConflictWarning)
         with timeout(10):
             assert inner() == 1
-=======
+
+
 def test_timeout_non_main_thread_deadline_is_prompt_and_work_continues():
     """The documented non-main-thread path: caller released at the deadline, work goes on."""
     import contextvars
@@ -2202,4 +2202,3 @@ def test_timeout_block_form_refused_off_main_thread():
             pass
 
     assert isinstance(run_in_thread(use_block)().exception(timeout=2), RuntimeError)
->>>>>>> verify/claims

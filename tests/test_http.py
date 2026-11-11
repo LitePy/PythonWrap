@@ -561,7 +561,7 @@ def test_retry_after_header_is_case_insensitive_and_json_fallback_survives_garba
     assert retry_delay(Response(429, {"retry-after": "4"}), 1) == 4.0
 
     class Body:
-        headers = {"Retry-After": "tomorrow-ish"}
+        headers: ClassVar[dict[str, str]] = {"Retry-After": "tomorrow-ish"}
 
         def json(self) -> dict:
             return {"retry_after": 7}
