@@ -33,6 +33,7 @@ import contextvars
 import copy
 import functools
 import importlib
+import types
 from collections.abc import Callable, Iterable
 from typing import Any, TypeVar, cast
 
@@ -268,7 +269,17 @@ class AgentsGuard:
         setattr(
             guarded,
             _LAYER_ATTR,
-            ("framework_tool", {"framework": FRAMEWORK, "name": name, "timeout": self.timeout}),
+            (
+                "framework_tool",
+                {
+                    "framework": FRAMEWORK,
+                    "name": name,
+                    # The SDK's own FunctionTool(timeout_seconds=...) counts too.
+                    "timeout": self.timeout
+                    if self.timeout is not None
+                    else getattr(function_tool, "timeout_seconds", None),
+                },
+            ),
         )
         return guarded
 
@@ -405,4 +416,5 @@ def _hook_class(kind: str) -> Any:
         base = getattr(importlib.import_module("agents"), kind)
     except (ImportError, AttributeError):
         return mixin
-    return type(f"PythonWrap{kind}", (mixin, base), {})
+    # ``agents.RunHooks`` is a parametrised generic alias: new_class resolves it.
+    return types.new_class(f"PythonWrap{kind}", (mixin, base))

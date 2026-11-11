@@ -218,16 +218,15 @@ def create_ticket(title: str) -> str:
     return "T-1001"
 
 researcher = Agent(name="researcher", instructions="...", hooks=guard.agent_hooks())
-triage = Agent(
-    name="triage",
-    tools=[create_ticket, guard.wrap(researcher.as_tool("research", "Look things up"))],
-)
+research = researcher.as_tool("research", "Look things up", hooks=guard.hooks())
+triage = Agent(name="triage", tools=[create_ticket, guard.wrap(research)])
 result = Runner.run_sync(triage, "Customer cannot log in", hooks=guard.hooks())
 ```
 
 - `guard.function_tool` is `agents.function_tool` with python-wrap `tool` semantics
   inside (timeout, retry, `ToolPolicy`, approval, ledger keyed on the SDK's
-  `tool_call_id`).
+  `tool_call_id`). Extra keyword arguments go to `agents.function_tool`. The SDK's own
+  `timeout_seconds=` also counts as a timeout for PW020.
 - `guard.wrap(tool)` puts the limits, ledger, timeout and tape around any `FunctionTool`,
   including the one `Agent.as_tool()` returns. A sub-agent run as a tool has its own
   `max_turns` and nothing bounds the tree as a whole; the guard's counters are shared by

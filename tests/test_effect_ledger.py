@@ -756,3 +756,20 @@ def test_property_crash_injection_never_runs_an_effect_twice_blindly(
         with with_call_id(call_id), contextlib.suppress(ConnectionError, EffectUnknown):
             assert act() == call_id
     assert all(count == 1 for count in effects.values())
+
+
+async def test_sync_tool_with_async_hook_inside_a_running_loop() -> None:
+    store = FlakyStore()
+
+    async def decide(error: EffectUnknown) -> Any:
+        return EffectResolved("found")
+
+    @tool(ledger=EffectLedger(store, on_unknown=decide))
+    def act() -> str:
+        return "real"
+
+    with with_call_id("c1"):
+        store.fail_settle = 1
+        with pytest.raises(ConnectionError):
+            act()
+        assert act() == "found"  # sync tool called while this event loop runs

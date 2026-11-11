@@ -1566,7 +1566,7 @@ class EffectLedger:
             error = self._unknown(current, reason)
             answer = self.on_unknown(error) if self.on_unknown is not None else None
             if inspect.isawaitable(answer):
-                answer = asyncio.run(_await(answer))
+                answer = _run_awaitable(answer)
             decision = self._decide(error, answer)
             if decision == "retry":
                 expect, attempts = current.owner, current.attempts + 1
@@ -1747,6 +1747,28 @@ class EffectLedger:
 
     def __repr__(self) -> str:
         return f"EffectLedger({type(self.store).__name__}, lease={self.lease:g}s)"
+
+
+def _run_awaitable(awaitable: Awaitable[Any]) -> Any:
+    """Await from sync code, in a helper thread when an event loop is already running."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(_await(awaitable))
+    box: dict[str, Any] = {}
+
+    def run() -> None:
+        try:
+            box["value"] = asyncio.run(_await(awaitable))
+        except BaseException as exc:
+            box["error"] = exc
+
+    worker = threading.Thread(target=contextvars.copy_context().run, args=(run,), daemon=True)
+    worker.start()
+    worker.join()
+    if "error" in box:
+        raise box["error"]
+    return box.get("value")
 
 
 def _effect_key(
