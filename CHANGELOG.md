@@ -301,6 +301,13 @@ plus a manual review); each has a regression test in `tests/test_security_fixes.
 
 ### Tests
 
+- `tests/e2e/` holds release-grade happy-path scenarios that use only the public API (resilient
+  HTTP client, cached service, idempotent job worker with journal replay, policy and doctor, LLM
+  client, agent tool run with audit replay, the CLI commands and the MCP server over stdio),
+  marked `e2e` and run in the default suite. `scripts/smoke_wheel.py` builds the wheel,
+  installs it into a fresh venv with no dev dependencies and checks the beta version, zero
+  runtime dependencies, `py.typed`, packaged data, the CLIs and a retry/timeout/LLM happy path;
+  CI runs it on Python 3.10 and 3.14 (`PW_SMOKE_WHEEL=1 pytest tests/test_smoke_wheel.py`).
 - Verified on Python 3.10 to 3.13. Added Prometheus text-format 0.0.4 conformance tests
   (strict grammar check, histogram invariants, `prometheus_client` parser round trip),
   `Retry-After` edge cases, real-Redis tests for `RedisSemaphore`, `RedisCheckpoint` and
