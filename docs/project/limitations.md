@@ -14,6 +14,15 @@ python-wrap tries to do the obvious thing, and where it cannot, to say so. These
 
 With the thread fallback the caller gets `TimeoutExpired` at the deadline, but the function keeps running in the background until it returns on its own, and its result is discarded. Side effects (writes, requests) still happen. If you need real cancellation, make the function cooperative (check a flag, use the library's own timeout parameter such as `requests.get(timeout=...)`), or use `async def`.
 
+**Windows.** There is no `SIGALRM` on Windows, so *every* synchronous `timeout`, including one on the main thread, uses the thread fallback. Treat the table above as the whole story there: the deadline releases the caller, never the work. The same applies on Unix to any call from a non-main thread, which is the path covered by the test suite (the caller is released at the deadline, the worker keeps running to completion and still sees the caller's `contextvars`). The Windows path itself has not been exercised by our test runs.
+
+What that means in practice:
+
+- The function runs on a pooled `timeout-worker-N` thread, not on the caller's thread. Code that relies on thread-local state, thread-affine handles (some GUI, COM or database connections) or `threading.current_thread()` behaves differently.
+- An abandoned worker keeps its locks, connections and memory until the call returns. Repeated timeouts of a call that never returns accumulate stuck daemon threads; there is no cap on them.
+- Abandoned workers are daemon threads, so they are killed abruptly at interpreter exit, possibly mid-write.
+- `with timeout(...)` blocks are not available (they raise `RuntimeError`), because a block cannot be moved to another thread.
+
 Related details:
 
 - Signal-based timeouts need the **main thread**. `use_signals=True` raises `RuntimeError` anywhere else.

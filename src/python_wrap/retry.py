@@ -384,11 +384,16 @@ def _parse_seconds(value: Any) -> float | None:
     else:
         text = str(value).strip()
         try:
+            if "_" in text:
+                raise ValueError(text)  # float() accepts "1_0"; HTTP does not
             seconds = float(text)
         except ValueError:
             import email.utils  # only HTTP-date headers need it; keeps import fast
 
-            moment = email.utils.parsedate_to_datetime(text)
+            try:
+                moment = email.utils.parsedate_to_datetime(text)
+            except (TypeError, ValueError, IndexError, OverflowError):
+                return None  # unparseable: ignore the header, let other sources apply
             if moment.tzinfo is None:
                 moment = moment.replace(tzinfo=datetime.timezone.utc)
             seconds = moment.timestamp() - time.time()
