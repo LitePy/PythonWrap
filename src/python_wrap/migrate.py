@@ -158,14 +158,18 @@ class _Names:
                             self.aliases[root] = root
                 if hit:
                     self.imports.append(stmt)
-            elif isinstance(stmt, ast.ImportFrom) and stmt.level == 0 and stmt.module:
-                if stmt.module.split(".")[0] in ("tenacity", "backoff"):
-                    self.imports.append(stmt)
-                    for alias in stmt.names:
-                        if alias.name == "*":
-                            self.star.append(stmt)
-                        else:
-                            self.aliases[alias.asname or alias.name] = f"{stmt.module}.{alias.name}"
+            elif (
+                isinstance(stmt, ast.ImportFrom)
+                and stmt.level == 0
+                and stmt.module
+                and stmt.module.split(".")[0] in ("tenacity", "backoff")
+            ):
+                self.imports.append(stmt)
+                for alias in stmt.names:
+                    if alias.name == "*":
+                        self.star.append(stmt)
+                    else:
+                        self.aliases[alias.asname or alias.name] = f"{stmt.module}.{alias.name}"
 
     def resolve(self, node: ast.expr) -> str | None:
         if isinstance(node, ast.Name):
