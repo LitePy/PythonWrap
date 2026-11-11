@@ -110,6 +110,23 @@ EVENT_NAMES: Mapping[str, str] = MappingProxyType(
             "A Budget refused a call. Fields: budget (str), scope (str), tokens (int), "
             "usd (float), the spend so far."
         ),
+        "llm.validation_failed": (
+            "A validated() call's output failed validation. function is the wrapped function. "
+            "Fields: attempt (int, 1-based), error (str, truncated)."
+        ),
+        "llm.repair_exhausted": (
+            "A validated() call gave up. Fields: attempts (int), reason (str: 'max_repairs', "
+            "'max_tokens' or 'budget')."
+        ),
+        "llm.cassette_recorded": (
+            "A Cassette recorded one HTTP exchange. function is 'cassette'. "
+            "Fields: status (int), key (str, the first 12 characters of the request key)."
+        ),
+        "rate_limit.store_error": (
+            "A shared token window could not reach its storage and fell back to a local "
+            "bucket (or raised, with fail_open=False). function is the window name. "
+            "Fields: error (str, the exception class), op (str)."
+        ),
         "chaos.injected": (
             "A python_wrap.chaos rule injected a fault. function is the fault point name. "
             "Fields: kind (str): 'latency', 'exception' or 'result'; point (str); "

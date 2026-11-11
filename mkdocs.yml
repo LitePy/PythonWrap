@@ -206,6 +206,7 @@ nav:
   - AI & agents:
       - LLM calls: features/ai/llm-calls.md
       - Testing agents: features/ai/testing-agents.md
+      - Shared limits and cassettes: features/ai/shared-limits-and-cassettes.md
       - AI observability and audit: features/ai/observability.md
       - Agent tool safety: features/ai/agent-safety.md
       - Agent-friendly tooling: features/ai/agent-friendly.md
@@ -293,6 +294,10 @@ nav:
       - Testing helpers: api/testing.md
       - Chaos: api/chaos.md
       - LLM testing: api/llm_testing.md
+      - LLM shared limits: api/llm_shared.md
+      - LLM validated output: api/llm_validate.md
+      - LLM cassettes: api/llm_cassette.md
+      - LLM HTTP chaos: api/llm_http_chaos.md
       - Migration tool: api/migrate.md
       - API index and recipes: api/introspect.md
       - MCP server: api/mcp.md
