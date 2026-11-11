@@ -27,6 +27,7 @@ Every recipe that matters has a standalone script in the [`examples/`](https://g
 | [A safe agent tool layer](agent-tool-layer.md) | `tool`, `agent_run`, `ToolPolicy`, `traced_tool`, `AuditTape` | Replay-proof tools, approvals, run budgets, a redacted audit tape (`examples/agent_tool_layer.py`) |
 | [Building with AI coding agents](building-with-agents.md) | `llms.txt`, `python -m python_wrap api/recipe/guide/mcp`, `doctor` | A workflow for coding agents to adopt python-wrap correctly |
 | [Observability](observability.md) | `log_args`, `audit`, `timing` | Redacted, structured logs and an audit trail |
+| [Example projects](example-projects.md) | `http_client`, `idempotent`, `buffered(journal=)`, `ToolRegistry`, `AuditTape`, `doctor` | Two multi-file apps (an orders service and a support agent) with fakes, tests and replay, to read and copy |
 
 ## Reading order
 
