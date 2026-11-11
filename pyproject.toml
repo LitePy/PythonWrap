@@ -54,13 +54,13 @@ Changelog = "https://github.com/LitePy/PythonWrap/blob/main/CHANGELOG.md"
 
 [dependency-groups]
 dev = [
-    "pytest>=8.3",
+    "pytest>=9.2.0",
     "pytest-cov>=6.0",
-    "pytest-asyncio>=0.24",
+    "pytest-asyncio>=1.4.1.post1",
     "hypothesis>=6.100",
-    "ruff>=0.8",
-    "mypy>=1.13",
-    "opentelemetry-api>=1.45.1",
+    "ruff>=0.17.4",
+    "mypy>=2.4.1",
+    "opentelemetry-api>=1.45.2",
     "opentelemetry-sdk>=1.45.1",
 ]
 docs = [
