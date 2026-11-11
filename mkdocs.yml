@@ -200,6 +200,8 @@ nav:
       - Configuration: features/configuration.md
       - Dynamic switches: features/switches.md
       - Web helpers: features/web-helpers.md
+  - AI & agents:
+      - AI observability and audit: features/ai/observability.md
   - Testing:
       - testing/index.md
       - Chaos and fault injection: testing/chaos.md

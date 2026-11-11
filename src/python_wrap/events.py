@@ -92,6 +92,15 @@ EVENT_NAMES: Mapping[str, str] = MappingProxyType(
         "lifecycle.drain_finished": (
             "A shutdown drain completed. Fields: ok (bool), seconds (float)."
         ),
+        "genai.llm_call": (
+            "A traced_llm call finished. function is the traced function. Fields: kind, "
+            "run_id, step, tool, model, system, input_tokens, output_tokens, cost, latency "
+            "(seconds), started (epoch seconds), status ('ok'/'error'), error_type, attempts "
+            "(failed inner retry attempts or None); input/output/error only with content capture."
+        ),
+        "genai.tool_call": (
+            "A traced_tool call finished. Same fields as genai.llm_call; tool is the tool name."
+        ),
         "chaos.injected": (
             "A python_wrap.chaos rule injected a fault. function is the fault point name. "
             "Fields: kind (str): 'latency', 'exception' or 'result'; point (str); "
