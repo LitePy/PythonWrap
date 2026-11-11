@@ -190,10 +190,51 @@ Annotations are resolved lazily on the first call with `typing.get_type_hints`, 
 | `TypeVar` | Its bound or constraints; unbound means anything. |
 | `Annotated[T, ...]` | Checks `T`. |
 | `NewType` | Checks the supertype. |
-| `runtime_checkable` protocols | `isinstance`. |
-| `TypedDict`, non-runtime-checkable protocols, unresolved forward references, anything else | **Accepted without checking.** |
+| `runtime_checkable` protocols (also parameterised, e.g. `SupportsAbs[int]`) | `isinstance`. |
+| `TypedDict` | A mapping with every required key; each present key checked against its annotation. Extra keys are allowed. |
+| Non-runtime-checkable protocols, unresolved forward references, `ClassVar`, `Self`, anything else | **Accepted without checking** (rejected with `strict=True`). |
 
-A check that cannot be performed never raises: unsupported annotations are accepted rather than rejected.
+By default a check that cannot be performed never raises: unsupported annotations are
+accepted rather than rejected. Pass `strict=True` to raise `UnsupportedAnnotationError`
+(a `TypeError`) instead. The annotations are vetted when the decorator is applied, or on
+the first call when a forward reference only resolves later.
+
+```python
+from typing import Protocol, TypedDict
+
+from python_wrap import ArgumentTypeError, enforce_types
+from python_wrap.validation import UnsupportedAnnotationError
+
+
+class Movie(TypedDict):
+    title: str
+    year: int
+
+
+class Greeter(Protocol):  # not @runtime_checkable
+    def greet(self) -> str: ...
+
+
+@enforce_types(strict=True)
+def show(movie: Movie) -> str:
+    return movie["title"]
+
+
+assert show({"title": "Up", "year": 2009}) == "Up"
+try:
+    show({"title": "Up"})
+except ArgumentTypeError as exc:
+    assert "missing key 'year'" in str(exc)
+
+try:
+
+    @enforce_types(strict=True)
+    def welcome(who: Greeter) -> str:
+        return who.greet()
+
+except UnsupportedAnnotationError as exc:
+    assert exc.parameter == "who"
+```
 
 ```python
 from typing import Annotated, Literal, Optional

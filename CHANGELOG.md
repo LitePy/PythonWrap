@@ -108,6 +108,11 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
   `submit` or an explicit `replay()`. Journals: `SQLiteJournal` (stdlib, local file),
   `RedisStreamJournal` (Redis stream), or any `BufferJournal` implementation. Opt-in;
   without a journal nothing changes.
+- `enforce_types(strict=True)` raises `UnsupportedAnnotationError` (a `TypeError`, in
+  `python_wrap.validation`) for annotations it cannot check (protocols that are not
+  `runtime_checkable`, unresolvable forward references, `ClassVar`, `Self`...) instead of
+  accepting them silently; vetted at decoration, or on the first call when a forward
+  reference resolves later.
 
 ### Security
 
@@ -145,6 +150,21 @@ plus a manual review); each has a regression test in `tests/test_security_fixes.
   predicates, a framework matrix (oldest and newest Flask, FastAPI, Django, Celery,
   httpx, requests), a benchmark comparison and soak job, and a coverage floor
   (`fail_under = 80`).
+- `enforce_types` now checks `TypedDict` annotations (required keys present, each present
+  key's value checked; extra keys allowed) and parameterised `runtime_checkable`
+  protocols such as `SupportsAbs[int]` (`isinstance`), which it used to accept unchecked.
+  A dict missing a required key now raises `ArgumentTypeError`.
+- `measure_memory` serialises measured calls process-wide (`tracemalloc` has one peak
+  counter): a measured call that overlaps another in a different thread or task waits for
+  it (coroutines without blocking the loop), so concurrent measurements no longer share
+  one tracker. Nested measured calls and tasks or `asyncio.to_thread` workers started
+  inside a measured call join it instead of waiting. New `exclusive=False` restores the
+  old, unserialised behaviour.
+- `profile` on an `async def` function now profiles only that coroutine's own steps: the
+  profiler is switched off at every `await` and back on when it resumes, so work the event
+  loop does for other tasks is no longer attributed to it. Overlapping profiled calls run
+  unprofiled with a warning logged once (cProfile allows one active profiler per thread,
+  per process on 3.12+); this is now documented.
 
 ## [0.3.0] - 2026-10-29
 

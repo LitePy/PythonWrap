@@ -18,11 +18,14 @@ Checked: plain classes (``int`` also accepts ``bool``; ``float`` accepts ``int``
 ``Mapping[K, V]`` (elements checked) and ``Iterable[T]`` / ``Iterator[T]`` / ``Generator``
 (``isinstance`` only, iterators are never consumed), ``Callable`` (``callable()`` only),
 ``type[T]``, ``TypeVar`` (bound or constraints, otherwise anything), ``Annotated[T, ...]``
-(checks ``T``), ``NewType`` (checks the supertype) and ``runtime_checkable`` protocols.
+(checks ``T``), ``NewType`` (checks the supertype), ``runtime_checkable`` protocols (also
+when parameterised, ``isinstance`` only) and ``TypedDict`` (a dict with every required key,
+each present key checked against its annotation; extra keys are allowed).
 
-Accepted without checking: ``TypedDict``, protocols that are not ``runtime_checkable``,
+Accepted without checking by default: protocols that are not ``runtime_checkable``,
 forward references that cannot be resolved and any other construct this module does not
-understand. A check that cannot be performed never raises.
+understand. A check that cannot be performed never raises. Pass
+``enforce_types(strict=True)`` to raise `UnsupportedAnnotationError` for those instead.
 """
 
 from __future__ import annotations
@@ -40,12 +43,29 @@ from typing import Any, TypeVar, Union, cast, overload
 from python_wrap import _core, errors
 from python_wrap._core import F, P, R
 
-__all__ = ["check_type", "enforce_types", "validate_args"]
+__all__ = ["UnsupportedAnnotationError", "check_type", "enforce_types", "validate_args"]
 
 Validator = Callable[[Any], object] | tuple[Callable[[Any], object], str]
 
 _NoneType = type(None)
 _UnionType = getattr(types, "UnionType", None)
+_NEVER: tuple[Any, ...] = tuple(
+    item for item in (typing.NoReturn, getattr(typing, "Never", None)) if item is not None
+)
+
+
+class UnsupportedAnnotationError(errors.PythonWrapError, TypeError):
+    """``enforce_types(strict=True)`` met an annotation it cannot check at runtime.
+
+    Attributes:
+        parameter: The parameter name, or ``"return"``.
+        annotation: The offending annotation.
+    """
+
+    def __init__(self, message: str, *, parameter: str, annotation: Any) -> None:
+        super().__init__(message)
+        self.parameter = parameter
+        self.annotation = annotation
 
 
 def _repr(value: object) -> str:
@@ -391,6 +411,38 @@ def _check_tuple(value: Any, hint_args: tuple[Any, ...]) -> str | None:
     return None
 
 
+@functools.lru_cache(maxsize=256)
+def _typeddict_fields(td: Any) -> tuple[dict[str, Any], frozenset[str]] | None:
+    """Resolved field annotations and required keys of a TypedDict, or None."""
+    try:
+        hints = typing.get_type_hints(td)
+    except Exception:
+        return None
+    return hints, frozenset(getattr(td, "__required_keys__", hints))
+
+
+def _check_typeddict(value: Any, hint: Any) -> str | None:
+    if not isinstance(value, cabc.Mapping):
+        return _got(value)
+    fields = _typeddict_fields(hint)
+    if fields is None:
+        return None  # unresolvable annotations: accepted (strict mode rejects earlier)
+    hints, required = fields
+    for key in sorted(required):
+        if key not in value:
+            return f"{_got(value)} missing key {key!r}"
+    for key, field_hint in hints.items():
+        if key not in value:
+            continue
+        item = value[key]
+        problem = _mismatch(item, field_hint)
+        if problem is not None:
+            if " " not in problem:
+                return f"{_got(value)} with {problem} value at key {key!r}"
+            return f"{_got(value)} with {_got(item)} value at key {key!r} ({problem})"
+    return None
+
+
 def _mismatch(value: Any, hint: Any) -> str | None:
     """Return a description of what ``value`` is if it violates ``hint``, else ``None``."""
     if hint is Any or hint is object or isinstance(hint, (str, typing.ForwardRef)):
@@ -428,7 +480,7 @@ def _mismatch(value: Any, hint: Any) -> str | None:
         return _got(value) if not isinstance(value, (str, int, bytes, bool)) else _repr(value)
     if origin is None:
         if typing.is_typeddict(hint):
-            return None
+            return _check_typeddict(value, hint)
         if hint is typing.Callable or hint is cabc.Callable:
             return None if callable(value) else _got(value)
         if isinstance(hint, type):
@@ -468,7 +520,9 @@ def _mismatch(value: Any, hint: Any) -> str | None:
     if not isinstance(origin, type):
         return None
     if getattr(origin, "_is_protocol", False):
-        return None
+        if not getattr(origin, "_is_runtime_protocol", False):
+            return None
+        return None if _isinstance(value, origin) else _got(value)
     if not _isinstance(value, origin):
         return _got(value)
 
@@ -479,6 +533,78 @@ def _mismatch(value: Any, hint: Any) -> str | None:
     if origin is tuple:
         return _check_tuple(value, args)
     return None  # Iterable/Iterator/other generics: isinstance only
+
+
+def _unsupported(hint: Any, seen: frozenset[int] = frozenset()) -> str | None:
+    """Why ``hint`` (or a part of it) cannot be fully checked, or None if it can.
+
+    Mirrors `_mismatch`: everything it accepts without looking is reported here.
+    ``Callable[...]`` (checked with ``callable()``), ``Iterable[T]``-style generics and
+    user generic classes (``isinstance`` on the origin only) are documented partial
+    checks and are not reported.
+    """
+    if hint is Any or hint is object or hint is None or hint is _NoneType or hint in _NEVER:
+        return None
+    if isinstance(hint, (str, typing.ForwardRef)):
+        return f"the forward reference {_fmt(hint)!r} could not be resolved"
+    if isinstance(hint, TypeVar):
+        parts: tuple[Any, ...] = (
+            (hint.__bound__,) if hint.__bound__ is not None else hint.__constraints__
+        )
+        return next((r for r in (_unsupported(p, seen) for p in parts) if r), None)
+    supertype = getattr(hint, "__supertype__", None)
+    if supertype is not None:
+        return _unsupported(supertype, seen)
+    origin = typing.get_origin(hint)
+    args = typing.get_args(hint)
+    if origin is typing.Annotated:
+        return _unsupported(args[0], seen)
+    if origin is Union or (_UnionType is not None and origin is _UnionType):
+        return next((r for r in (_unsupported(a, seen) for a in args) if r), None)
+    if origin is typing.Literal:
+        return None
+    if origin is None:
+        if typing.is_typeddict(hint):
+            if id(hint) in seen:
+                return None  # recursive TypedDict: already being checked
+            fields = _typeddict_fields(hint)
+            if fields is None:
+                return f"the annotations of TypedDict {_fmt(hint)} could not be resolved"
+            inner = seen | {id(hint)}
+            for key, field_hint in fields[0].items():
+                reason = _unsupported(field_hint, inner)
+                if reason:
+                    return f"key {key!r} of {_fmt(hint)}: {reason}"
+            return None
+        if hint is typing.Callable or hint is cabc.Callable:
+            return None
+        if isinstance(hint, type):
+            if getattr(hint, "_is_protocol", False) and not getattr(
+                hint, "_is_runtime_protocol", False
+            ):
+                return f"protocol {_fmt(hint)} is not @runtime_checkable"
+            return None
+        return f"{_fmt(hint)} cannot be checked at runtime"
+    if origin is cabc.Callable or origin is type:
+        return None
+    if not isinstance(origin, type):
+        return f"{_fmt(hint)} cannot be checked at runtime"
+    if getattr(origin, "_is_protocol", False):
+        if not getattr(origin, "_is_runtime_protocol", False):
+            return f"protocol {_fmt(origin)} is not @runtime_checkable"
+        return None
+    if (
+        origin in (list, set, frozenset, dict, tuple)
+        or origin in _ELEMENT_CHECKED_ABCS
+        or origin in _MAPPING_ABCS
+    ):
+        for arg in args:
+            if arg is Ellipsis or arg == ():
+                continue
+            reason = _unsupported(arg, seen)
+            if reason:
+                return reason
+    return None
 
 
 _QUICK_METAS: tuple[type, ...] = (type, abc.ABCMeta)
@@ -537,9 +663,10 @@ class _Plan:
 class _Checker:
     """Lazily resolves annotations on first call and checks calls against them."""
 
-    def __init__(self, func: Callable[..., Any], check_return: bool) -> None:
+    def __init__(self, func: Callable[..., Any], check_return: bool, strict: bool = False) -> None:
         self.func = func
         self.check_return = check_return
+        self.strict = strict
         self.sig = inspect.signature(func)
         layout = _plain_layout(self.sig)
         self.layout = None if layout is None else (layout[0], layout[1])
@@ -552,13 +679,44 @@ class _Checker:
             return plan
         try:
             hints = typing.get_type_hints(self.func)
-        except Exception:
+        except Exception as exc:
+            if self.strict:
+                raise UnsupportedAnnotationError(
+                    f"enforce_types(strict=True): the annotations of "
+                    f"{_core.qualname(self.func)} could not be resolved ({exc})",
+                    parameter="",
+                    annotation=None,
+                ) from exc
             # Unresolvable forward reference (so far): fall back to raw annotations, where
             # strings are accepted, and try again on the next call.
             return _Plan(dict(getattr(self.func, "__annotations__", {})), self.layout)
+        if self.strict:
+            self._reject_unsupported(hints)
         self.hints = hints
         self.plan = plan = _Plan(hints, self.layout)
         return plan
+
+    def _reject_unsupported(self, hints: dict[str, Any]) -> None:
+        for name, hint in hints.items():
+            if name == "return" and not self.check_return:
+                continue
+            reason = _unsupported(hint)
+            if reason is not None:
+                what = "the return annotation" if name == "return" else f"parameter {name!r}"
+                raise UnsupportedAnnotationError(
+                    f"enforce_types(strict=True): {what} of {_core.qualname(self.func)} "
+                    f"is {_fmt(hint)}, which cannot be checked: {reason}",
+                    parameter=name,
+                    annotation=hint,
+                )
+
+    def prepare(self) -> None:
+        """Resolve and vet annotations now if possible (strict mode, at decoration)."""
+        try:
+            typing.get_type_hints(self.func)
+        except Exception:
+            return  # maybe a forward reference to something defined later: retry on call
+        self._get_plan()
 
     @staticmethod
     def _fail(label: str, hint: Any, value: Any, problem: str, what: str) -> typing.NoReturn:
@@ -623,8 +781,16 @@ class _Checker:
 @overload
 def enforce_types(func: F, /) -> F: ...
 @overload
-def enforce_types(func: None = None, /, *, check_return: bool = True) -> Callable[[F], F]: ...
-def enforce_types(func: Callable[..., Any] | None = None, /, *, check_return: bool = True) -> Any:
+def enforce_types(
+    func: None = None, /, *, check_return: bool = True, strict: bool = False
+) -> Callable[[F], F]: ...
+def enforce_types(
+    func: Callable[..., Any] | None = None,
+    /,
+    *,
+    check_return: bool = True,
+    strict: bool = False,
+) -> Any:
     """Check arguments and the return value against the function's own annotations.
 
     Annotations are resolved lazily on the first call with `typing.get_type_hints`, so
@@ -633,11 +799,16 @@ def enforce_types(func: Callable[..., Any] | None = None, /, *, check_return: bo
     subset of annotations is listed under "Annotations supported by `enforce_types`" in
     the `python_wrap.validation` module docstring (the top of its API reference page) and
     in the [validation guide](../features/correctness/validation.md); anything
-    unsupported is accepted rather than rejected.
+    unsupported is accepted rather than rejected, unless ``strict=True``.
 
     Args:
         func: The function (when used as a bare ``@enforce_types``).
         check_return: Also check the return value against the return annotation.
+        strict: Raise `UnsupportedAnnotationError` instead of silently accepting an
+            annotation that cannot be checked (a protocol that is not
+            ``runtime_checkable``, an unresolvable forward reference, ``ClassVar``,
+            ``Self`` and similar). Checked when the decorator is applied if the
+            annotations resolve then, otherwise on the first call.
 
     Returns:
         The wrapped function, or a decorator when called with options.
@@ -646,6 +817,8 @@ def enforce_types(func: Callable[..., Any] | None = None, /, *, check_return: bo
         python_wrap.errors.ArgumentTypeError: On a mismatch (a ``TypeError``), with a message
             such as ``parameter 'items' expected list[int], got list containing str at
             index 2``. ``error.parameter`` is ``"return"`` for the return value.
+        UnsupportedAnnotationError: With ``strict=True``, for an annotation that cannot
+            be checked (also a ``TypeError``).
 
     Example:
         >>> @enforce_types
@@ -656,7 +829,9 @@ def enforce_types(func: Callable[..., Any] | None = None, /, *, check_return: bo
     """
 
     def decorate(f: Callable[P, R]) -> Callable[P, R]:
-        checker = _Checker(f, check_return)
+        checker = _Checker(f, check_return, strict)
+        if strict:
+            checker.prepare()
         return _wrap(f, checker.before, checker.after if check_return else None)
 
     return decorate if func is None else decorate(func)
