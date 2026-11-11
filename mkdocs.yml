@@ -8,6 +8,9 @@ edit_uri: edit/main/docs/
 copyright: Copyright &copy; 2026 Mahmoud Ahmed &middot; MIT licence
 
 strict: true
+# Copy-paste rule files for coding agents: served as files, not part of the nav.
+not_in_nav: |
+  /agents/
 validation:
   links:
     anchors: warn
@@ -200,6 +203,8 @@ nav:
       - Configuration: features/configuration.md
       - Dynamic switches: features/switches.md
       - Web helpers: features/web-helpers.md
+      - AI & agents:
+          - Agent-friendly tooling: features/ai/agent-friendly.md
   - Testing:
       - testing/index.md
       - Chaos and fault injection: testing/chaos.md
@@ -276,6 +281,8 @@ nav:
       - Testing helpers: api/testing.md
       - Chaos: api/chaos.md
       - Migration tool: api/migrate.md
+      - API index and recipes: api/introspect.md
+      - MCP server: api/mcp.md
       - Errors: api/errors.md
   - Project:
       - Performance: project/performance.md

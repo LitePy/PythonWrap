@@ -1,0 +1,453 @@
+{
+  "$comment": "Plain-language needs mapped to python-wrap APIs, used by `python -m python_wrap recipe` and the MCP recipe tool. `apis` are names printed by `python -m python_wrap api`; `snippet` must run as-is (tests execute it); `docs` is relative to docs/.",
+  "recipes": [
+    {
+      "need": "Retry flaky HTTP calls",
+      "keywords": [
+        "retry",
+        "http",
+        "https",
+        "request",
+        "requests",
+        "httpx",
+        "api",
+        "call",
+        "flaky",
+        "transient",
+        "network",
+        "5xx",
+        "429",
+        "503",
+        "backoff",
+        "jitter",
+        "client"
+      ],
+      "apis": [
+        "presets.http_client",
+        "retry",
+        "http.HttpRetryPolicy",
+        "retry_after_header"
+      ],
+      "snippet": "from python_wrap.presets import http_client\n\nusers_api = http_client(\"users\", timeout_seconds=3)\n\n@users_api\ndef get_user(user_id: int) -> dict[str, int]:\n    return {\"id\": user_id}  # call your HTTP client here\n\nassert get_user(7) == {\"id\": 7}\n",
+      "notes": "Retry only idempotent requests (GET, PUT, DELETE, or POST with an idempotency key). Never retry 4xx responses other than 408, 425 and 429. Keep a per-attempt timeout inside the retry.",
+      "docs": "features/resilience/http-clients.md"
+    },
+    {
+      "need": "Retry a function that raises a transient error",
+      "keywords": [
+        "retry",
+        "again",
+        "repeat",
+        "flaky",
+        "transient",
+        "error",
+        "exception",
+        "attempt",
+        "backoff"
+      ],
+      "apis": [
+        "retry",
+        "RetryBudget",
+        "attempt_history"
+      ],
+      "snippet": "from python_wrap import retry, timeout\n\n@retry(max_attempts=3, delay=0.01, on=ConnectionError)\n@timeout(2)\ndef fetch() -> str:\n    return \"ok\"\n\nassert fetch() == \"ok\"\n",
+      "notes": "Name the transient exceptions in on=; the default on=Exception also retries bugs (doctor PW003). Always bound attempts or max_time.",
+      "docs": "features/resilience/retry.md"
+    },
+    {
+      "need": "Stop duplicate emails, charges or webhooks (run once per key)",
+      "keywords": [
+        "duplicate",
+        "dedupe",
+        "deduplicate",
+        "once",
+        "idempotent",
+        "idempotency",
+        "key",
+        "email",
+        "emails",
+        "charge",
+        "payment",
+        "webhook",
+        "double",
+        "twice",
+        "exactly"
+      ],
+      "apis": [
+        "idempotent",
+        "single_instance",
+        "presets.third_party_api"
+      ],
+      "snippet": "from python_wrap import idempotent\n\nsent: list[str] = []\n\n@idempotent(key=lambda order_id: f\"receipt:{order_id}\", ttl=\"1d\")\ndef send_receipt(order_id: int) -> str:\n    sent.append(f\"order-{order_id}\")\n    return \"sent\"\n\nassert send_receipt(1) == send_receipt(1) == \"sent\"\nassert sent == [\"order-1\"]\n",
+      "notes": "Never wrap a non-idempotent side effect in retry; deduplicate with idempotent keys and pass idempotent=False to presets. Across processes use a shared store (RedisStore) and a shared lease backend.",
+      "docs": "features/concurrency/leases-and-idempotency.md"
+    },
+    {
+      "need": "Limit LLM tokens or any spend budget",
+      "keywords": [
+        "llm",
+        "token",
+        "tokens",
+        "budget",
+        "spend",
+        "cost",
+        "quota",
+        "limit",
+        "openai",
+        "anthropic",
+        "model",
+        "prompt",
+        "completion",
+        "usage",
+        "allowance"
+      ],
+      "apis": [
+        "Quota",
+        "QuotaExhausted",
+        "rate_limit"
+      ],
+      "snippet": "from python_wrap import Quota, QuotaExhausted\n\nbudget = Quota(10_000, name=\"llm-tokens\")\nbudget.take(1_200)  # tokens used by one completion\ntry:\n    budget.take(20_000)\nexcept QuotaExhausted:\n    pass\nassert budget.remaining == 8_800\n",
+      "notes": "Run `python -m python_wrap api search llm` for dedicated LLM helpers in this version. Use a Redis-backed Quota (client=, key=) to share a budget across processes.",
+      "docs": "api/quotas.md"
+    },
+    {
+      "need": "Rate limit calls to an API",
+      "keywords": [
+        "rate",
+        "limit",
+        "limiter",
+        "throttle",
+        "calls",
+        "per",
+        "second",
+        "minute",
+        "api",
+        "requests",
+        "sliding",
+        "window"
+      ],
+      "apis": [
+        "rate_limit",
+        "RateLimiter",
+        "shared_rate_limit",
+        "RedisWindow"
+      ],
+      "snippet": "from python_wrap import RateLimitExceeded, rate_limit\n\n@rate_limit(calls=2, period=60)\ndef ping() -> str:\n    return \"pong\"\n\nping()\nping()\ntry:\n    ping()\nexcept RateLimitExceeded:\n    pass\n",
+      "notes": "Limits are per process by default; under several workers use shared_rate_limit with a RedisWindow (doctor PW012 with multiprocess=True).",
+      "docs": "features/concurrency/rate-limits.md"
+    },
+    {
+      "need": "Stop calling a dependency that is down (circuit breaker)",
+      "keywords": [
+        "circuit",
+        "breaker",
+        "down",
+        "outage",
+        "failing",
+        "dependency",
+        "fail",
+        "fast",
+        "trip",
+        "open"
+      ],
+      "apis": [
+        "circuit_breaker",
+        "CircuitBreaker",
+        "CircuitOpenError",
+        "SQLiteBreakerState",
+        "RedisBreakerState"
+      ],
+      "snippet": "from python_wrap import circuit_breaker\n\n@circuit_breaker(failure_threshold=5, recovery_timeout=30, on=ConnectionError)\ndef call_vendor() -> str:\n    return \"ok\"\n\nassert call_vendor() == \"ok\"\n",
+      "notes": "Put the breaker outside retry so it counts calls whose retries were exhausted, not single attempts.",
+      "docs": "features/resilience/circuit-breaker.md"
+    },
+    {
+      "need": "Time out a slow call",
+      "keywords": [
+        "timeout",
+        "slow",
+        "hang",
+        "hung",
+        "deadline",
+        "time",
+        "limit",
+        "seconds",
+        "cancel",
+        "stuck"
+      ],
+      "apis": [
+        "timeout",
+        "deadline",
+        "checkpoint",
+        "TimeoutExpired"
+      ],
+      "snippet": "from python_wrap import timeout\n\n@timeout(2)\ndef compute() -> int:\n    return 42\n\nassert compute() == 42\n",
+      "notes": "A sync timeout cannot interrupt code off the main thread or on Windows (doctor PW009); poll checkpoint() in long loops. Use deadline() for a budget shared by nested calls.",
+      "docs": "features/resilience/timeout.md"
+    },
+    {
+      "need": "Cache expensive results",
+      "keywords": [
+        "cache",
+        "caching",
+        "memoize",
+        "memo",
+        "expensive",
+        "result",
+        "ttl",
+        "lru",
+        "store",
+        "remember"
+      ],
+      "apis": [
+        "memoize",
+        "cache",
+        "amemoize",
+        "invalidate",
+        "RedisStore"
+      ],
+      "snippet": "from python_wrap import memoize\n\n@memoize(ttl=60, maxsize=1024)\ndef price(sku: str) -> int:\n    return len(sku)\n\nassert price(\"A-1\") == price(\"A-1\") == 3\n",
+      "notes": "Failures are never cached unless you ask (cache_exceptions=). On methods use per_instance=True or a bound (doctor PW011).",
+      "docs": "features/caching/memoize.md"
+    },
+    {
+      "need": "Avoid a thundering herd of identical concurrent calls",
+      "keywords": [
+        "thundering",
+        "herd",
+        "stampede",
+        "concurrent",
+        "identical",
+        "simultaneous",
+        "coalesce",
+        "singleflight",
+        "dogpile"
+      ],
+      "apis": [
+        "singleflight",
+        "memoize"
+      ],
+      "snippet": "from python_wrap import singleflight\n\n@singleflight\ndef load(key: str) -> str:\n    return key.upper()\n\nassert load(\"a\") == \"A\"\n",
+      "notes": "memoize(singleflight=True) combines caching with single-flight loading.",
+      "docs": "features/caching/singleflight.md"
+    },
+    {
+      "need": "Cap concurrent calls to a dependency",
+      "keywords": [
+        "concurrency",
+        "concurrent",
+        "parallel",
+        "bulkhead",
+        "semaphore",
+        "max",
+        "simultaneous",
+        "pool",
+        "isolate"
+      ],
+      "apis": [
+        "limit_concurrency",
+        "Bulkhead",
+        "gather_limit",
+        "AdaptiveLimiter"
+      ],
+      "snippet": "from python_wrap import limit_concurrency\n\n@limit_concurrency(4)\ndef query() -> str:\n    return \"rows\"\n\nassert query() == \"rows\"\n",
+      "notes": "Bulkheads are per process unless given a shared lease backend.",
+      "docs": "features/concurrency/bulkheads.md"
+    },
+    {
+      "need": "Return a default value when a call fails",
+      "keywords": [
+        "fallback",
+        "default",
+        "degrade",
+        "graceful",
+        "suppress",
+        "ignore",
+        "error",
+        "value",
+        "instead"
+      ],
+      "apis": [
+        "fallback",
+        "suppress"
+      ],
+      "snippet": "from python_wrap import fallback\n\n@fallback([], on=ConnectionError)\ndef recommendations() -> list[str]:\n    raise ConnectionError\n\nassert recommendations() == []\n",
+      "notes": "Narrow on= so programming errors are not hidden.",
+      "docs": "features/resilience/fallback.md"
+    },
+    {
+      "need": "Batch many small calls into one",
+      "keywords": [
+        "batch",
+        "batching",
+        "group",
+        "bulk",
+        "dataloader",
+        "n+1",
+        "many",
+        "small",
+        "calls",
+        "combine"
+      ],
+      "apis": [
+        "batch_calls",
+        "Batched",
+        "process_batches"
+      ],
+      "docs": "features/caching/batching.md"
+    },
+    {
+      "need": "Test code that sleeps, retries or caches without waiting",
+      "keywords": [
+        "test",
+        "tests",
+        "testing",
+        "pytest",
+        "fake",
+        "clock",
+        "time",
+        "sleep",
+        "fast",
+        "disable",
+        "retries",
+        "mock"
+      ],
+      "apis": [
+        "testing.fake_clock",
+        "testing.disabled",
+        "testing.assert_retried",
+        "testing.spy"
+      ],
+      "snippet": "from python_wrap import retry\nfrom python_wrap.testing import fake_clock\n\n@retry(max_attempts=3, delay=5, on=ValueError)\ndef flaky() -> None:\n    raise ValueError\n\nwith fake_clock() as clock:\n    try:\n        flaky()\n    except ValueError:\n        pass\nassert len(clock.sleeps) == 2\n",
+      "docs": "cookbook/testing-your-code.md"
+    },
+    {
+      "need": "Check a resilience stack for risky combinations",
+      "keywords": [
+        "check",
+        "lint",
+        "review",
+        "audit",
+        "doctor",
+        "explain",
+        "policy",
+        "stack",
+        "risky",
+        "order",
+        "safe",
+        "ci"
+      ],
+      "apis": [
+        "doctor.explain",
+        "doctor.doctor",
+        "Policy"
+      ],
+      "snippet": "from python_wrap import policy, retry\nfrom python_wrap.doctor import explain\n\nrisky = policy(retry=retry(max_attempts=3, on=ConnectionError), name=\"charge\")\nassert not explain(risky, idempotent=False).ok  # PW002: retrying a charge\n",
+      "notes": "Run `python -m python_wrap doctor module:attribute` in CI; add --non-idempotent for side effects and --multiprocess under worker pools.",
+      "docs": "features/resilience/presets-and-doctor.md"
+    },
+    {
+      "need": "Migrate from tenacity or backoff",
+      "keywords": [
+        "migrate",
+        "migration",
+        "tenacity",
+        "backoff",
+        "convert",
+        "rewrite",
+        "codemod",
+        "replace",
+        "port"
+      ],
+      "apis": [
+        "migrate.migrate_source"
+      ],
+      "snippet": "from python_wrap.migrate import migrate_source\n\nsource = \"import tenacity\\n\\n@tenacity.retry(stop=tenacity.stop_after_attempt(3))\\ndef f():\\n    pass\\n\"\nassert \"python_wrap\" in migrate_source(source).text\n",
+      "notes": "`python -m python_wrap migrate PATH` is a dry run unless you pass --write.",
+      "docs": "project/migrate-tool.md"
+    },
+    {
+      "need": "Run a function in the background on a schedule",
+      "keywords": [
+        "periodic",
+        "schedule",
+        "interval",
+        "every",
+        "background",
+        "job",
+        "cron",
+        "loop",
+        "recurring"
+      ],
+      "apis": [
+        "periodic",
+        "Periodic",
+        "AsyncPeriodic"
+      ],
+      "docs": "features/concurrency/periodic.md"
+    },
+    {
+      "need": "Log or audit calls without leaking secrets",
+      "keywords": [
+        "log",
+        "logging",
+        "audit",
+        "trace",
+        "record",
+        "arguments",
+        "secrets",
+        "redact",
+        "password",
+        "token",
+        "mask"
+      ],
+      "apis": [
+        "log_args",
+        "audit",
+        "redact",
+        "log_context"
+      ],
+      "snippet": "from python_wrap import redact\n\nassert redact({\"user\": \"ann\", \"password\": \"hunter2\"})[\"password\"] != \"hunter2\"\n",
+      "notes": "Redaction matches by argument name; secrets under innocuous names are not detected.",
+      "docs": "features/observability/logging.md"
+    },
+    {
+      "need": "Inject faults to test resilience (chaos)",
+      "keywords": [
+        "chaos",
+        "fault",
+        "injection",
+        "inject",
+        "failure",
+        "latency",
+        "test",
+        "resilience",
+        "game",
+        "day"
+      ],
+      "apis": [
+        "chaos.fault_point",
+        "chaos.chaos"
+      ],
+      "snippet": "from python_wrap.chaos import fault_point\n\ndef load() -> str:\n    fault_point(\"db.load\")\n    return \"row\"\n\nassert load() == \"row\"  # no rule armed: nothing happens\n",
+      "docs": "testing/chaos.md"
+    },
+    {
+      "need": "Shut down gracefully and drain in-flight work",
+      "keywords": [
+        "shutdown",
+        "graceful",
+        "drain",
+        "sigterm",
+        "stop",
+        "exit",
+        "lifecycle"
+      ],
+      "apis": [
+        "shutdown",
+        "ShutdownManager"
+      ],
+      "docs": "features/concurrency/graceful-shutdown.md"
+    }
+  ]
+}
