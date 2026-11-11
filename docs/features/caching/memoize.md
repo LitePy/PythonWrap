@@ -384,6 +384,35 @@ assert Account.balance.cache_info().currsize == 1   # its entries went with it
 - A cached result that references its own instance (returning `self`, a bound method, a closure over `self`) keeps that instance alive.
 - `per_instance` uses the built-in store and cannot be combined with `store=`.
 
+## One computation per key across threads
+
+For sync functions, two threads that miss on the same key at the same moment may both compute the value. Pass `singleflight=True` and only one runs: the others wait for its outcome (result or exception) and count as hits. A re-entrant call on the computing thread computes directly instead of deadlocking. It is off by default; `async def` functions already share one in-flight task per key and event loop.
+
+```python
+import threading
+import time
+from python_wrap import memoize
+
+calls = []
+
+@memoize(singleflight=True)
+def load(n: int) -> int:
+    calls.append(n)
+    time.sleep(0.05)
+    return n * 2
+
+results = []
+threads = [threading.Thread(target=lambda: results.append(load(7))) for _ in range(5)]
+for t in threads:
+    t.start()
+for t in threads:
+    t.join()
+assert results == [14] * 5
+assert calls == [7]
+```
+
+`cache_parameters()` reports `singleflight` and `key` along with the other options (`maxsize`, `ttl`, `stale_ttl`, `typed`, `cache_exceptions`, `exception_ttl`, `store`, `per_instance`, `copy_result`).
+
 ## Async and methods
 
 **Async.** Concurrent awaits of a missing key share one in-flight task per event loop, so the function runs once.
