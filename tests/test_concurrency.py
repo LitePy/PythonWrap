@@ -2028,6 +2028,7 @@ def test_cleanup_grace_decorator_outer_cancel_during_grace_consumes_child() -> N
     assert unhandled == []
 
 
+<<<<<<< HEAD
 # -- cooperative cancellation and SIGALRM conflicts ----------------------------------------
 
 import signal as _signal  # noqa: E402
@@ -2159,3 +2160,46 @@ def test_nested_timeouts_do_not_warn():
         _warnings.simplefilter("error", SignalTimerConflictWarning)
         with timeout(10):
             assert inner() == 1
+=======
+def test_timeout_non_main_thread_deadline_is_prompt_and_work_continues():
+    """The documented non-main-thread path: caller released at the deadline, work goes on."""
+    import contextvars
+
+    var: contextvars.ContextVar[str] = contextvars.ContextVar("pw_var", default="unset")
+    release = threading.Event()
+    seen: list[str] = []
+    ran_in: list[str] = []
+
+    @timeout(0.05)
+    def slow():
+        ran_in.append(threading.current_thread().name)
+        release.wait(2)
+        seen.append(var.get())
+
+    def caller():
+        var.set("caller-value")
+        start = time.monotonic()
+        try:
+            slow()
+        except TimeoutExpired:
+            return time.monotonic() - start
+        raise AssertionError("expected TimeoutExpired")
+
+    elapsed = run_in_thread(caller)().result(timeout=2)
+    assert 0.04 <= elapsed < 1.0
+    assert seen == []  # still running when the caller was released
+    release.set()
+    deadline = time.monotonic() + 2
+    while not seen and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert seen == ["caller-value"]  # it finished later, with the caller's contextvars
+    assert ran_in[0].startswith("timeout-worker-")
+
+
+def test_timeout_block_form_refused_off_main_thread():
+    def use_block():
+        with timeout(1):
+            pass
+
+    assert isinstance(run_in_thread(use_block)().exception(timeout=2), RuntimeError)
+>>>>>>> verify/claims

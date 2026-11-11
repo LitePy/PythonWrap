@@ -136,6 +136,24 @@ plus a manual review); each has a regression test in `tests/test_security_fixes.
   httpx, requests), a benchmark comparison and soak job, and a coverage floor
   (`fail_under = 80`).
 
+### Fixed
+
+- `retry_after_header`: an unparseable `Retry-After` value (free text, or a Python-only
+  form such as `1_0`) is now ignored on its own, so the `json_key=` body fallback still
+  applies instead of the whole lookup being abandoned.
+
+### Tests
+
+- Verified on Python 3.10 to 3.13. Added Prometheus text-format 0.0.4 conformance tests
+  (strict grammar check, histogram invariants, `prometheus_client` parser round trip),
+  `Retry-After` edge cases, real-Redis tests for `RedisSemaphore`, `RedisCheckpoint` and
+  `RedisSource`, and non-main-thread `timeout` fallback behaviour.
+
+### Documentation
+
+- `docs/project/limitations.md`: the `timeout` thread fallback caveats (Windows runs every
+  sync timeout this way, abandoned workers, thread-affine code) are spelled out.
+
 ## [0.3.0] - 2026-10-29
 
 Production integration helpers, optional distributed backends, and fixes from
