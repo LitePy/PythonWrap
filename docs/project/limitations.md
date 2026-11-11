@@ -42,8 +42,9 @@ assert b.read() == "a"   # skipped: shares the window with `a`, returns its resu
 
 What to do:
 
-- `rate_limit` and `singleflight` accept `key=`; use it to split the state, for example `key=lambda self, *a, **kw: id(self)`.
-- For `throttle` and `debounce`, create the decorated callable per instance in `__init__` (`self.read = throttle(60)(self._read)`).
+- Pass `per_instance=True` to `rate_limit`, `throttle` or `debounce` to give each instance its own limiter, window or pending call. Instances are held through a weak reference, so they stay collectable (they must be weak-referenceable).
+- `rate_limit`, `throttle`, `debounce` and `singleflight` accept `key=` to split the state by any value, for example `key=lambda self, *a, **kw: self.tenant`.
+- `debounce` with `key=` or `per_instance=`: `.cancel()` and `.flush()` take a call's arguments to pick the slot, for example `Doc.save.flush(doc)`.
 
 ## `memoize` on methods
 
@@ -56,7 +57,7 @@ Mitigations:
 - Use `key=` that ignores `self` (for results that do not depend on the instance), so the instance is not stored.
 - Call `cache_clear()` when a long-lived cache has served its purpose.
 
-Also note that for sync functions two threads that miss on the same key at the same moment may both compute the value (the function is never called while holding the lock); the last stored result wins. Put `singleflight` under `memoize` if the computation must not run twice.
+Also note that for sync functions two threads that miss on the same key at the same moment may both compute the value (the function is never called while holding the lock); the last stored result wins. Pass `singleflight=True` to `memoize` if the computation must not run twice.
 
 ## `measure_memory` and `profile`
 
