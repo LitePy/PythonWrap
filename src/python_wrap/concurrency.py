@@ -27,6 +27,7 @@ import signal
 import sys
 import threading
 import time
+import warnings
 import weakref
 from collections import deque
 from collections.abc import Awaitable, Callable, Coroutine, Hashable, Iterable
@@ -51,10 +52,15 @@ from python_wrap.errors import RateLimitExceeded, TimeoutExpired
 
 __all__ = [
     "AsyncDebounced",
+    "CancelToken",
     "Debounced",
     "Limit",
     "RateLimiter",
+    "SignalTimerConflictWarning",
     "Timeout",
+    "cancel_requested",
+    "checkpoint",
+    "current_token",
     "debounce",
     "limiter_of",
     "rate_limit",
@@ -90,6 +96,148 @@ def _expired(label: str, seconds: float) -> TimeoutExpired:
     return TimeoutExpired(_timeout_message(label, seconds), seconds=seconds)
 
 
+class SignalTimerConflictWarning(RuntimeWarning):
+    """`timeout` is about to take over ``SIGALRM`` that something else already uses.
+
+    Signal timers are process-wide: a non-default ``SIGALRM`` handler or an armed
+    ``ITIMER_REAL`` timer belongs to other code (a profiler, a watchdog, another
+    library). `timeout` restores both afterwards, but while it runs the other code's
+    alarm may be delayed or fire into the timeout's handler. Pass ``use_signals=False`` to
+    use the worker-thread fallback, or silence it with `warnings.filterwarnings`.
+    """
+
+
+class CancelToken:
+    """A flag a sync function can poll to learn that its `timeout` has fired.
+
+    `timeout` cannot stop a sync function off the main thread (or where ``SIGALRM`` is
+    missing): the caller gets `TimeoutExpired` but the function keeps running. Inside a
+    `timeout`-wrapped sync function the current token is cancelled when the limit is hit,
+    so the function can stop itself at safe points with `checkpoint` or `cancel_requested`.
+    A token also reports cancelled when the token of an enclosing `timeout` is.
+
+    Attributes:
+        cancelled: True once `cancel` was called (on this token or an enclosing one).
+
+    Example:
+        ```python
+        from python_wrap import checkpoint, timeout
+
+        @timeout(5)
+        def import_rows(rows: list[int]) -> int:
+            done = 0
+            for _ in rows:
+                checkpoint()  # raises TimeoutExpired once the 5 s are over
+                done += 1
+            return done
+        ```
+    """
+
+    __slots__ = ("_event", "_parent", "label", "seconds")
+
+    def __init__(
+        self, label: str = "", seconds: float = 0.0, parent: CancelToken | None = None
+    ) -> None:
+        self.label = label
+        self.seconds = seconds
+        self._parent = parent
+        self._event = threading.Event()
+
+    def cancel(self) -> None:
+        """Mark the token cancelled (what `timeout` does when its limit is hit)."""
+        self._event.set()
+
+    @property
+    def cancelled(self) -> bool:
+        token: CancelToken | None = self
+        while token is not None:
+            if token._event.is_set():
+                return True
+            token = token._parent
+        return False
+
+    def wait(self, timeout: float | None = None) -> bool:
+        """Sleep up to ``timeout`` seconds, waking early when cancelled; True if cancelled.
+
+        Only this token's own cancellation wakes the sleep early; an enclosing token's
+        cancellation is seen after the sleep.
+        """
+        self._event.wait(timeout)
+        return self.cancelled
+
+    def raise_if_cancelled(self) -> None:
+        """Raise `TimeoutExpired` if the token is cancelled."""
+        token: CancelToken | None = self
+        while token is not None:
+            if token._event.is_set():
+                raise TimeoutExpired(
+                    _timeout_message(token.label or _BLOCK, token.seconds), seconds=token.seconds
+                )
+            token = token._parent
+
+    def __repr__(self) -> str:
+        return f"CancelToken(cancelled={self.cancelled!r})"
+
+
+_current_token: contextvars.ContextVar[CancelToken | None] = contextvars.ContextVar(
+    "python_wrap_cancel_token", default=None
+)
+
+
+def current_token() -> CancelToken | None:
+    """The `CancelToken` of the innermost sync `timeout` running here, or None."""
+    return _current_token.get()
+
+
+def cancel_requested() -> bool:
+    """True if the enclosing sync `timeout` has fired (False outside any `timeout`).
+
+    Poll it in long loops of a sync function to stop work that `timeout` cannot
+    interrupt (worker-thread fallback, Windows). The worker-thread fallback copies the
+    caller's context, so the token is visible there.
+    """
+    token = _current_token.get()
+    return token is not None and token.cancelled
+
+
+def checkpoint() -> None:
+    """Raise `TimeoutExpired` if the enclosing sync `timeout` has fired; else do nothing.
+
+    A cooperative stop point: call it between units of work so the function ends soon
+    after the limit instead of running on in the background.
+    """
+    token = _current_token.get()
+    if token is not None:
+        token.raise_if_cancelled()
+
+
+def _foreign_alarm(previous_handler: Any, previous_delay: float) -> str | None:
+    """Describe a ``SIGALRM`` user other than python-wrap, or None if there is none."""
+    if getattr(previous_handler, "__python_wrap_alarm__", False):
+        return None
+    if previous_handler not in (signal.SIG_DFL, None):
+        return f"a SIGALRM handler is already installed ({previous_handler!r})"
+    if previous_delay:
+        return f"an ITIMER_REAL timer is already armed ({previous_delay:g}s left)"
+    return None
+
+
+def foreign_alarm_state() -> str | None:
+    """Describe an existing non-default ``SIGALRM`` handler or armed timer, if any.
+
+    Used by `doctor` (PW010) and by `timeout` before it installs its own handler.
+    Returns None where signals are unavailable or nothing foreign is in place.
+    """
+    if not _HAS_SETITIMER:
+        return None
+    try:
+        handler = signal.getsignal(signal.SIGALRM)
+        delay = signal.getitimer(signal.ITIMER_REAL)[0]
+    except (ValueError, OSError):  # pragma: no cover - platform quirk
+        return None
+    return _foreign_alarm(handler, delay)
+
+
 class _Alarm:
     """One SIGALRM/``setitimer`` deadline, cooperating with enclosing ones.
 
@@ -103,6 +251,8 @@ class _Alarm:
         self.label = label
         self.seconds = seconds
         self.error: TimeoutExpired | None = None  # built only when the alarm fires
+        self.token = CancelToken(label, seconds, _current_token.get())
+        self._token_reset: contextvars.Token[CancelToken | None] | None = None
         self._outer_fired = False
         # The enclosing timer's delay; None until known (our timer is not armed yet).
         self._previous_delay: float | None = None
@@ -120,6 +270,7 @@ class _Alarm:
             if previous_delay is not None and (
                 not previous_delay or time.monotonic() >= deadline - 1e-3
             ):
+                self.token.cancel()
                 self.error = TimeoutExpired(
                     _timeout_message(self.label, self.seconds), seconds=self.seconds
                 )
@@ -131,8 +282,19 @@ class _Alarm:
             if callable(previous_handler):
                 previous_handler(signum, frame)
 
+        handler.__python_wrap_alarm__ = True  # type: ignore[attr-defined]
         signal.signal(signal.SIGALRM, handler)
         previous_delay, self._previous_interval = signal.setitimer(signal.ITIMER_REAL, self.seconds)
+        self._token_reset = _current_token.set(self.token)
+        foreign = _foreign_alarm(previous_handler, previous_delay)
+        if foreign is not None:
+            warnings.warn(
+                f"timeout({self.seconds:g}s) for {self.label} takes over SIGALRM but {foreign}; "
+                "signal timers are process-wide, so the other alarm may be delayed or "
+                "misrouted while this runs (use_signals=False avoids signals)",
+                SignalTimerConflictWarning,
+                stacklevel=3,
+            )
         if previous_delay and previous_delay < self.seconds:
             # An enclosing timer is due first: keep its deadline.
             signal.setitimer(signal.ITIMER_REAL, previous_delay)
@@ -145,6 +307,9 @@ class _Alarm:
         tb: TracebackType | None,
     ) -> None:
         signal.setitimer(signal.ITIMER_REAL, 0)
+        if self._token_reset is not None:
+            _current_token.reset(self._token_reset)
+            self._token_reset = None
         if not self._outer_fired:
             signal.signal(signal.SIGALRM, self._previous_handler)
             if self._previous_delay:
@@ -262,13 +427,19 @@ def _call_in_worker(
     func: Callable[P, R], label: str, seconds: float, *args: P.args, **kwargs: P.kwargs
 ) -> R:
     """Run ``func`` in a pooled daemon thread and stop waiting for it after ``seconds``."""
-    job = _Job(func, args, kwargs)
+    token = CancelToken(label, seconds, _current_token.get())
+    reset = _current_token.set(token)
+    try:
+        job = _Job(func, args, kwargs)  # copies the context, token included
+    finally:
+        _current_token.reset(reset)
     # Real time, like the wait itself: a fake clock advanced by sleeps inside the call
     # (e.g. a retry) must not turn a quick call into a late one.
     start = time.monotonic()
     _workers.submit(job)
     if not job.done.acquire(timeout=seconds):
         _workers.abandon(job)
+        token.cancel()
         raise _expired(label, seconds) from None
     if job.finished - start > seconds:
         # The wait overslept (seen with free-threaded builds) and the call finished
@@ -550,7 +721,10 @@ class Timeout:
                     return func(*args, **kwargs)
             return _call_in_worker(func, label, seconds, *args, **kwargs)
 
-        wrapper.__python_wrap_layer__ = ("timeout", self)  # type: ignore[attr-defined]
+        wrapper.__python_wrap_layer__ = (  # type: ignore[attr-defined]
+            "timeout",
+            {"seconds": self.seconds, "use_signals": self.use_signals, "sync": True},
+        )
         return cast(F, wrapper)
 
     # -- sync context manager -----------------------------------------------------------
@@ -648,10 +822,19 @@ def timeout(
       ``use_signals=False``): the call runs in a daemon worker thread and the caller stops
       waiting at the deadline. **This fallback cannot stop the work** — the function keeps
       running in the background until it returns on its own, and its result is discarded.
+      Side effects may therefore continue after `TimeoutExpired`. To make the function
+      stop itself, poll `cancel_requested()` or call `checkpoint()` (which raises
+      `TimeoutExpired`) in long loops: the call's `CancelToken` is cancelled when the
+      limit is hit (with signals too, if the code swallowed the exception).
       Workers are pooled daemon threads: an idle one is reused for the next call (at most
       8 are kept idle, each exits after about 5 s without work), a worker whose call timed
       out is abandoned and never reused, and the caller's ``contextvars`` are copied into
       the worker on every call.
+
+    Signals are process-wide. If a non-default ``SIGALRM`` handler or an armed
+    ``ITIMER_REAL`` timer already exists when the signal strategy starts, a
+    `SignalTimerConflictWarning` is emitted (both are restored afterwards); `doctor`
+    reports it as PW010.
 
     Inside a `python_wrap.deadline.deadline` block the limit is clamped to the time the
     deadline has left; if the deadline has already passed, the call (or block) is not

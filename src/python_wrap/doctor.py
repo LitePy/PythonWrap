@@ -123,7 +123,10 @@ def _layer(obj: Any, role: str | None = None) -> Layer:
             return Layer(role or kind, dict(value))
         obj = value
     if isinstance(obj, Timeout):
-        return Layer(role or "timeout", {"seconds": obj.seconds})
+        settings: dict[str, Any] = {"seconds": obj.seconds}
+        if obj.use_signals is not None:
+            settings["use_signals"] = obj.use_signals
+        return Layer(role or "timeout", settings)
     if isinstance(obj, CircuitBreaker):
         return Layer(
             role or "breaker",
@@ -141,6 +144,13 @@ def _layer(obj: Any, role: str | None = None) -> Layer:
     if callable(getattr(obj, "cache_info", None)):
         return Layer(role or "cache")
     return Layer(role or "unknown", {"decorator": getattr(obj, "__qualname__", type(obj).__name__)})
+
+
+def _preemptive(use_signals: Any) -> bool:
+    """True if a sync timeout with this ``use_signals`` setting can stop work here."""
+    from python_wrap.concurrency import _signals_usable
+
+    return use_signals is not False and _signals_usable()
 
 
 def _check(layers: Sequence[Layer], idempotent: bool) -> tuple[Finding, ...]:
@@ -190,6 +200,38 @@ def _check(layers: Sequence[Layer], idempotent: bool) -> tuple[Finding, ...]:
                     "warning",
                     "retry has no RetryBudget: during an outage every caller multiplies load "
                     "by max_attempts. Pass budget=RetryBudget(...) or configure(retry=...).",
+                )
+            )
+    if any(
+        layer.settings.get("sync") and not _preemptive(layer.settings.get("use_signals"))
+        for layer in timeouts
+    ):
+        found.append(
+            Finding(
+                "PW009",
+                "warning",
+                "timeout wraps a sync function but cannot stop it preemptively here (not the "
+                "main thread, no SIGALRM, or use_signals=False): the caller gets "
+                "TimeoutExpired while the function keeps running, so side effects may "
+                "continue. Poll python_wrap.checkpoint() / cancel_requested() inside the "
+                "function, or use async code.",
+            )
+        )
+    if any(
+        layer.settings.get("sync") and _preemptive(layer.settings.get("use_signals"))
+        for layer in timeouts
+    ):
+        from python_wrap.concurrency import foreign_alarm_state
+
+        conflict = foreign_alarm_state()
+        if conflict is not None:
+            found.append(
+                Finding(
+                    "PW010",
+                    "warning",
+                    f"timeout will use SIGALRM but {conflict}: signal timers are "
+                    "process-wide, so the other alarm may be delayed or misrouted. Use "
+                    "use_signals=False, or move the other alarm elsewhere.",
                 )
             )
     if retries and not timeouts:
