@@ -96,7 +96,7 @@ assert len(attempts) == 2
 | `max_steps` | `StepLimitExceeded` on the step after the limit. Tool calls count automatically; count LLM calls with `record_step("llm", model)`. |
 | `max_seconds` | `RunTimeout` (also a `TimeoutExpired` and `TimeoutError`) on the next step once the time is up. |
 | `max_repeats` | `LoopDetected` when one identical call (same kind, name and arguments) was already made that many times. |
-| `budget` | Checked before each step: its `check()` is called if it has one, and `exhausted == True` raises `BudgetExceeded`. |
+| `budget` | Checked before each step: its `check()` is called if it has one, and `exhausted == True` raises `RunBudgetExceeded`. |
 
 ```python
 from python_wrap import LoopDetected, agent_run, record_step, tool

@@ -14,6 +14,7 @@ Choosing timeouts, attempt counts and breaker thresholds is the hard part. The p
 | `http_client(name)` | 10 s | 3 | 0.2 s, 0.4 s (+ up to 0.1 s jitter) | 5 failures, 30 s | |
 | `db_call(name)` | 5 s | 3, transient DB errors only | 0.05 s, 0.1 s (+ up to 0.05 s) | off (opt in) | `retry_if=db_transient` |
 | `third_party_api(name)` | 15 s | 4 | 0.5, 1, 2 s (+ up to 0.5 s) | 5 failures, 60 s | optional `calls=`/`period=` limiter and `max_concurrent=` bulkhead |
+| `llm_client(name)` | 60 s | 4, transient LLM errors only | 1, 2, 4 s (+ up to 0.5 s) or `Retry-After` | 5 transient failures, 60 s | optional `spend=` budget and `tokens=` limiter; see [LLM calls](../ai/llm-calls.md) |
 
 Every retry layer carries a `RetryBudget` (20 % of traffic plus 5 retries per second) and
 a `max_time` longer than `timeout * attempts`, so a slow attempt never eats the whole budget.
@@ -109,6 +110,9 @@ assert "PW006" in [finding.code for finding in report.findings]  # timeout outsi
 | PW012 | warning | With `multiprocess=True`: a breaker, bulkhead, rate limiter or adaptive limiter without a shared backend, so every worker process enforces its own copy of the limit. |
 | PW016 | error | An agent `tool` with side effects is retried (its own `retry=` or an outer `retry`) but deduplication is off (`idempotent_key=False`): a retried or replayed call runs twice. See [Agent tool safety](../ai/agent-safety.md). |
 | PW017 | warning | An agent run (`RunGuard`, `agent_run`, or a `ToolRegistry` without a guard) sets none of `max_steps`, `max_seconds`, `max_repeats`: a looping model never stops. |
+| PW013 | warning | An LLM call is retried but has no spend `Budget`. See [LLM calls](../ai/llm-calls.md#doctor-checks). |
+| PW014 | warning | A stack with LLM layers has no timeout, or a `stream_timeout` has no `chunk_gap`. |
+| PW015 | warning | A generic `retry` without `retry_if=` wraps an LLM call: refusals and bad requests are retried. |
 
 Breakers, bulkheads and limiters keep their state in the process by default. Under a
 process pool (gunicorn or uvicorn workers, Celery prefork, `ProcessPoolExecutor`) that

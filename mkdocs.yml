@@ -196,6 +196,8 @@ nav:
           - Validation: features/correctness/validation.md
           - State and transactions: features/correctness/state.md
           - Batch processing: features/correctness/batch-processing.md
+      - AI & agents:
+          - LLM calls: features/ai/llm-calls.md
       - Developer tools: features/devtools.md
       - Configuration: features/configuration.md
       - Dynamic switches: features/switches.md
@@ -228,6 +230,7 @@ nav:
           - Hedging: api/hedging.md
           - Policies: api/policy.md
           - Named registry: api/policies.md
+          - LLM calls: api/llm.md
           - Presets: api/presets.md
           - Doctor: api/doctor.md
           - Predicates: api/predicates.md

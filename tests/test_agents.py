@@ -12,9 +12,9 @@ from python_wrap import (
     AgentRun,
     ApprovalDenied,
     ApprovalTimeout,
-    BudgetExceeded,
     DryRun,
     LoopDetected,
+    RunBudgetExceeded,
     RunCancelled,
     RunGuard,
     RunTimeout,
@@ -272,7 +272,7 @@ def test_cancel_and_budget() -> None:
     with agent_run(budget=budget):
         record_step("llm", "m")
         budget.exhausted = True
-        with pytest.raises(BudgetExceeded):
+        with pytest.raises(RunBudgetExceeded):
             record_step("llm", "m")
 
     class Checking:

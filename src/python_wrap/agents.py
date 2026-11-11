@@ -48,9 +48,9 @@ __all__ = [
     "AgentRun",
     "ApprovalDenied",
     "ApprovalTimeout",
-    "BudgetExceeded",
     "DryRun",
     "LoopDetected",
+    "RunBudgetExceeded",
     "RunCancelled",
     "RunGuard",
     "RunTimeout",
@@ -134,7 +134,7 @@ class RunCancelled(AgentError):
         self.run_id = run_id
 
 
-class BudgetExceeded(AgentError):
+class RunBudgetExceeded(AgentError):
     """The run's ``budget`` reports ``exhausted``."""
 
     def __init__(self, message: str, *, run_id: str) -> None:
@@ -442,7 +442,7 @@ class AgentRun:
         Raises:
             RunTimeout: ``max_seconds`` passed.
             RunCancelled: `cancel` was called.
-            BudgetExceeded: the budget is exhausted.
+            RunBudgetExceeded: the budget is exhausted.
             TimeoutExpired: an enclosing `timeout` fired.
         """
         for run in self._chain():
@@ -466,7 +466,7 @@ class AgentRun:
             if callable(checker):
                 checker()
             if getattr(budget, "exhausted", False) is True:
-                raise BudgetExceeded(
+                raise RunBudgetExceeded(
                     f"agent run {self.run_id}: budget exhausted", run_id=self.run_id
                 )
 
@@ -563,7 +563,7 @@ def record_step(kind: str, name: str, arguments: Mapping[str, Any] | None = None
         The recorded `Step`, or None outside a run.
 
     Raises:
-        StepLimitExceeded, LoopDetected, RunTimeout, RunCancelled, BudgetExceeded: The
+        StepLimitExceeded, LoopDetected, RunTimeout, RunCancelled, RunBudgetExceeded: The
             step is refused (it is not recorded).
     """
     run = _run_var.get()
@@ -588,7 +588,7 @@ class RunGuard:
             next raises `LoopDetected`.
         budget: Optional spend tracker checked before every step: its ``check()`` is
             called when it has one (it may raise), and ``exhausted`` being True raises
-            `BudgetExceeded`.
+            `RunBudgetExceeded`.
         policy: A `ToolPolicy` in effect for the run.
         run_id: Fixed run id (resume a run so its tool replays are deduplicated);
             a fresh ``uuid4().hex`` per run by default.
