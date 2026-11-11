@@ -106,6 +106,36 @@ EVENT_NAMES: Mapping[str, str] = MappingProxyType(
             "Fields: kind (str): 'latency', 'exception' or 'result'; point (str); "
             "pattern (str, the matching rule)."
         ),
+        "agent.run.start": (
+            "An agent run (RunGuard / agent_run) began. function is the guard name. "
+            "Fields: run_id (str), parent_id (str, or None for a top-level run)."
+        ),
+        "agent.run.step": (
+            "A step was admitted into an agent run. function is the guard name. "
+            "Fields: run_id (str), step (int, 1-based), kind (str: 'tool', 'llm', ...), "
+            "tool (str, the tool or step name)."
+        ),
+        "agent.run.end": (
+            "An agent run finished. function is the guard name. Fields: run_id (str), "
+            "steps (int), seconds (float), error (str exception class name, or None)."
+        ),
+        "tool.call": (
+            "An agent tool is about to run (not a replay or dry run). function is the tool "
+            "name. Fields: run_id (str or None)."
+        ),
+        "tool.denied": (
+            "A tool call was refused. function is the tool name. Fields: run_id (str or "
+            "None), reason (str): 'unknown', 'denied', 'read_only', 'approval_denied' or "
+            "'approval_timeout'."
+        ),
+        "tool.replayed": (
+            "A tool call matched a stored idempotency key; the stored result was returned "
+            "without running. function is the tool name. Fields: run_id (str or None)."
+        ),
+        "tool.dry_run": (
+            "A write tool was skipped in a dry run. function is the tool name. "
+            "Fields: run_id (str or None)."
+        ),
     }
 )
 

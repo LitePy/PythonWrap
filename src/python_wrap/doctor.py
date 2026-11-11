@@ -355,8 +355,45 @@ def _check(
                     "ttl=, or pass key= without `self`.",
                 )
             )
+    found += _check_agents(layers, retries)
     found.sort(key=lambda item: (item.severity != "error", item.code))
     return tuple(found)
+
+
+def _check_agents(layers: Sequence[Layer], retries: Sequence[Layer]) -> list[Finding]:
+    """PW016 (retried side-effect tool without idempotency) and PW017 (unbounded run)."""
+    found: list[Finding] = []
+    for layer in layers:
+        settings = layer.settings
+        if (
+            layer.role == "tool"
+            and retries
+            and not settings.get("read_only")
+            and not settings.get("idempotent")
+        ):
+            found.append(
+                Finding(
+                    "PW016",
+                    "error",
+                    f"tool {settings.get('name')!r} has side effects and is retried, but "
+                    "deduplication is off (idempotent_key=False): a retried or replayed "
+                    "call runs twice. Drop idempotent_key=False (or pass a key function), "
+                    "or declare read_only=True if the tool has no side effects.",
+                )
+            )
+        if layer.role == "agent_run" and not any(
+            settings.get(name) for name in ("max_steps", "max_seconds", "max_repeats")
+        ):
+            found.append(
+                Finding(
+                    "PW017",
+                    "warning",
+                    "agent run with tools but no RunGuard limits: a model that keeps "
+                    "calling tools loops forever. Set max_steps=, max_seconds= and "
+                    "max_repeats= on the RunGuard / agent_run.",
+                )
+            )
+    return found
 
 
 def explain(target: Any, *, idempotent: bool = True, multiprocess: bool = False) -> Report:
@@ -387,6 +424,11 @@ def explain(target: Any, *, idempotent: bool = True, multiprocess: bool = False)
         assert [f.code for f in report.findings][:1] == ["PW002"]
         ```
     """
+    from python_wrap.agents import RunGuard, ToolRegistry
+
+    if isinstance(target, (RunGuard, ToolRegistry)):
+        report: Report = target._explain(idempotent=idempotent, multiprocess=multiprocess)
+        return report
     if not isinstance(target, Policy):
         return doctor(target, idempotent=idempotent, multiprocess=multiprocess)
     layers: list[Layer] = [_layer(item, "outer") for item in target._outer]

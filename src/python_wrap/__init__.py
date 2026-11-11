@@ -16,6 +16,30 @@ from .adaptive import (
     PerKeyLimiter,
     per_key,
 )
+from .agents import (
+    AgentError,
+    AgentRun,
+    ApprovalDenied,
+    ApprovalTimeout,
+    BudgetExceeded,
+    DryRun,
+    LoopDetected,
+    RunCancelled,
+    RunGuard,
+    RunTimeout,
+    Step,
+    StepLimitExceeded,
+    ToolCall,
+    ToolNotAllowed,
+    ToolPolicy,
+    ToolRegistry,
+    ToolSpec,
+    agent_run,
+    current_run,
+    record_step,
+    tool,
+    tool_spec,
+)
 from .aio import (
     RaceFailed,
     amap_iter,
@@ -507,6 +531,32 @@ __all__ = [
     "unbind",
     "validate_args",
     "wrap_methods",
+]
+
+# Agent tool-use safety (python_wrap.agents).
+__all__ += [
+    "AgentError",
+    "AgentRun",
+    "ApprovalDenied",
+    "ApprovalTimeout",
+    "BudgetExceeded",
+    "DryRun",
+    "LoopDetected",
+    "RunCancelled",
+    "RunGuard",
+    "RunTimeout",
+    "Step",
+    "StepLimitExceeded",
+    "ToolCall",
+    "ToolNotAllowed",
+    "ToolPolicy",
+    "ToolRegistry",
+    "ToolSpec",
+    "agent_run",
+    "current_run",
+    "record_step",
+    "tool",
+    "tool_spec",
 ]
 
 

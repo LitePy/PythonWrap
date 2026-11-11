@@ -96,6 +96,6 @@ def test_event_names_catalogue() -> None:
     emitted = {
         name
         for path in src.glob("*.py")
-        for name in re.findall(r"""emit\(\s*["']([a-z_]+\.[a-z_]+)["']""", path.read_text())
+        for name in re.findall(r"""emit\(\s*["']([a-z_]+(?:\.[a-z_]+)+)["']""", path.read_text())
     }
     assert emitted == set(EVENT_NAMES)

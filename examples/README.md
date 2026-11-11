@@ -20,6 +20,7 @@ $ python examples/resilient_http.py
 | [`audit_logging.py`](audit_logging.py) | `log_args` and `audit` with shared redaction, JSON log lines | [Observability](../docs/cookbook/observability.md) |
 | [`llm_chaos.py`](llm_chaos.py) | `fake_llm` + `chaos.llm` faults + `fake_clock`: an agent survives rate limits, overload and broken JSON in milliseconds | [Testing agents](../docs/features/ai/testing-agents.md) |
 | [`durable_buffer.py`](durable_buffer.py) | `Buffered(journal=SQLiteJournal(...))`: records survive a failed destination and a restart, then `replay()` delivers them | [Durable writers](../docs/features/concurrency/buffered-writes.md#durable-writers) |
+| [`agent_tools.py`](agent_tools.py) | `@tool` replay-safe side effects, `RunGuard` loop/step limits, `ToolPolicy` dry run, approvals, `ToolRegistry` dispatch, PW017 | [Agent tool safety](../docs/features/ai/agent-safety.md) |
 | [`strict_validation.py`](strict_validation.py) | `enforce_types(strict=True)`, `TypedDict` checking, `UnsupportedAnnotationError`, doctor `multiprocess=True` (PW012) | [Validation](../docs/features/correctness/validation.md#supported-annotations) |
 | [`agent_audit_trail.py`](agent_audit_trail.py) | `traced_llm`/`traced_tool`, redacted `AuditTape`, retry attempt linkage, `replay` with mismatch detection | [AI observability](../docs/features/ai/observability.md) |
 

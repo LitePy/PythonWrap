@@ -203,6 +203,7 @@ nav:
   - AI & agents:
       - Testing agents: features/ai/testing-agents.md
       - AI observability and audit: features/ai/observability.md
+      - Agent tool safety: features/ai/agent-safety.md
   - Testing:
       - testing/index.md
       - Chaos and fault injection: testing/chaos.md
@@ -270,6 +271,8 @@ nav:
       - Configuration: api/config.md
       - Developer tools: api/devtools.md
       - Switches: api/switches.md
+      - AI & agents:
+          - Agents: api/agents.md
       - Framework adapters:
           - Flask: api/flask.md
           - FastAPI and ASGI: api/fastapi.md
