@@ -1,0 +1,19 @@
+"""Summaries."""
+import time
+
+import anthropic
+
+client = anthropic.Anthropic()
+
+
+def summarize(text: str) -> str:
+    """Summarize text."""
+    for attempt in range(4):
+        try:
+            return client.messages.create(
+                model="m-1",
+                max_tokens=200,
+                messages=[{"role": "user", "content": text}],
+            )
+        except anthropic.RateLimitError:
+            time.sleep(2 * 2 ** attempt)

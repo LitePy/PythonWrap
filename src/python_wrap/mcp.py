@@ -165,8 +165,9 @@ class Server:
                 ),
                 _Tool(
                     "migrate_preview",
-                    "Dry-run the tenacity/backoff to python-wrap codemod on Python source "
-                    "text. Returns a unified diff and notes; never writes files.",
+                    "Dry-run the python-wrap codemod on Python source text: tenacity/backoff "
+                    "decorators and hand-rolled LLM retry loops. Returns a unified diff, "
+                    "notes and suggestions; never writes files.",
                     {
                         "source": {"type": "string", "description": "Python source code"},
                         "filename": {"type": "string", "default": "<source>"},

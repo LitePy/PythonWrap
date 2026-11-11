@@ -1,0 +1,12 @@
+import asyncio
+
+
+@traced
+async def ask(client, prompt):
+    for i in range(3):
+        try:
+            return await client.chat.completions.create(model="m-1", messages=prompt)
+        except Exception:
+            if i == 2:
+                raise
+            await asyncio.sleep(1.5)

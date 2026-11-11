@@ -573,3 +573,123 @@ def test_cli_non_utf8_declared_encoding_roundtrips(tmp_path: Path) -> None:
     assert main(["--write", str(target)]) == 0
     assert "caf\u00e9".encode("latin-1") in target.read_bytes()
     assert b"max_attempts=2" in target.read_bytes()
+
+
+# ---------------------------------------------------------------------------- LLM retry loops
+
+_FIXTURES = Path(__file__).parent / "fixtures" / "migrate_llm"
+
+
+@pytest.mark.parametrize("name", ["sync_anthropic", "async_openai"])
+def test_llm_loop_golden_rewrite(name: str) -> None:
+    before = (_FIXTURES / f"{name}_before.txt").read_text()
+    after = (_FIXTURES / f"{name}_after.txt").read_text()
+    result = migrate_source(before)
+    assert result.text == after
+    assert [c.kind for c in result.changes] == ["loop"]
+    assert result.changes[0].notes
+    assert not result.unsupported
+    ast.parse(result.text)
+    # idempotent: nothing left to do
+    again = migrate_source(result.text)
+    assert again.text == result.text and not again.changes and not again.unsupported
+
+
+def test_llm_loop_unsafe_shapes_are_reported_not_rewritten() -> None:
+    before = (_FIXTURES / "unsafe_before.txt").read_text()
+    result = migrate_source(before)
+    assert result.text == before
+    assert [u.line for u in result.unsupported] == [5, 16]
+    assert "client.responses.create" in result.unsupported[0].message
+    assert "lines 5-10" in result.unsupported[0].message
+    assert "llm_retry" in result.unsupported[0].message
+    assert "while" in result.unsupported[1].message or "range" in result.unsupported[1].message
+
+
+@pytest.mark.parametrize(
+    "body, reason",
+    [
+        ("            print('again', 1)\n            time.sleep(1)\n", "does more than sleep"),
+        ("            time.sleep(delay)\n", "sleep duration"),
+        ("            time.sleep(1)\n    log()\n", "other statements"),
+    ],
+)
+def test_llm_loop_refuses_unsafe_variants(body: str, reason: str) -> None:
+    source = (
+        "import time\n\n\ndef f(client):\n    for n in range(3):\n        try:\n"
+        "            return client.messages.create(model='m')\n        except Exception:\n" + body
+    )
+    result = migrate_source(source)
+    assert result.text == source and not result.changes
+    assert reason in result.unsupported[0].message
+
+
+def test_llm_loop_refuses_when_call_uses_loop_variable_or_exception() -> None:
+    uses_var = (
+        "import time\n\n\ndef f(client):\n    for n in range(3):\n        try:\n"
+        "            return client.messages.create(model='m', n=n)\n"
+        "        except Exception:\n            time.sleep(1)\n"
+    )
+    uses_exc = uses_var.replace(", n=n", "").replace("Exception:", "Exception as exc:").replace(
+        "time.sleep(1)", "time.sleep(len(str(exc)))"
+    )
+    for source in (uses_var, uses_exc):
+        result = migrate_source(source)
+        assert result.text == source and len(result.unsupported) == 1
+
+
+def test_llm_loop_ignores_loops_without_llm_call_or_sleep() -> None:
+    no_sleep = (
+        "def f(client):\n    for n in range(3):\n        try:\n"
+        "            return client.messages.create(model='m')\n        except Exception:\n"
+        "            pass\n"
+    )
+    assert migrate_source(no_sleep).text == no_sleep
+    assert not migrate_source(no_sleep).unsupported
+
+
+def test_llm_loop_reuses_existing_import_and_handles_name_clash() -> None:
+    source = (
+        "from python_wrap.llm import llm_retry as lr\nimport time\n\n\n"
+        "def f(client):\n    for n in range(2):\n        try:\n"
+        "            return client.responses.create(model='m')\n"
+        "        except Exception:\n            time.sleep(0.5)\n"
+    )
+    result = migrate_source(source)
+    assert "@lr(max_attempts=2, delay=0.5)" in result.text
+    assert result.text.count("import") == 2
+    clash = source.replace("from python_wrap.llm import llm_retry as lr\n", "llm_retry = 1\n")
+    blocked = migrate_source(clash)
+    assert blocked.text == clash and "already used" in blocked.unsupported[0].message
+
+
+def test_llm_loop_and_tenacity_in_one_file_keep_line_numbers() -> None:
+    source = (
+        "import time\nimport tenacity\n\n\n"
+        "@tenacity.retry(stop=tenacity.stop_after_attempt(3))\n"
+        "def a():\n    pass\n\n\n"
+        "def b(client):\n    for n in range(3):\n        try:\n"
+        "            return client.messages.create(model='m')\n"
+        "        except Exception:\n            time.sleep(1)\n"
+    )
+    result = migrate_source(source)
+    assert sorted(c.kind for c in result.changes) == ["decorator", "loop"]
+    loop = next(c for c in result.changes if c.kind == "loop")
+    assert loop.line == 11  # the line in the original file
+    ast.parse(result.text)
+
+
+def test_llm_loop_cli_dry_run_diff_and_write(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    target = tmp_path / "svc.py"
+    original = (_FIXTURES / "sync_anthropic_before.txt").read_text()
+    target.write_text(original)
+    assert main([str(target)]) == 0
+    out = capsys.readouterr().out
+    assert "would rewrite 1 retry loop(s)" in out and target.read_text() == original
+    assert main(["--diff", str(target)]) == 0
+    assert "+@llm_retry(max_attempts=4, delay=2)" in capsys.readouterr().out
+    assert target.read_text() == original
+    assert main(["--write", str(target)]) == 0
+    assert target.read_text() == (_FIXTURES / "sync_anthropic_after.txt").read_text()

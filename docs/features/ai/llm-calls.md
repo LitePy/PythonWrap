@@ -179,6 +179,12 @@ assert agent("again") == 3  # each top-level run gets a fresh allowance
 ```
 
 Context variables carry a run into tasks (`asyncio.gather`), `hedge` and `run_in_thread`.
+
+**With `agent_run`**: pass the budget itself, `agent_run(budget=loop_budget)`. Entering the
+run opens the budget's `run()` scope, so decorated LLM calls inside draw on that run's
+counter, and once it is used up the next step raises `RunBudgetExceeded` (see
+[Agent safety](agent-safety.md#using-an-llm-budget)). A decorated call made directly still
+raises `BudgetExceeded`.
 For streamed responses the usage arrives with the last chunk: call
 `budget.record(final_usage)` yourself.
 

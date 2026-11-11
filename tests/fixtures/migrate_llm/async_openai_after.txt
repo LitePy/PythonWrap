@@ -1,0 +1,8 @@
+import asyncio
+from python_wrap.llm import llm_retry
+
+
+@traced
+@llm_retry(max_attempts=3, delay=1.5)
+async def ask(client, prompt):
+    return await client.chat.completions.create(model="m-1", messages=prompt)

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import dataclasses
 import difflib
 import re
 import sys
@@ -51,6 +52,8 @@ class Change:
         before: The original decorator source.
         after: The replacement decorator source.
         notes: Behaviour differences the author should review.
+        kind: ``"decorator"`` for a tenacity/backoff decorator, ``"loop"`` for a hand-rolled
+            LLM retry loop replaced by ``@llm_retry``.
     """
 
     line: int
@@ -58,6 +61,7 @@ class Change:
     before: str
     after: str
     notes: tuple[str, ...] = ()
+    kind: str = "decorator"
 
 
 @dataclass(frozen=True)
@@ -707,7 +711,13 @@ def _module_bindings(tree: ast.Module, names: _Names) -> set[str]:
 
 
 def migrate_source(text: str, filename: str = "<string>") -> MigrationResult:
-    """Rewrite tenacity/backoff retry decorators in ``text`` to ``python_wrap.retry``.
+    """Rewrite tenacity/backoff decorators and LLM retry loops in ``text``.
+
+    Decorators become ``python_wrap.retry``. Hand-rolled retry loops around LLM client
+    calls (``for``/``while`` with try/except and a sleep around ``*.messages.create``,
+    ``*.chat.completions.create``, ``*.responses.create`` or ``*.generate_content``) become
+    a function decorated with ``llm_retry`` when that is provably safe, and are otherwise
+    reported with a suggestion and line numbers. No import of any LLM SDK is needed.
 
     Args:
         text: Python source code.
@@ -721,6 +731,37 @@ def migrate_source(text: str, filename: str = "<string>") -> MigrationResult:
         >>> migrate_source("x = 1\\n").text
         'x = 1\\n'
     """
+    result = _migrate_decorators(text, filename)
+    if result.unsupported and result.unsupported[0].message.startswith("cannot parse file"):
+        return result
+    try:
+        tree = ast.parse(result.text)
+    except SyntaxError:  # pragma: no cover - rewrites are checked before they are returned
+        return result
+    loops = _migrate_loops(result.text, tree)
+    if not loops.unsupported and not loops.changes:
+        return result
+    if result.text != text:
+        mapping = _line_map(text, result.text)
+
+        def shift(n: int) -> int:
+            return mapping[min(n, len(mapping) - 1)]
+
+    else:
+
+        def shift(n: int) -> int:
+            return n
+
+    result.text = loops.text
+    result.changes.extend(dataclasses.replace(c, line=shift(c.line)) for c in loops.changes)
+    result.unsupported.extend(dataclasses.replace(u, line=shift(u.line)) for u in loops.unsupported)
+    result.changes.sort(key=lambda c: (c.line, c.col))
+    result.unsupported.sort(key=lambda u: (u.line, u.col))
+    return result
+
+
+def _migrate_decorators(text: str, filename: str) -> MigrationResult:
+    """The tenacity/backoff pass of `migrate_source`."""
     result = MigrationResult(text)
     try:
         tree = ast.parse(text, filename=filename)
@@ -920,6 +961,400 @@ def _shares_line(tree: ast.Module, stmt: ast.stmt) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------- LLM retry loops
+
+_LLM_CALL_SUFFIXES: tuple[tuple[str, ...], ...] = (
+    ("messages", "create"),
+    ("chat", "completions", "create"),
+    ("completions", "create"),
+    ("responses", "create"),
+    ("generate_content",),
+    ("generate_content_async",),
+)
+_IMPORT_LLM_RETRY = "from python_wrap.llm import llm_retry"
+
+
+def _attr_chain(node: ast.expr) -> tuple[str, ...]:
+    parts: list[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    parts.reverse()
+    return tuple(parts)
+
+
+def _is_llm_call(node: ast.AST) -> bool:
+    if not isinstance(node, ast.Call):
+        return False
+    chain = _attr_chain(node.func)
+    return any(chain[-len(s) :] == s for s in _LLM_CALL_SUFFIXES if len(chain) >= len(s))
+
+
+def _is_sleep_call(node: ast.AST) -> bool:
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    return (isinstance(func, ast.Name) and func.id == "sleep") or (
+        isinstance(func, ast.Attribute) and func.attr == "sleep"
+    )
+
+
+def _walk_same_scope(node: ast.AST) -> list[ast.AST]:
+    """Descendants of ``node`` that run in the same function (not nested defs)."""
+    out: list[ast.AST] = []
+    stack = list(ast.iter_child_nodes(node))
+    while stack:
+        cur = stack.pop()
+        out.append(cur)
+        if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            continue
+        stack.extend(ast.iter_child_nodes(cur))
+    return out
+
+
+def _is_retry_loop(loop: ast.For | ast.AsyncFor | ast.While) -> ast.Call | None:
+    """The LLM call when ``loop`` looks like a hand-rolled retry loop around one."""
+    inner = _walk_same_scope(loop)
+    if not any(isinstance(n, ast.Try) for n in inner):
+        return None
+    if not any(_is_sleep_call(n) for n in inner):
+        return None
+    for n in inner:
+        if _is_llm_call(n):
+            assert isinstance(n, ast.Call)
+            return n
+    return None
+
+
+def _const_number(node: ast.expr) -> float | None:
+    if (
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, (int, float))
+        and not isinstance(node.value, bool)
+    ):
+        return float(node.value)
+    return None
+
+
+def _is_pow2(node: ast.expr, var: str) -> bool:
+    return (
+        isinstance(node, ast.BinOp)
+        and isinstance(node.op, ast.Pow)
+        and _const_number(node.left) == 2.0
+        and isinstance(node.right, ast.Name)
+        and node.right.id == var
+    )
+
+
+def _sleep_delay(arg: ast.expr, var: str) -> tuple[float, bool] | None:
+    """(first delay in seconds, doubles each time) for the sleep argument shapes we know."""
+    const = _const_number(arg)
+    if const is not None:
+        return const, False
+    if _is_pow2(arg, var):
+        return 1.0, True
+    if isinstance(arg, ast.BinOp) and isinstance(arg.op, ast.Mult):
+        for scale, power in ((arg.left, arg.right), (arg.right, arg.left)):
+            base = _const_number(scale)
+            if base is not None and _is_pow2(power, var):
+                return base, True
+    return None
+
+
+def _names_in(nodes: Sequence[ast.AST]) -> set[str]:
+    return {n.id for root in nodes for n in ast.walk(root) if isinstance(n, ast.Name)}
+
+
+def _fmt_num(value: float) -> str:
+    return str(int(value)) if value == int(value) else repr(value)
+
+
+@dataclass
+class _LoopPlan:
+    """A safe rewrite of one retry loop."""
+
+    func: ast.FunctionDef | ast.AsyncFunctionDef
+    loop: ast.For
+    call_expr: ast.expr
+    attempts: int
+    delay: float
+    notes: list[str]
+
+
+def _plan_loop(func: ast.FunctionDef | ast.AsyncFunctionDef, loop: ast.stmt) -> _LoopPlan | str:
+    """A `_LoopPlan` when ``loop`` can be rewritten safely, else why it cannot."""
+    if not isinstance(loop, ast.For):
+        return "only `for ... in range(N)` loops are rewritten automatically"
+    if not (
+        isinstance(loop.target, ast.Name)
+        and isinstance(loop.iter, ast.Call)
+        and isinstance(loop.iter.func, ast.Name)
+        and loop.iter.func.id == "range"
+        and len(loop.iter.args) == 1
+        and not loop.iter.keywords
+    ):
+        return "the loop is not `for <name> in range(<integer literal>)`"
+    count = loop.iter.args[0]
+    if not (
+        isinstance(count, ast.Constant)
+        and isinstance(count.value, int)
+        and not isinstance(count.value, bool)
+        and count.value >= 2
+    ):
+        return "the attempt count is not an integer literal of at least 2"
+    var, attempts = loop.target.id, count.value
+    if loop.orelse:
+        return "the loop has an `else` clause"
+    body = list(func.body)
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
+        body = body[1:]
+    if body != [loop]:
+        return (
+            "the function has other statements besides the loop (code before the loop would "
+            "be retried too; code after it, such as a final `raise`, would change what callers see)"
+        )
+    if len(loop.body) != 1 or not isinstance(loop.body[0], ast.Try):
+        return "the loop body is not a single try/except"
+    attempt = loop.body[0]
+    if attempt.orelse or attempt.finalbody or not attempt.handlers:
+        return "the try has an `else` or `finally` clause"
+    if len(attempt.body) != 1 or not isinstance(attempt.body[0], ast.Return):
+        return "the try body is not a single `return <llm call>`"
+    value = attempt.body[0].value
+    if value is None:
+        return "the try body is not a single `return <llm call>`"
+    inner = value.value if isinstance(value, ast.Await) else value
+    if not _is_llm_call(inner):
+        return "the try body does not return the LLM call directly"
+    if var in _names_in([value]):
+        return f"the call uses the loop variable `{var}`"
+    sleeps: list[ast.Call] = []
+    for handler in attempt.handlers:
+        bound = handler.name
+        for stmt in handler.body:
+            if isinstance(stmt, (ast.Pass, ast.Continue)):
+                continue
+            if isinstance(stmt, ast.Expr):
+                expr = stmt.value.value if isinstance(stmt.value, ast.Await) else stmt.value
+                if _is_sleep_call(expr):
+                    assert isinstance(expr, ast.Call)
+                    sleeps.append(expr)
+                    continue
+            if _is_last_attempt_reraise(stmt, var, attempts):
+                continue
+            return (
+                "an except block does more than sleep (logging, state changes or other "
+                f"statements; line {stmt.lineno})"
+            )
+        if bound and bound in _names_in(handler.body):
+            return f"an except block uses the caught exception `{bound}`"
+    if len(sleeps) != 1:
+        return "expected exactly one sleep call in the except blocks"
+    sleep = sleeps[0]
+    if len(sleep.args) != 1 or sleep.keywords:
+        return "the sleep call is not `sleep(<seconds>)`"
+    parsed = _sleep_delay(sleep.args[0], var)
+    if parsed is None:
+        return "the sleep duration is not a number or `<number> * 2 ** <attempt>`"
+    delay, doubling = parsed
+    if delay <= 0:
+        return "the sleep duration is not positive"
+    notes = [
+        "llm_retry retries only transient errors (rate limits, overloaded, 5xx, timeouts, "
+        "connection errors) and fails at once on anything else",
+        "waits double from delay= with up to 0.5s of jitter, and a Retry-After header from "
+        "the provider is honoured",
+        "when all attempts fail the last error is raised",
+    ]
+    if not doubling:
+        notes.append(f"the fixed {_fmt_num(delay)}s sleep becomes a doubling wait")
+    return _LoopPlan(func, loop, value, attempts, delay, notes)
+
+
+def _is_last_attempt_reraise(stmt: ast.stmt, var: str, attempts: int) -> bool:
+    """``if attempt == N - 1: raise`` (or ``>=``): the loop's own give-up rule."""
+    if not (
+        isinstance(stmt, ast.If)
+        and not stmt.orelse
+        and len(stmt.body) == 1
+        and isinstance(stmt.body[0], ast.Raise)
+        and stmt.body[0].exc is None
+        and isinstance(stmt.test, ast.Compare)
+        and len(stmt.test.ops) == 1
+        and isinstance(stmt.test.ops[0], (ast.Eq, ast.GtE))
+        and isinstance(stmt.test.left, ast.Name)
+        and stmt.test.left.id == var
+    ):
+        return False
+    right = stmt.test.comparators[0]
+    if _const_number(right) == float(attempts - 1):
+        return True
+    return (
+        isinstance(right, ast.BinOp)
+        and isinstance(right.op, ast.Sub)
+        and _const_number(right.left) == float(attempts)
+        and _const_number(right.right) == 1.0
+    )
+
+
+def _find_retry_loops(
+    tree: ast.Module,
+) -> list[tuple[ast.FunctionDef | ast.AsyncFunctionDef | None, ast.stmt, ast.Call]]:
+    """Outermost retry loops with their enclosing function (None outside a function)."""
+    found: list[tuple[ast.FunctionDef | ast.AsyncFunctionDef | None, ast.stmt, ast.Call]] = []
+
+    def visit(node: ast.AST, func: ast.FunctionDef | ast.AsyncFunctionDef | None) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                visit(child, child)
+            elif isinstance(child, (ast.For, ast.AsyncFor, ast.While)):
+                call = _is_retry_loop(child)
+                if call is not None:
+                    found.append((func, child, call))
+                else:
+                    visit(child, func)
+            else:
+                visit(child, func)
+
+    visit(tree, None)
+    return found
+
+
+def _llm_retry_name(tree: ast.Module) -> tuple[str | None, bool]:
+    """(name `llm_retry` is imported as, whether `llm_retry` is bound to something else)."""
+    for stmt in tree.body:
+        if (
+            isinstance(stmt, ast.ImportFrom)
+            and stmt.level == 0
+            and stmt.module in ("python_wrap", "python_wrap.llm")
+        ):
+            for alias in stmt.names:
+                if alias.name == "llm_retry":
+                    return alias.asname or "llm_retry", False
+    taken = any(
+        (isinstance(n, ast.Name) and n.id == "llm_retry")
+        or (
+            isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            and n.name == "llm_retry"
+        )
+        or (isinstance(n, ast.alias) and (n.asname or n.name) == "llm_retry")
+        for n in ast.walk(tree)
+    )
+    return None, taken
+
+
+def _migrate_loops(text: str, tree: ast.Module) -> MigrationResult:
+    result = MigrationResult(text)
+    loops = _find_retry_loops(tree)
+    if not loops:
+        return result
+    src = _Source(text)
+    name, taken = _llm_retry_name(tree)
+    use = name or "llm_retry"
+    plans: list[_LoopPlan] = []
+    for func, loop, call in loops:
+        callee = ast.unparse(call.func)
+        end = loop.end_lineno or loop.lineno
+        where = f"line {loop.lineno}" if end == loop.lineno else f"lines {loop.lineno}-{end}"
+        if func is None:
+            why: _LoopPlan | str = "the loop is not inside a function"
+        elif taken and name is None:
+            why = "the name `llm_retry` is already used for something else in this module"
+        else:
+            why = _plan_loop(func, loop)
+        if isinstance(why, str):
+            result.unsupported.append(
+                Unsupported(
+                    loop.lineno,
+                    loop.col_offset,
+                    f"hand-rolled retry loop around `{callee}(...)` "
+                    f"({where}) not rewritten: {why}. Move the single call into its own "
+                    "function decorated with "
+                    "`@llm_retry(max_attempts=..., delay=...)` (from python_wrap.llm) and "
+                    "delete the loop, the sleep and the except block",
+                )
+            )
+        else:
+            plans.append(why)
+    if not plans:
+        return result
+
+    newline = "\r\n" if "\r\n" in text else "\n"
+    edits: list[tuple[int, int, str]] = []
+    for plan in plans:
+        func, loop = plan.func, plan.loop
+        value_text = src.segment(plan.call_expr)
+        ret_stmt = loop.body[0].body[0]  # type: ignore[attr-defined]
+        shift = ret_stmt.col_offset - loop.col_offset
+        pieces = value_text.splitlines(keepends=True)
+        value_text = pieces[0] + "".join(
+            ln[shift:] if ln[:shift].strip() == "" else ln for ln in pieces[1:]
+        )
+        start, end = src.span(loop)
+        edits.append((start, end, f"return {value_text}"))
+        indent = src.indent(func.lineno)
+        deco = (
+            f"{indent}@{use}(max_attempts={plan.attempts}, delay={_fmt_num(plan.delay)}){newline}"
+        )
+        at = src.starts[func.lineno - 1]
+        edits.append((at, at, deco))
+        before = src.lines[loop.lineno - 1].strip()
+        result.changes.append(
+            Change(
+                loop.lineno,
+                loop.col_offset,
+                before,
+                deco.strip(),
+                tuple(plan.notes),
+                kind="loop",
+            )
+        )
+    if name is None:
+        imports = [s for s in tree.body if isinstance(s, (ast.Import, ast.ImportFrom))]
+        if imports and not any(_shares_line(tree, s) for s in imports[-1:]):
+            last = imports[-1]
+            at = _line_end_offset(src, last.end_lineno or last.lineno)
+            prefix = "" if src.text[:at].endswith(("\n", "\r")) else newline
+            edits.append((at, at, f"{prefix}{_IMPORT_LLM_RETRY}{newline}"))
+        else:
+            first = tree.body[0]
+            doc = (
+                isinstance(first, ast.Expr)
+                and isinstance(first.value, ast.Constant)
+                and isinstance(first.value.value, str)
+            )
+            line = (first.end_lineno or first.lineno) if doc else 0
+            at = _line_end_offset(src, line) if line else 0
+            edits.append((at, at, f"{_IMPORT_LLM_RETRY}{newline}"))
+
+    new_text = text
+    for start, end, repl in sorted(edits, key=lambda e: e[0], reverse=True):
+        new_text = new_text[:start] + repl + new_text[end:]
+    try:
+        ast.parse(new_text)
+    except SyntaxError as exc:
+        result.unsupported.append(Unsupported(exc.lineno or 1, 0, f"rewrite aborted: {exc.msg}"))
+        result.changes.clear()
+        return result
+    result.text = new_text
+    return result
+
+
+def _line_map(old: str, new: str) -> list[int]:
+    """For each 1-based line of ``new`` (index 0 unused), the matching line of ``old``."""
+    a, b = old.splitlines(), new.splitlines()
+    mapping = [1] * (len(b) + 2)
+    for tag, i1, _i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+        for j in range(j1, j2):
+            mapping[j + 1] = i1 + 1 + (j - j1 if tag == "equal" else 0)
+    return mapping
+
+
 # ---------------------------------------------------------------------------- CLI
 
 
@@ -954,7 +1389,7 @@ def main(argv: list[str] | None = None) -> int:
     """
     parser = argparse.ArgumentParser(
         prog="python -m python_wrap migrate",
-        description="Rewrite tenacity and backoff retry decorators to python_wrap.retry.",
+        description="Rewrite tenacity/backoff decorators and LLM retry loops to python_wrap.",
     )
     parser.add_argument("paths", nargs="+", metavar="PATH", help="files or directories")
     parser.add_argument("--write", action="store_true", help="write the rewritten files")
@@ -979,7 +1414,8 @@ def main(argv: list[str] | None = None) -> int:
             continue
         changed_files += 1
         for change in result.changes:
-            print(f"{path}:{change.line}:{change.col + 1}: rewrote decorator")
+            what = "retry loop" if change.kind == "loop" else "decorator"
+            print(f"{path}:{change.line}:{change.col + 1}: rewrote {what}")
             for note in change.notes:
                 print(f"    note: {note}")
         if args.diff:
@@ -995,7 +1431,12 @@ def main(argv: list[str] | None = None) -> int:
             path.write_bytes(result.text.encode(encoding))
             print(f"{path}: written")
         else:
-            print(f"{path}: would rewrite {len(result.changes)} decorator(s)")
+            decos = sum(1 for c in result.changes if c.kind == "decorator")
+            loops_n = len(result.changes) - decos
+            parts = ([f"{decos} decorator(s)"] if decos else []) + (
+                [f"{loops_n} retry loop(s)"] if loops_n else []
+            )
+            print(f"{path}: would rewrite {' and '.join(parts)}")
     verb = "rewrote" if args.write else "would rewrite"
     print(f"{verb} {changed_files} file(s); {unsupported_total} unsupported finding(s)")
     if errors:

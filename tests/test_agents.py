@@ -658,3 +658,60 @@ def test_pw017_unbounded_runs() -> None:
     report = explain(tools)
     assert "PW017" in codes(report) and "PW016" in codes(report)
     assert "PW017" not in codes(explain(ToolRegistry(guard=RunGuard(max_steps=3))))
+
+
+def test_llm_budget_opens_run_scope_and_surfaces_as_run_error() -> None:
+    from python_wrap.llm import Budget as LlmBudget
+    from python_wrap.llm import BudgetExceeded
+
+    spend = LlmBudget(tokens=100, per="run")
+
+    @spend
+    def call() -> dict[str, object]:
+        return {"usage": {"input_tokens": 60, "output_tokens": 50}}
+
+    with pytest.raises(RuntimeError):
+        call()  # no run active
+    with agent_run(budget=spend):
+        record_step("llm", "m")
+        call()  # crosses the limit but is returned
+        with pytest.raises(RunBudgetExceeded):
+            record_step("llm", "m")
+        with pytest.raises(BudgetExceeded):
+            call()  # direct calls keep their own error
+    with agent_run(budget=spend):  # a fresh run starts from zero
+        record_step("llm", "m")
+        call()
+
+
+def test_llm_total_budget_checked_by_run() -> None:
+    from python_wrap.llm import Budget as LlmBudget
+
+    spend = LlmBudget(tokens=10)
+
+    @spend
+    def call() -> dict[str, object]:
+        return {"usage": {"prompt_tokens": 8, "completion_tokens": 8}}
+
+    with agent_run(budget=spend):
+        call()
+        with pytest.raises(RunBudgetExceeded):
+            record_step("llm", "m")
+
+
+def test_llm_budget_run_scope_async() -> None:
+    from python_wrap.llm import Budget as LlmBudget
+
+    spend = LlmBudget(tokens=5, per="chain")
+
+    @spend
+    async def call() -> dict[str, object]:
+        return {"usage": {"input_tokens": 4, "output_tokens": 4}}
+
+    async def main() -> None:
+        async with agent_run(budget=spend):
+            await call()
+            with pytest.raises(RunBudgetExceeded):
+                record_step("llm", "m")
+
+    asyncio.run(main())
