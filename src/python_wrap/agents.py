@@ -394,6 +394,7 @@ class AgentRun:
         self._user_cancelled = False
         self._resets: tuple[Any, ...] = ()
         self._timer: Any = None
+        self._scope: Any = None
 
     @property
     def steps(self) -> int:
@@ -461,7 +462,17 @@ class AgentRun:
         if self._user_cancelled:
             raise RunCancelled(f"agent run {self.run_id} was cancelled", run_id=self.run_id)
         budget = self.guard.budget
-        if budget is not None:
+        if _is_llm_budget(budget):
+            if self._scope is not None:
+                over = budget._over(self._scope.spent)
+            else:
+                over = budget.per == "total" and budget.exhausted()
+            if over:
+                raise RunBudgetExceeded(
+                    f"agent run {self.run_id}: budget {budget.name!r} exhausted",
+                    run_id=self.run_id,
+                )
+        elif budget is not None:
             checker = getattr(budget, "check", None)
             if callable(checker):
                 checker()
@@ -570,6 +581,12 @@ def record_step(kind: str, name: str, arguments: Mapping[str, Any] | None = None
     return None if run is None else run.step(kind, name, arguments)
 
 
+def _is_llm_budget(budget: Any) -> bool:
+    from python_wrap.llm import Budget
+
+    return isinstance(budget, Budget)
+
+
 class RunGuard:
     """Limits for an agent run; enter it (``with`` / ``async with``) or decorate a loop.
 
@@ -651,6 +668,9 @@ class RunGuard:
             run_id_var.set(run.run_id),
             _current_token.set(run.token),
         )
+        if _is_llm_budget(self.budget) and self.budget.per in ("run", "chain"):
+            run._scope = self.budget.run()
+            run._scope.__enter__()
         _core.emit(
             "agent.run.start",
             self.name,
@@ -666,6 +686,9 @@ class RunGuard:
         timer, run._timer = run._timer, None
         if timer is not None:
             timer.cancel()
+        scope, run._scope = run._scope, None
+        if scope is not None:
+            scope.__exit__(None, None, None)
         run_token, id_token, cancel_token = run._resets
         _current_token.reset(cancel_token)
         run_id_var.reset(id_token)

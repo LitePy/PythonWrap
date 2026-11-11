@@ -105,7 +105,7 @@ In tests:
     assert explain(users_api, idempotent=True).ok
 
 Exit status 1 means an error (or any finding with `--strict`). Fix every error; review
-every warning. Finding codes PW001-PW012 are listed in the docs
+every warning. Finding codes PW001-PW017 are listed in the docs
 (features/resilience/presets-and-doctor).
 
 ---
@@ -1359,6 +1359,12 @@ assert agent("again") == 3  # each top-level run gets a fresh allowance
 ```
 
 Context variables carry a run into tasks (`asyncio.gather`), `hedge` and `run_in_thread`.
+
+**With `agent_run`**: pass the budget itself, `agent_run(budget=loop_budget)`. Entering the
+run opens the budget's `run()` scope, so decorated LLM calls inside draw on that run's
+counter, and once it is used up the next step raises `RunBudgetExceeded` (see
+[Agent safety](agent-safety.md#using-an-llm-budget)). A decorated call made directly still
+raises `BudgetExceeded`.
 For streamed responses the usage arrives with the last chunk: call
 `budget.record(final_usage)` yourself.
 
@@ -1934,7 +1940,29 @@ assert len(attempts) == 2
 | `max_steps` | `StepLimitExceeded` on the step after the limit. Tool calls count automatically; count LLM calls with `record_step("llm", model)`. |
 | `max_seconds` | `RunTimeout` (also a `TimeoutExpired` and `TimeoutError`) on the next step once the time is up. |
 | `max_repeats` | `LoopDetected` when one identical call (same kind, name and arguments) was already made that many times. |
-| `budget` | Checked before each step: its `check()` is called if it has one, and `exhausted == True` raises `RunBudgetExceeded`. |
+| `budget` | Checked before each step. A `python_wrap.llm.Budget` opens its per-run scope for the run (see below); any other object has its `check()` called if it has one, and `exhausted == True` raises `RunBudgetExceeded`. |
+
+#### Using an LLM `Budget`
+
+Pass a real `python_wrap.llm.Budget` and entering the run opens that budget's run scope (`budget.run()`), closed on exit. Every LLM call decorated with it inside the run draws on one fresh counter (`per="run"` or `"chain"`; a `per="total"` budget is checked as it stands). Once the counter is used up, the next step raises `RunBudgetExceeded`; a decorated call made directly still raises `llm.BudgetExceeded`.
+
+```python
+from python_wrap import RunBudgetExceeded, agent_run, record_step
+from python_wrap.llm import Budget
+
+spend = Budget(tokens=100, per="run")
+
+@spend
+def ask(prompt: str) -> dict:
+    return {"usage": {"input_tokens": 80, "output_tokens": 40}}
+
+with agent_run(budget=spend):
+    ask("plan")  # crosses the limit; the paid-for result is returned
+    try:
+        record_step("llm", "model")
+    except RunBudgetExceeded:
+        print("run budget used up")
+```
 
 ```python
 from python_wrap import LoopDetected, agent_run, record_step, tool
@@ -2200,7 +2228,7 @@ only. Its tools are all read-only:
 | Tool | Arguments | Returns |
 | --- | --- | --- |
 | `explain_policy` | `import_path` | layers outermost first, canonical order, findings |
-| `doctor` | `import_path`, `idempotent=true`, `multiprocess=false` | `ok`, layers, findings (PW001-PW012) |
+| `doctor` | `import_path`, `idempotent=true`, `multiprocess=false` | `ok`, layers, findings (PW001-PW017) |
 | `migrate_preview` | `source`, `filename` | unified diff of the tenacity/backoff codemod, notes; never writes |
 | `search_api` | `query`, `limit=10` | matching names with signatures and summaries |
 | `get_symbol` | `name` | signature, parameters, raises, example |
@@ -2482,6 +2510,8 @@ assert "PW006" in [finding.code for finding in report.findings]  # timeout outsi
 ```
 
 #### Findings
+
+The doctor reports codes PW001 to PW017 (the table lists them by group, not strictly in numeric order).
 
 | Code | Severity | Meaning |
 | --- | --- | --- |
@@ -3729,7 +3759,7 @@ Every public name: `python_wrap.__all__` first, then names public only in a subm
   In-process call metrics: `count_calls` tracks calls, errors, concurrency and latency.
 - `python_wrap.migrate`
   Codemod that rewrites tenacity and backoff decorators to ``python_wrap.retry``.
-- `python_wrap.migrate.Change`: `Change(line: int, col: int, before: str, after: str, notes: tuple[str, ...] = ())`
+- `python_wrap.migrate.Change`: `Change(line: int, col: int, before: str, after: str, notes: tuple[str, ...] = (), kind: str = 'decorator')`
   One decorator that was rewritten.
 - `python_wrap.migrate.MigrationResult`: `MigrationResult(text: str, changes: list[Change] = <factory>, unsupported: list[Unsupported] = <factory>)`
   Outcome of `migrate_source`.
@@ -3738,7 +3768,7 @@ Every public name: `python_wrap.__all__` first, then names public only in a subm
 - `python_wrap.migrate.main`: `main(argv: list[str] | None = None) -> int`
   Command-line entry point for ``python -m python_wrap migrate``.
 - `python_wrap.migrate.migrate_source`: `migrate_source(text: str, filename: str = '<string>') -> MigrationResult`
-  Rewrite tenacity/backoff retry decorators in ``text`` to ``python_wrap.retry``.
+  Rewrite tenacity/backoff decorators and LLM retry loops in ``text``.
 - `python_wrap.observability`
   Opt-in OpenTelemetry and Sentry adapters for decorator events.
 - `python_wrap.observability.Breadcrumbs`: `Breadcrumbs(sentry: Any, prefixes: tuple[str, ...])`

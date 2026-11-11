@@ -304,3 +304,14 @@ def test_oversized_migrate_source_is_rejected() -> None:
         }
     )
     assert reply is not None and reply["result"]["isError"] is True
+
+
+def test_migrate_preview_reports_llm_retry_loops(pipe: Pipe) -> None:
+    source = (
+        "import time\n\n\ndef ask(client):\n    for n in range(3):\n        try:\n"
+        "            return client.messages.create(model='m')\n"
+        "        except Exception:\n            time.sleep(1)\n"
+    )
+    data = pipe.call("migrate_preview", source=source)["structuredContent"]
+    assert data["changed"] is True and "@llm_retry(max_attempts=3, delay=1)" in data["diff"]
+    assert data["changes"][0]["line"] == 5

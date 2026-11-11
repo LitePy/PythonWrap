@@ -1,6 +1,6 @@
 # The migration tool
 
-`python -m python_wrap migrate` rewrites the retry decorators of **tenacity** and **backoff** to `python_wrap.retry`. It is a small, conservative codemod built on the standard library (`ast` plus text slicing, so formatting and comments outside the decorator are untouched). It never imports tenacity or backoff and needs neither installed.
+`python -m python_wrap migrate` rewrites the retry decorators of **tenacity** and **backoff** to `python_wrap.retry`, and hand-rolled retry loops around LLM client calls to `llm_retry` (see [LLM retry loops](#llm-retry-loops)). It is a small, conservative codemod built on the standard library (`ast` plus text slicing, so formatting and comments outside the decorator are untouched). It never imports tenacity or backoff and needs neither installed.
 
 ```
 python -m python_wrap migrate [--write] [--diff] PATH...
@@ -88,6 +88,46 @@ assert result.changes[0].line == 3
 ### Imports
 
 Imports from `tenacity` and `backoff` that are no longer used are removed, and `from python_wrap import retry` is added where the first one was. Names that are still referenced, such as `Retrying` or `RetryError`, stay and are reported. If a still-used tenacity `retry` (or any other `retry` in the module) would clash with the new name, the new one is imported as `python_wrap_retry`.
+
+## LLM retry loops
+
+Many services retry LLM calls with a `for`/`while` loop, a `try`/`except` and a `time.sleep`. The codemod finds these by the shape of the call, with no SDK import needed: a loop containing a `try` and a `sleep(...)`/`time.sleep(...)`/`asyncio.sleep(...)` around a call whose attribute path ends in `.messages.create`, `.chat.completions.create`, `.completions.create`, `.responses.create`, `.generate_content` or `.generate_content_async`.
+
+A loop is **rewritten** only when every one of these holds (otherwise nothing is touched):
+
+- it is `for <name> in range(<integer literal >= 2>)` with no `else`, and is the whole body of a function (a docstring is fine), so nothing else would be retried or lost;
+- the loop body is one `try` whose body is exactly `return <llm call>` (or `return await <llm call>`), with no `else`/`finally`, and the call does not use the loop variable;
+- each `except` block only sleeps (plus `pass`, `continue` or the loop's own `if attempt == N - 1: raise`) and does not use the caught exception;
+- there is exactly one sleep, whose argument is a number or `<number> * 2 ** <attempt>`.
+
+The function then gets `@llm_retry(max_attempts=N, delay=<first sleep>)` as its innermost decorator, the loop becomes `return <call>`, and `from python_wrap.llm import llm_retry` is added after the last top-level import (an existing `llm_retry` import is reused). Notes on the change list the behaviour differences: only transient errors are retried, waits double with jitter and honour `Retry-After`, and the last error is raised when attempts run out. `time`/`asyncio` imports that become unused are left for your linter.
+
+Every other retry loop (a `while` loop, logging in the `except`, code or a final `raise` after the loop, a computed sleep, state kept between attempts) is **reported, not rewritten**, with the line range, the call, the reason and the fix:
+
+```
+svc.py:5:5: unsupported: hand-rolled retry loop around `client.responses.create(...)` (lines 5-10) not rewritten: an except block does more than sleep (logging, state changes or other statements; line 8). Move the single call into its own function decorated with `@llm_retry(max_attempts=..., delay=...)` (from python_wrap.llm) and delete the loop, the sleep and the except block
+```
+
+Dry run, `--diff`, `--write`, exit status and the parse check work exactly as for decorators; the MCP `migrate_preview` tool runs the same code. A file with both tenacity decorators and retry loops is handled in one pass, and reported line numbers refer to the original file.
+
+```python
+from python_wrap.migrate import migrate_source
+
+source = """\
+import time
+
+
+def ask(client, prompt):
+    for attempt in range(3):
+        try:
+            return client.messages.create(model="m-1", messages=prompt)
+        except Exception:
+            time.sleep(1)
+"""
+result = migrate_source(source)
+assert "@llm_retry(max_attempts=3, delay=1)" in result.text
+assert result.changes[0].kind == "loop" and result.changes[0].line == 5
+```
 
 ## What it reports and leaves alone
 

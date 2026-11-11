@@ -99,5 +99,5 @@ In tests:
     assert explain(users_api, idempotent=True).ok
 
 Exit status 1 means an error (or any finding with `--strict`). Fix every error; review
-every warning. Finding codes PW001-PW012 are listed in the docs
+every warning. Finding codes PW001-PW017 are listed in the docs
 (features/resilience/presets-and-doctor).

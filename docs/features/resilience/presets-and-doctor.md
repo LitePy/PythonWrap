@@ -94,6 +94,8 @@ assert "PW006" in [finding.code for finding in report.findings]  # timeout outsi
 
 ### Findings
 
+The doctor reports codes PW001 to PW017 (the table lists them by group, not strictly in numeric order).
+
 | Code | Severity | Meaning |
 | --- | --- | --- |
 | PW001 | error | Retry with neither `max_attempts` nor `max_time`: it retries forever. |

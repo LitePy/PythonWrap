@@ -20,6 +20,17 @@ cancellation, per-instance state for `throttle`/`debounce`/`rate_limit`, single-
 
 ### Added
 
+- `agent_run(budget=...)` / `RunGuard` accept a real `python_wrap.llm.Budget`: entering the run
+  opens the budget's per-run scope, so decorated LLM calls draw on it, and the next step raises
+  `RunBudgetExceeded` once it is spent (direct calls still raise `BudgetExceeded`).
+- `python -m python_wrap migrate` (and the MCP `migrate_preview` tool) detects hand-rolled
+  retry loops around LLM client calls and rewrites the safe `for ... in range(N)` shape to an
+  `@llm_retry` function; every other loop is reported with line numbers and a suggestion.
+  `Change` gains a `kind` field.
+- LLM and agent recipes in the packaged recipe index, cookbook pages (resilient LLM client,
+  agent tool layer, building with AI coding agents) and two runnable examples. The doctor
+  range is documented as PW001 to PW017 and the threat model covers prompt and audit-tape
+  data handling.
 - LLM test doubles: `fake_llm` / `FakeProvider` (scripted replies, sync/async/streaming with
   `fake_clock`-driven delays, call recording, Anthropic- and OpenAI-style usage, token and call
   assertions) and `chaos.llm` fault rules (`rate_limit`, `overloaded`, `server_error`, `timeout`,

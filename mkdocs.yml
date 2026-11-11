@@ -224,6 +224,9 @@ nav:
       - Observability: cookbook/observability.md
       - Framework integrations: cookbook/framework-integrations.md
       - Existing FastAPI application: cookbook/existing-fastapi-app.md
+      - Resilient LLM client: cookbook/resilient-llm-client.md
+      - Agent tool layer: cookbook/agent-tool-layer.md
+      - Building with AI coding agents: cookbook/building-with-agents.md
   - API reference:
       - api/index.md
       - Resilience:

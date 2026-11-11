@@ -96,7 +96,29 @@ assert len(attempts) == 2
 | `max_steps` | `StepLimitExceeded` on the step after the limit. Tool calls count automatically; count LLM calls with `record_step("llm", model)`. |
 | `max_seconds` | `RunTimeout` (also a `TimeoutExpired` and `TimeoutError`) on the next step once the time is up. |
 | `max_repeats` | `LoopDetected` when one identical call (same kind, name and arguments) was already made that many times. |
-| `budget` | Checked before each step: its `check()` is called if it has one, and `exhausted == True` raises `RunBudgetExceeded`. |
+| `budget` | Checked before each step. A `python_wrap.llm.Budget` opens its per-run scope for the run (see below); any other object has its `check()` called if it has one, and `exhausted == True` raises `RunBudgetExceeded`. |
+
+### Using an LLM `Budget`
+
+Pass a real `python_wrap.llm.Budget` and entering the run opens that budget's run scope (`budget.run()`), closed on exit. Every LLM call decorated with it inside the run draws on one fresh counter (`per="run"` or `"chain"`; a `per="total"` budget is checked as it stands). Once the counter is used up, the next step raises `RunBudgetExceeded`; a decorated call made directly still raises `llm.BudgetExceeded`.
+
+```python
+from python_wrap import RunBudgetExceeded, agent_run, record_step
+from python_wrap.llm import Budget
+
+spend = Budget(tokens=100, per="run")
+
+@spend
+def ask(prompt: str) -> dict:
+    return {"usage": {"input_tokens": 80, "output_tokens": 40}}
+
+with agent_run(budget=spend):
+    ask("plan")  # crosses the limit; the paid-for result is returned
+    try:
+        record_step("llm", "model")
+    except RunBudgetExceeded:
+        print("run budget used up")
+```
 
 ```python
 from python_wrap import LoopDetected, agent_run, record_step, tool
