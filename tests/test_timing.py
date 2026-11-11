@@ -437,3 +437,194 @@ def test_timing_skips_formatting_when_level_disabled(
     assert seen == []  # nothing formatted, yet the callback ran for both calls
     assert len(records) == 2
     assert caplog.records == []
+
+
+# ------------------------------------------------- measure_memory / profile isolation
+
+
+def test_measure_memory_serialises_threads() -> None:
+    import threading
+
+    records: list[MemoryRecord] = []
+    inside = 0
+    overlap = 0
+    guard = threading.Lock()
+
+    @measure_memory(callback=records.append)
+    def work(size: int) -> int:
+        nonlocal inside, overlap
+        with guard:
+            inside += 1
+            overlap = max(overlap, inside)
+        data = bytearray(size)
+        threading.Event().wait(0.02)
+        with guard:
+            inside -= 1
+        return len(data)
+
+    threads = [threading.Thread(target=work, args=(100_000 * (i + 1),)) for i in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert overlap == 1
+    assert sorted(r.peak_bytes >= 100_000 for r in records) == [True] * 4
+    assert not tracemalloc.is_tracing()
+
+
+def test_measure_memory_serialises_tasks_and_keeps_peaks_apart() -> None:
+    records: list[MemoryRecord] = []
+    order: list[str] = []
+
+    @measure_memory(callback=records.append)
+    async def work(label: str, size: int) -> None:
+        order.append(f"start {label}")
+        data = bytearray(size)
+        await asyncio.sleep(0.01)
+        del data
+        order.append(f"end {label}")
+
+    async def main() -> None:
+        await asyncio.gather(work("big", 4_000_000), work("small", 1000))
+
+    asyncio.run(main())
+    assert order == ["start big", "end big", "start small", "end small"]
+    small = records[1]
+    assert small.peak_bytes < 1_000_000  # not polluted by the big call's peak
+
+
+def test_measure_memory_child_tasks_do_not_deadlock() -> None:
+    @measure_memory
+    async def leaf() -> int:
+        await asyncio.sleep(0)
+        return 1
+
+    @measure_memory
+    async def parent() -> int:
+        values = await asyncio.gather(leaf(), leaf(), asyncio.to_thread(sync_leaf))
+        return sum(values)
+
+    @measure_memory
+    def sync_leaf() -> int:
+        return 1
+
+    assert asyncio.run(asyncio.wait_for(parent(), 5)) == 3
+    assert not tracemalloc.is_tracing()
+
+
+def test_measure_memory_exclusive_false_allows_overlap() -> None:
+    import threading
+
+    inside = 0
+    overlap = 0
+    guard = threading.Lock()
+    barrier = threading.Barrier(2, timeout=5)
+
+    @measure_memory(exclusive=False)
+    def work() -> None:
+        nonlocal inside, overlap
+        with guard:
+            inside += 1
+            overlap = max(overlap, inside)
+        barrier.wait()
+        with guard:
+            inside -= 1
+
+    threads = [threading.Thread(target=work) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert overlap == 2
+
+
+def test_measure_memory_releases_gate_on_error() -> None:
+    @measure_memory
+    def boom() -> None:
+        raise ValueError
+
+    @measure_memory
+    async def aboom() -> None:
+        raise KeyError
+
+    with pytest.raises(ValueError):
+        boom()
+    with pytest.raises(KeyError):
+        asyncio.run(aboom())
+    timing_mod = importlib.import_module("python_wrap.timing")
+    assert timing_mod._gate_owner is None
+
+
+def busy(n: int) -> int:
+    return sum(i * i for i in range(n))
+
+
+def other_task_work() -> int:
+    return sum(i * i for i in range(20_000))
+
+
+def test_profile_async_excludes_other_tasks() -> None:
+    seen: list[pstats.Stats] = []
+
+    @profile(callback=seen.append, limit=None)
+    async def mine() -> int:
+        total = busy(1000)
+        for _ in range(5):
+            await asyncio.sleep(0)
+        return total + busy(1000)
+
+    async def noisy() -> None:
+        for _ in range(5):
+            other_task_work()
+            await asyncio.sleep(0)
+
+    async def main() -> int:
+        result, _ = await asyncio.gather(mine(), noisy())
+        return result
+
+    assert asyncio.run(main()) == 2 * busy(1000)
+    names = {func[2] for func in seen[0].stats}  # type: ignore[attr-defined]
+    assert "busy" in names
+    assert "other_task_work" not in names
+
+
+def test_profile_async_propagates_errors_and_cancellation() -> None:
+    @profile
+    async def boom() -> None:
+        await asyncio.sleep(0)
+        raise ValueError("x")
+
+    with pytest.raises(ValueError):
+        asyncio.run(boom())
+
+    cleaned: list[bool] = []
+
+    @profile
+    async def slow() -> None:
+        try:
+            await asyncio.sleep(10)
+        finally:
+            cleaned.append(True)
+
+    async def main() -> None:
+        task = asyncio.create_task(slow())
+        await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(main())
+    assert cleaned == [True]
+
+
+def test_profile_async_accepts_plain_awaitables() -> None:
+    timing_mod = importlib.import_module("python_wrap.timing")
+
+    class Ready:
+        def __await__(self):  # type: ignore[no-untyped-def]
+            return (yield from asyncio.sleep(0, result=7).__await__())
+
+    async def main() -> int:
+        return int(await timing_mod._drive_profiled(Ready(), lambda: False, lambda: None))
+
+    assert asyncio.run(main()) == 7

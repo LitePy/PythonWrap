@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextvars
+import functools
 import io
 import logging
 import statistics
 import sys
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Generator, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, overload
+from typing import TYPE_CHECKING, Any, cast, overload
 
-from python_wrap import _core
+from python_wrap import _core, _fork
 from python_wrap._core import F, LoggerLike, P, R
 from python_wrap.logs import _instrument, _log
 
@@ -357,6 +360,74 @@ def _trace_release() -> None:
             _trace_started_by_us = False
 
 
+# One measured call at a time: tracemalloc has a single, process-wide peak counter, so
+# two overlapping measurements would reset and read each other's peak. The gate is
+# re-entrant for the call holding it: nested measured calls, and tasks or
+# ``asyncio.to_thread`` workers started inside it (they inherit the context variable),
+# enter immediately instead of deadlocking on their parent.
+_gate = threading.Condition(threading.Lock())
+_gate_owner: object | None = None
+_gate_depth = 0
+_measuring: contextvars.ContextVar[object | None] = contextvars.ContextVar(
+    "python_wrap_measuring", default=None
+)
+
+
+def _reset_gate() -> None:
+    global _gate, _gate_owner, _gate_depth
+    _gate = threading.Condition(threading.Lock())
+    _gate_owner, _gate_depth = None, 0
+
+
+_gate_fork_reset = _fork.register_reset(_reset_gate)
+
+
+def _gate_try() -> object | None:
+    """Enter the measurement gate if free (or already ours); return its token or None."""
+    global _gate_owner, _gate_depth
+    held = _measuring.get()
+    with _gate:
+        if _gate_owner is None:
+            _gate_owner, _gate_depth = object(), 1
+            return _gate_owner
+        if held is not None and held is _gate_owner:
+            _gate_depth += 1
+            return held
+        return None
+
+
+def _gate_enter() -> object:
+    """Block the thread until the gate is ours."""
+    while True:
+        token = _gate_try()
+        if token is not None:
+            return token
+        with _gate:
+            if _gate_owner is not None:
+                _gate.wait(0.05)
+
+
+async def _gate_enter_async() -> object:
+    """Wait for the gate without blocking the event loop."""
+    delay = 0.001
+    while True:
+        token = _gate_try()
+        if token is not None:
+            return token
+        # Real sleep, not _core.async_sleep: fake clocks must not turn this into a spin.
+        await asyncio.sleep(delay)
+        delay = min(delay * 2, 0.02)
+
+
+def _gate_exit() -> None:
+    global _gate_owner, _gate_depth
+    with _gate:
+        _gate_depth -= 1
+        if _gate_depth <= 0:
+            _gate_owner, _gate_depth = None, 0
+            _gate.notify_all()
+
+
 @overload
 def measure_memory(func: F, /) -> F: ...
 @overload
@@ -367,6 +438,7 @@ def measure_memory(
     logger: LoggerLike = None,
     level: int = logging.INFO,
     callback: Callable[[MemoryRecord], None] | None = None,
+    exclusive: bool = True,
 ) -> Callable[[F], F]: ...
 def measure_memory(
     func: Callable[..., Any] | None = None,
@@ -375,6 +447,7 @@ def measure_memory(
     logger: LoggerLike = None,
     level: int = logging.INFO,
     callback: Callable[[MemoryRecord], None] | None = None,
+    exclusive: bool = True,
 ) -> Any:
     """Measure the Python memory a call allocates, using `tracemalloc`.
 
@@ -383,17 +456,29 @@ def measure_memory(
     running and stopped afterwards only if this decorator started it. Logs
     ``<name> peak memory 1.00 MiB (net +12.00 KiB)``.
 
+    Measured calls are serialised (``exclusive=True``, the default): ``tracemalloc``
+    has one process-wide peak counter, so overlapping measurements would reset and read
+    each other's peak. A measured call made while another is running in a different
+    thread or task waits for it to finish (threads block, coroutines wait with
+    ``await``). Nested measured calls, and tasks or ``asyncio.to_thread`` workers started
+    inside a measured call, do not wait: they are part of the outer measurement.
+
     Note:
-        ``tracemalloc`` is process-global: allocations made by other threads or asyncio
-        tasks while the call runs are counted too, and the peak counter is reset at the
-        start of every measured call. Only memory allocated by Python (not by C
+        ``tracemalloc`` is process-global: allocations made by *unmeasured* threads or
+        asyncio tasks while the call runs are still counted, and a nested measured call
+        resets the outer call's peak. Only memory allocated by Python (not by C
         extensions that bypass its allocator) is seen, and tracing slows the program.
+        A measured function that starts a plain `threading.Thread` running *another*
+        measured function and then joins it would wait forever with ``exclusive=True``;
+        use ``exclusive=False`` there (measurements may then overlap).
 
     Args:
         func: The function, when used as a bare ``@measure_memory``.
         logger: A ``logging.Logger``, a logger name, or ``None`` for the package logger.
         level: Log level.
         callback: Called with a `MemoryRecord` for every call.
+        exclusive: Serialise measured calls process-wide so their numbers are not
+            mixed up. ``False`` restores the unserialised behaviour.
 
     Returns:
         The decorated function, with its signature preserved.
@@ -410,12 +495,12 @@ def measure_memory(
         lg = _core.get_logger(logger)
         name = _core.qualname(f)
 
-        def start(args: tuple[Any, ...], kwargs: dict[str, Any]) -> int:
+        def begin() -> int:
             _trace_acquire()
             tracemalloc.reset_peak()
             return tracemalloc.get_traced_memory()[0]
 
-        def finish(baseline: int, ok: bool, value: Any) -> None:
+        def report(baseline: int) -> None:
             current, peak = tracemalloc.get_traced_memory()
             _trace_release()
             record = MemoryRecord(name, max(peak - baseline, 0), current - baseline)
@@ -428,7 +513,55 @@ def measure_memory(
             )
             _safe_callback(lg, callback, record, name)
 
-        return _instrument(f, start, finish)
+        if not exclusive:
+
+            def start(args: tuple[Any, ...], kwargs: dict[str, Any]) -> int:
+                return begin()
+
+            def finish(baseline: int, ok: bool, value: Any) -> None:
+                report(baseline)
+
+            return _instrument(f, start, finish)
+
+        def safe_report(baseline: int) -> None:
+            try:
+                report(baseline)
+            except Exception:
+                lg.exception("%s: logging hook failed", name)
+
+        if _core.is_async(f):
+
+            @functools.wraps(f)
+            async def awrapper(*args: Any, **kwargs: Any) -> Any:
+                token = await _gate_enter_async()
+                marker = _measuring.set(token)
+                try:
+                    baseline = begin()
+                    try:
+                        return await f(*args, **kwargs)  # type: ignore[misc]
+                    finally:
+                        safe_report(baseline)
+                finally:
+                    _measuring.reset(marker)
+                    _gate_exit()
+
+            return cast("Callable[P, R]", awrapper)
+
+        @functools.wraps(f)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            token = _gate_enter()
+            marker = _measuring.set(token)
+            try:
+                baseline = begin()
+                try:
+                    return f(*args, **kwargs)
+                finally:
+                    safe_report(baseline)
+            finally:
+                _measuring.reset(marker)
+                _gate_exit()
+
+        return cast("Callable[P, R]", wrapper)
 
     return decorate if func is None else decorate(func)
 
@@ -439,6 +572,55 @@ def measure_memory(
 def _another_profiler_active() -> bool:
     # Before 3.12 enabling a second cProfile silently replaces the first one.
     return sys.version_info < (3, 12) and sys.getprofile() is not None
+
+
+class _PassThrough:
+    """Hand one value a coroutine yielded up to the event loop, and the reply back."""
+
+    __slots__ = ("value",)
+
+    def __init__(self, value: Any) -> None:
+        self.value = value
+
+    def __await__(self) -> Generator[Any, Any, Any]:
+        return (yield self.value)
+
+
+async def _drive_profiled(
+    coro: Any, enable: Callable[[], bool], disable: Callable[[], None]
+) -> Any:
+    """Run ``coro`` step by step, profiling only its own steps.
+
+    The profiler is switched on just before each step of the coroutine and off as soon
+    as it suspends, so whatever the event loop runs for other tasks while this one is
+    waiting is not attributed to it.
+    """
+    if not hasattr(coro, "send"):  # an awaitable that is not a coroutine: run it whole
+        return await coro
+    send: Any = None
+    error: BaseException | None = None
+    finished = False
+    try:
+        while True:
+            active = enable()
+            try:
+                yielded = coro.send(send) if error is None else coro.throw(error)
+            except StopIteration as stop:
+                finished = True
+                return stop.value
+            except BaseException:
+                finished = True
+                raise
+            finally:
+                if active:
+                    disable()
+            try:
+                send, error = await _PassThrough(yielded), None
+            except BaseException as exc:  # cancellation and errors go into the coroutine
+                send, error = None, exc
+    finally:
+        if not finished:
+            coro.close()
 
 
 @overload
@@ -469,10 +651,19 @@ def profile(
     If another profiler is already active (Python 3.12+ raises ``ValueError`` when
     profilers nest), a warning is logged once and the function simply runs unprofiled.
 
-    Note:
-        For ``async def`` functions the profiler is enabled for the whole awaited
-        coroutine, so work the event loop does for *other* tasks while this one is
-        suspended is included in the results.
+    For ``async def`` functions the profiler is switched on only while *this* coroutine
+    is running: it is turned off every time the coroutine suspends at an ``await`` and
+    back on when it resumes. Work the event loop does for other tasks in the meantime is
+    therefore not included, and neither is time spent waiting.
+
+    Warning:
+        `cProfile` is process-wide on Python 3.12+ and thread-wide before that. Only one
+        profiled call can be measured at a time in a thread (3.12+: in the process);
+        overlapping profiled calls, including concurrent tasks of the same ``async
+        def`` function, run unprofiled and the warning above is logged. Work an async
+        function hands to other threads (``asyncio.to_thread``, executors) or to tasks
+        it creates is not profiled either. Use ``profile`` for focused investigations,
+        not on hot concurrent paths.
 
     Args:
         func: The function, when used as a bare ``@profile``.
@@ -502,9 +693,8 @@ def profile(
         name = _core.qualname(f)
         warned = False
 
-        def start(args: tuple[Any, ...], kwargs: dict[str, Any]) -> cProfile.Profile | None:
+        def switch_on(profiler: cProfile.Profile) -> bool:
             nonlocal warned
-            profiler = cProfile.Profile()
             try:
                 if _another_profiler_active():
                     raise ValueError("another profiler is active")
@@ -513,13 +703,20 @@ def profile(
                 if not warned:
                     warned = True
                     lg.warning("Another profiler is active; running %s unprofiled", name)
-                return None
-            return profiler
+                return False
+            return True
+
+        def start(args: tuple[Any, ...], kwargs: dict[str, Any]) -> cProfile.Profile | None:
+            profiler = cProfile.Profile()
+            return profiler if switch_on(profiler) else None
 
         def finish(profiler: cProfile.Profile | None, ok: bool, value: Any) -> None:
             if profiler is None:
                 return
             profiler.disable()
+            report(profiler)
+
+        def report(profiler: cProfile.Profile) -> None:
             stream = io.StringIO()
             stats = pstats.Stats(profiler, stream=stream).sort_stats(sort_key)
             if lg.isEnabledFor(level):
@@ -529,6 +726,31 @@ def profile(
                     stats.print_stats(limit)
                 lg.log(level, "Profile of %s:\n%s", name, stream.getvalue().rstrip())
             _safe_callback(lg, callback, stats, name)
+
+        if _core.is_async(f):
+
+            @functools.wraps(f)
+            async def awrapper(*args: Any, **kwargs: Any) -> Any:
+                profiler = cProfile.Profile()
+                stepped = False
+
+                def enable() -> bool:
+                    nonlocal stepped
+                    if switch_on(profiler):
+                        stepped = True
+                        return True
+                    return False
+
+                try:
+                    return await _drive_profiled(f(*args, **kwargs), enable, profiler.disable)
+                finally:
+                    if stepped:
+                        try:
+                            report(profiler)
+                        except Exception:
+                            lg.exception("%s: logging hook failed", name)
+
+            return cast("Callable[P, R]", awrapper)
 
         return _instrument(f, start, finish)
 

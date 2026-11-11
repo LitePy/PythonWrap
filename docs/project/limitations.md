@@ -60,8 +60,8 @@ Also note that for sync functions two threads that miss on the same key at the s
 
 ## `measure_memory` and `profile`
 
-- **`measure_memory`** uses `tracemalloc`, which is process-global. While a call runs, allocations made by other threads or asyncio tasks are counted too, and the peak counter is reset at the start of every measured call, so **concurrent measured calls share one tracker** and their numbers are not independent. Only memory allocated through Python's allocator is seen (C extensions that bypass it are invisible), and tracing slows the program.
-- **`profile`** on an `async def` function enables the profiler for the whole awaited coroutine, so work the event loop does for **other tasks** while this one is suspended is included in the results. If another profiler is already active, python-wrap logs a warning once and runs the function unprofiled.
+- **`measure_memory`** uses `tracemalloc`, which is process-global. Measured calls are therefore **serialised**: a measured call that starts while another one runs in a different thread or task waits for it (coroutines wait with `await`, without blocking the loop), so two measurements never share the peak counter. Allocations made by *unmeasured* threads or tasks during a call are still counted. Nested measured calls (and tasks or `asyncio.to_thread` workers started inside one) join the outer measurement instead of waiting. `exclusive=False` turns serialisation off. Only memory allocated through Python's allocator is seen (C extensions that bypass it are invisible), and tracing slows the program.
+- **`profile`** on an `async def` function switches the profiler on only while that coroutine runs and off at every `await`, so work the event loop does for other tasks is not included. cProfile allows one active profiler per thread (per process on Python 3.12+): overlapping profiled calls, including concurrent tasks of one profiled coroutine function, run unprofiled with a warning logged once. Work handed to threads or to tasks the function creates is not profiled.
 
 ## `revert_on_failure`
 
