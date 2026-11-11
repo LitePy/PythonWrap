@@ -236,6 +236,15 @@ except UnsupportedAnnotationError as exc:
     assert exc.parameter == "who"
 ```
 
+!!! warning "Behaviour change: `TypedDict` is now checked by default"
+    Earlier releases accepted any value for a `TypedDict` annotation. `enforce_types` now
+    rejects a mapping with a missing required key or a wrongly typed present key, and also
+    checks `runtime_checkable` protocols such as `SupportsAbs[int]` with `isinstance`.
+    Code that passed loosely shaped dicts will start raising `ArgumentTypeError`; see
+    [Migrating to 0.3](../../project/migration-0.3.md#stricter-enforce_types). A runnable
+    version of this section is in
+    [`examples/strict_validation.py`](https://github.com/LitePy/PythonWrap/blob/main/examples/strict_validation.py).
+
 ```python
 from typing import Annotated, Literal, Optional
 from python_wrap import ArgumentTypeError, enforce_types

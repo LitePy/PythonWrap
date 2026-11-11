@@ -81,6 +81,23 @@ with tempfile.TemporaryDirectory() as tmp:
     journal.close()
 ```
 
+### Crash and restart, step by step
+
+1. `submit(record)` appends the record to the journal (a committed SQLite transaction)
+   and only then queues it and returns `True`.
+2. The worker takes a batch and calls your handler. If it returns, the batch's records
+   are acknowledged and removed from the journal. If it raises (or the process dies
+   mid-call), nothing is removed.
+3. After the restart a new writer opens the same journal. Its first `submit`, or an
+   explicit `replay()` (which returns the number of records re-queued), feeds the leftover
+   records through the handler again.
+
+A crash between the handler returning and the acknowledgement therefore delivers that
+batch twice. That is what "at least once" means: the writer never loses an accepted
+record, and the handler must treat a repeat as harmless (an upsert or a unique key).
+A runnable version of the walkthrough is in
+[`examples/durable_buffer.py`](https://github.com/LitePy/PythonWrap/blob/main/examples/durable_buffer.py).
+
 | Journal | Storage | Notes |
 | --- | --- | --- |
 | `SQLiteJournal(path, name="default")` | A local SQLite file (stdlib) | Each `append` is a committed transaction (WAL, `synchronous=FULL`). Several writers can share a file with different `name`s. |

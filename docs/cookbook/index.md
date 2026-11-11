@@ -21,6 +21,8 @@ Every recipe that matters has a standalone script in the [`examples/`](https://g
 | [CLI tools and scripts](cli-and-scripts.md) | `timing`, `profile`, `benchmark`, `run_sync`, `debounce`, `throttle` | Step timings, profiles, honest benchmarks, file watchers that rebuild once |
 | [DataLoader-style batching](dataloader-batching.md) | `batch_calls` | N+1 queries collapsed into one, with per-item calling code |
 | [Testing code that uses python-wrap](testing-your-code.md) | `fast_mode`, `fake_clock`, `spy`, `disable_*` | Fast, deterministic tests with no sleeping and no leaked state |
+| [Durable buffered writes](../features/concurrency/buffered-writes.md#durable-writers) | `buffered(journal=)`, `SQLiteJournal`, `replay()` | Writes that survive a crash and are replayed after restart (`examples/durable_buffer.py`) |
+| [Strict validation](../features/correctness/validation.md#supported-annotations) | `enforce_types(strict=True)`, `TypedDict`, `doctor --multiprocess` | Typed boundaries that refuse what they cannot check (`examples/strict_validation.py`) |
 | [Observability](observability.md) | `log_args`, `audit`, `timing` | Redacted, structured logs and an audit trail |
 
 ## Reading order

@@ -67,6 +67,35 @@ fork-safe. Create SQLAlchemy engines, network clients and framework state accord
 those libraries' worker-lifecycle requirements. Distributed backends are opt-in; no default
 cache, limiter or breaker becomes cross-process automatically.
 
+## Stricter `enforce_types`
+
+`enforce_types` used to accept anything for a `TypedDict` annotation and for protocols such
+as `SupportsAbs[int]`. It now checks them, and this is **on by default**:
+
+- a `TypedDict` argument must be a mapping with every required key (`NotRequired` keys may
+  be absent) and each present key must match its annotation; extra keys are allowed;
+- a parameterised `runtime_checkable` protocol is checked with `isinstance`.
+
+A function that was called with a loosely shaped dict now raises `ArgumentTypeError`
+naming the missing or mistyped key. To find affected call sites, run your tests; to keep
+the old behaviour for one function, annotate it with `dict[str, Any]` or `Mapping[str, Any]`
+instead of the `TypedDict`.
+
+The new opt-in `enforce_types(strict=True)` goes the other way: it raises
+`UnsupportedAnnotationError` (a `TypeError`) at decoration time for annotations that cannot
+be checked (protocols that are not `runtime_checkable`, unresolvable forward references,
+`ClassVar`, `Self`) instead of silently accepting them. See
+[Validation](../features/correctness/validation.md#supported-annotations).
+
+## Other opt-in additions
+
+- `measure_memory` serialises concurrent measurements (`exclusive=False` restores the old
+  overlap) and `profile` on `async def` functions only profiles the coroutine's own work.
+- `python -m python_wrap doctor --multiprocess` and `explain(multiprocess=True)` add PW012
+  for process-local limits.
+- `AsyncRedisWindow`, `ThreadedStore` and `buffered(journal=...)` (`SQLiteJournal`,
+  `RedisStreamJournal`) are opt-in; defaults are unchanged.
+
 ## New APIs
 
 - [Named policies and predicates](../features/resilience/named-policies.md).
