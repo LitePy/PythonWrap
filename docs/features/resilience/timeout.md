@@ -65,6 +65,70 @@ The strategy depends on the function and the platform:
 ??? info "Worker thread pool"
     The worker threads are pooled: a finished worker waits (as an idle daemon thread) for the next call instead of a new thread being started per call. At most 8 idle workers are kept, an idle worker exits after about 5 seconds without work, and a worker still running a call that timed out is abandoned: it exits when that call returns and is never reused. The caller's `contextvars` are copied into the worker on every call.
 
+## Cooperative cancellation
+
+A timeout cannot stop a sync function that runs in a worker thread: the caller gets `TimeoutExpired` while the function carries on. To let the function stop itself, poll the call's `CancelToken`. It is cancelled when the limit is hit (with signals too, if your code swallowed the exception).
+
+| Helper | What it does |
+| --- | --- |
+| `checkpoint()` | Raises `TimeoutExpired` if the enclosing sync `timeout` has fired; otherwise does nothing. |
+| `cancel_requested()` | `True` once it has fired, so you can clean up instead of raising. `False` outside any `timeout`. |
+| `current_token()` | The innermost `CancelToken` (or `None`). `token.wait(seconds)` sleeps but wakes early when cancelled; `token.cancelled` and `token.raise_if_cancelled()` mirror the helpers. |
+
+```python
+import threading
+import time
+from python_wrap import TimeoutExpired, cancel_requested, checkpoint, timeout
+
+written: list[int] = []
+stopped = threading.Event()
+
+@timeout(0.05, use_signals=False)   # worker-thread strategy, same on every platform
+def import_rows() -> None:
+    try:
+        for row in range(10_000):
+            checkpoint()            # raises TimeoutExpired after the limit
+            written.append(row)
+            time.sleep(0.01)
+    finally:
+        stopped.set()
+
+try:
+    import_rows()
+except TimeoutExpired:
+    pass
+assert stopped.wait(2)              # the worker ended itself at its next checkpoint
+assert 0 < len(written) < 100
+
+@timeout(0.05, use_signals=False)
+def sync_files() -> None:
+    while not cancel_requested():   # a boolean, for code that wants to clean up
+        time.sleep(0.01)
+
+try:
+    sync_files()
+except TimeoutExpired:
+    pass
+```
+
+The worker thread gets a copy of the caller's `contextvars`, so the token is visible there. Nested timeouts chain: a token also reports cancelled when an enclosing `timeout` has fired. Outside a `timeout`, all three helpers are harmless. A runnable version is in [`examples/cooperative_timeout.py`](https://github.com/LitePy/PythonWrap/blob/main/examples/cooperative_timeout.py).
+
+!!! note "Platform limits"
+    Cooperation only works if your code polls. Blocking calls (a socket read, `time.sleep(60)`) do not see the token until they return, so use `token.wait()` or the library's own timeout parameter inside them. On Windows, in non-main threads and with `use_signals=False`, polling is the only way to stop the work. On the Unix main thread `SIGALRM` interrupts the call itself. The Windows path has not been exercised by our test runs; see [Limitations](../../project/limitations.md#timeout).
+
+## SIGALRM conflicts
+
+Signal timers are process-wide. If a non-default `SIGALRM` handler or an armed `ITIMER_REAL` timer already exists (a profiler, a watchdog, another library) when the signal strategy starts, `timeout` emits a `SignalTimerConflictWarning` (a `RuntimeWarning`). Both are still restored afterwards, but the other alarm may be delayed or misrouted while the timeout runs. Pass `use_signals=False` to use the worker-thread strategy, or silence the warning with `warnings.filterwarnings`.
+
+`python_wrap.concurrency.foreign_alarm_state()` returns a description of such a handler or timer, or `None`. [`doctor`](presets-and-doctor.md) reports it as PW010, and PW009 flags a sync `timeout` that cannot be enforced preemptively here.
+
+```python
+from python_wrap.concurrency import foreign_alarm_state
+
+state = foreign_alarm_state()
+assert state is None or isinstance(state, str)
+```
+
 ## Timing out a block
 
 The object `timeout(...)` returns is also a context manager, so you can limit a block of code without wrapping it in a function. The same object still works as a decorator.
