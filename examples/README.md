@@ -27,6 +27,9 @@ $ python examples/resilient_http.py
 | [`resilient_llm_client.py`](resilient_llm_client.py) | `llm_client` retry after `Retry-After`, `Budget` refusal, `fallback_models`, `llm_cache` with `fake_llm` | [Resilient LLM client](../docs/cookbook/resilient-llm-client.md) |
 | [`agent_tool_layer.py`](agent_tool_layer.py) | `tool` replay safety, approvals, `agent_run(budget=Budget)`, `traced_*` and `AuditTape` | [Agent tool layer](../docs/cookbook/agent-tool-layer.md) |
 | [`mcp_client_demo.py`](mcp_client_demo.py) | Spawns `python -m python_wrap mcp`, performs the MCP handshake, lists tools, runs the `doctor` tool on two sample policies and asks for a recipe | [Agent-friendly tooling](../docs/features/ai/agent-friendly.md#the-mcp-server) |
+| [`projects/etl_pipeline/`](projects/etl_pipeline/README.md) | A multi-file nightly pipeline: `process_batches` with checkpoint and resume, a `Bulkhead` per source, `timeout` with `checkpoint()`, `idempotent`, `throttle(key=)`, `memoize`, Prometheus export, health, chaos in a test | [Example projects](../docs/cookbook/example-projects.md) |
+| [`projects/llm_gateway/`](projects/llm_gateway/README.md) | A multi-file LLM gateway: per-tenant `Budget` and `token_rate_limit`, `fallback_models` with per-provider breakers, `llm_cache`, `stream_timeout`, a JSONL audit tape, `doctor` and the `python -m python_wrap` CLI | [Example projects](../docs/cookbook/example-projects.md) |
+| [`sdk_adapters/`](sdk_adapters/) | `openai_chat.py`, `anthropic_messages.py`, `pydantic_ai_agent.py`: python-wrap around the real SDKs, lazy imports, SKIP without a key, `--offline` fakes | [Around the real SDKs](../docs/cookbook/sdk-adapters.md) |
 
 Several scripts use `python_wrap.testing.fake_clock` so that backoff sleeps and cache expiry take no real time. That is a handy trick in your own scripts and tests too; see [Testing code that uses python-wrap](../docs/cookbook/testing-your-code.md).
 

@@ -25,6 +25,7 @@ Every recipe that matters has a standalone script in the [`examples/`](https://g
 | [Strict validation](../features/correctness/validation.md#supported-annotations) | `enforce_types(strict=True)`, `TypedDict`, `doctor --multiprocess` | Typed boundaries that refuse what they cannot check (`examples/strict_validation.py`) |
 | [A resilient LLM client](resilient-llm-client.md) | `llm_client`, `Budget`, `fallback_models`, `llm_cache` | Transient-only retries, spend caps, a backup model, cached answers (`examples/resilient_llm_client.py`) |
 | [A safe agent tool layer](agent-tool-layer.md) | `tool`, `agent_run`, `ToolPolicy`, `traced_tool`, `AuditTape` | Replay-proof tools, approvals, run budgets, a redacted audit tape (`examples/agent_tool_layer.py`) |
+| [Around the real SDKs](sdk-adapters.md) | `llm_client`, `Budget`, `ToolRegistry`, `stream_timeout` | python-wrap around the OpenAI and Anthropic SDKs and a pydantic-ai agent, with offline fakes (`examples/sdk_adapters/`) |
 | [Building with AI coding agents](building-with-agents.md) | `llms.txt`, `python -m python_wrap api/recipe/guide/mcp`, `doctor` | A workflow for coding agents to adopt python-wrap correctly |
 | [Observability](observability.md) | `log_args`, `audit`, `timing` | Redacted, structured logs and an audit trail |
 
