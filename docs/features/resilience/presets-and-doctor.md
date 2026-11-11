@@ -103,6 +103,8 @@ assert "PW006" in [finding.code for finding in report.findings]  # timeout outsi
 | PW006 | warning | Layers out of the canonical order (`ROLES`), e.g. a retry wrapping a breaker. |
 | PW007 | warning | More than one retry or breaker layer: attempts multiply. |
 | PW008 | warning | Retry without a `RetryBudget`: retries multiply load during an outage. |
+| PW009 | warning | A sync `timeout` cannot stop the function here (non-main thread, no `SIGALRM`, `use_signals=False`): side effects may continue. Poll `checkpoint()`. |
+| PW010 | warning | `timeout` would take over an existing `SIGALRM` handler or armed timer. |
 
 Use it in a test so a risky change fails CI:
 

@@ -12,6 +12,15 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
 
 ### Added
 
+- Cooperative cancellation for sync `timeout`: `CancelToken`, `cancel_requested()`,
+  `checkpoint()` and `current_token()`. The token is cancelled when the limit is hit, so a
+  function that cannot be stopped preemptively (worker-thread fallback, Windows) can stop
+  itself by polling.
+- `SignalTimerConflictWarning`: `timeout` warns when it takes over a `SIGALRM` that already
+  has a non-default handler or an armed `ITIMER_REAL` timer (both are still restored).
+- Doctor checks PW009 (sync `timeout` that cannot be enforced preemptively: side effects may
+  continue) and PW010 (existing `SIGALRM` handler or timer that `timeout` would take over).
+
 - `Policy.explain()`, `python_wrap.doctor.doctor(func)` and `python -m python_wrap doctor`
   describe every layer of a resilience stack and flag risky combinations: unbounded
   retries, retries of non-idempotent operations, retries without a timeout or budget,

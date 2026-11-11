@@ -255,3 +255,48 @@ def test_cli_dispatches_migrate(tmp_path, capsys):
     source = tmp_path / "jobs.py"
     source.write_text("def f():\n    return 1\n")
     assert cli(["migrate", str(tmp_path)]) == 0
+
+
+def test_pw009_sync_timeout_without_signals():
+    @timeout(1, use_signals=False)
+    def work() -> None: ...
+
+    assert "PW009" in codes(doctor(work))
+
+
+def test_pw009_not_for_async_or_policy_timeouts():
+    @timeout(1)
+    async def work() -> None: ...
+
+    assert "PW009" not in codes(doctor(work))
+    assert "PW009" not in codes(explain(policy(timeout=timeout(1, use_signals=False))))
+
+
+def test_pw009_off_main_thread():
+    import threading
+
+    @timeout(1)
+    def work() -> None: ...
+
+    result: list[list[str]] = []
+    thread = threading.Thread(target=lambda: result.append(codes(doctor(work))))
+    thread.start()
+    thread.join()
+    assert "PW009" in result[0]
+
+
+def test_pw010_existing_sigalrm_handler():
+    import signal
+
+    if not hasattr(signal, "setitimer"):
+        pytest.skip("needs SIGALRM")
+
+    @timeout(1)
+    def work() -> None: ...
+
+    assert "PW010" not in codes(doctor(work))
+    old = signal.signal(signal.SIGALRM, lambda s, f: None)
+    try:
+        assert "PW010" in codes(doctor(work))
+    finally:
+        signal.signal(signal.SIGALRM, old)
