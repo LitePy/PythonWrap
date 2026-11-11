@@ -147,6 +147,24 @@ cancellation, per-instance state for `throttle`/`debounce`/`rate_limit`, single-
   `runtime_checkable`, unresolvable forward references, `ClassVar`, `Self`...) instead of
   accepting them silently; vetted at decoration, or on the first call when a forward
   reference resolves later.
+- `python_wrap.agents`, safe agent tool use: `@tool(read_only=, idempotent_key=,
+  requires_approval=, timeout=, retry=, dry_result=)` deduplicates side-effect tools by an
+  idempotency key from the tool name, canonical arguments and run id, so a retried or
+  replayed call returns the stored result instead of running twice.
+- `RunGuard` / `agent_run(max_steps=, max_seconds=, max_repeats=, budget=)`: a
+  contextvar-based, nesting, sync and async run guard raising `StepLimitExceeded`,
+  `LoopDetected` (identical repeated calls) and `RunTimeout`; `current_run()` exposes the
+  run id, step count and history, `run_id_var` the run id for tracing, and the run's
+  `CancelToken` makes `checkpoint()` stop long tools cooperatively. `record_step()` counts
+  LLM calls.
+- `ToolPolicy` (allow/deny globs, `allow_write=False`, `dry_run=True` returning a declared
+  `dry_result` or a `DryRun` marker) raising `ToolNotAllowed`; sync/async human approvers
+  with a timeout that deny by default (`ApprovalDenied`, `ApprovalTimeout`);
+  `ToolRegistry` dispatches tool calls by name with JSON arguments.
+- Events `agent.run.start`, `agent.run.step`, `agent.run.end`, `tool.call`, `tool.denied`,
+  `tool.replayed`, `tool.dry_run`.
+- Doctor checks PW016 (retried side-effect tool with deduplication turned off) and PW017
+  (agent run or tool registry without step, time or repeat limits).
 
 ### Security
 

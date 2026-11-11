@@ -107,6 +107,8 @@ assert "PW006" in [finding.code for finding in report.findings]  # timeout outsi
 | PW010 | warning | `timeout` would take over an existing `SIGALRM` handler or armed timer. |
 | PW011 | warning | `memoize` on a method with `self` in the key and no `maxsize`, `ttl` or `store`: instances are pinned forever. Use `per_instance=True`. |
 | PW012 | warning | With `multiprocess=True`: a breaker, bulkhead, rate limiter or adaptive limiter without a shared backend, so every worker process enforces its own copy of the limit. |
+| PW016 | error | An agent `tool` with side effects is retried (its own `retry=` or an outer `retry`) but deduplication is off (`idempotent_key=False`): a retried or replayed call runs twice. See [Agent tool safety](../ai/agent-safety.md). |
+| PW017 | warning | An agent run (`RunGuard`, `agent_run`, or a `ToolRegistry` without a guard) sets none of `max_steps`, `max_seconds`, `max_repeats`: a looping model never stops. |
 
 Breakers, bulkheads and limiters keep their state in the process by default. Under a
 process pool (gunicorn or uvicorn workers, Celery prefork, `ProcessPoolExecutor`) that

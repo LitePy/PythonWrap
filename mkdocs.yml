@@ -200,6 +200,8 @@ nav:
       - Configuration: features/configuration.md
       - Dynamic switches: features/switches.md
       - Web helpers: features/web-helpers.md
+      - AI & agents:
+          - Agent tool safety: features/ai/agent-safety.md
   - Testing:
       - testing/index.md
       - Chaos and fault injection: testing/chaos.md
@@ -267,6 +269,8 @@ nav:
       - Configuration: api/config.md
       - Developer tools: api/devtools.md
       - Switches: api/switches.md
+      - AI & agents:
+          - Agents: api/agents.md
       - Framework adapters:
           - Flask: api/flask.md
           - FastAPI and ASGI: api/fastapi.md
