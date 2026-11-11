@@ -14,6 +14,7 @@ $ python examples/resilient_http.py
 | [`web_caching.py`](web_caching.py) | `memoize(ttl=)`, `singleflight` against thundering herds, per-user `rate_limit` (framework-free) | [FastAPI](../docs/cookbook/fastapi.md) |
 | [`service_layer.py`](service_layer.py) | Cached service functions, `transactional` commit/rollback hooks, `deprecate` | [Django](../docs/cookbook/django.md) |
 | [`cli_tools.py`](cli_tools.py) | `timing`, `profile`, `benchmark`, `run_sync`, `debounce`, `throttle` | [CLI tools](../docs/cookbook/cli-and-scripts.md) |
+| [`cooperative_timeout.py`](cooperative_timeout.py) | `checkpoint()`, `cancel_requested()` and `current_token()` stopping a sync function that `timeout` cannot interrupt; `foreign_alarm_state()` | [Timeout](../docs/features/resilience/timeout.md#cooperative-cancellation) |
 | [`dataloader.py`](dataloader.py) | `batch_calls` turning 20 queries into 1 | [DataLoader batching](../docs/cookbook/dataloader-batching.md) |
 | [`audit_logging.py`](audit_logging.py) | `log_args` and `audit` with shared redaction, JSON log lines | [Observability](../docs/cookbook/observability.md) |
 
