@@ -70,8 +70,8 @@ Also note that for sync functions two threads that miss on the same key at the s
 
 ## `measure_memory` and `profile`
 
-- **`measure_memory`** uses `tracemalloc`, which is process-global. While a call runs, allocations made by other threads or asyncio tasks are counted too, and the peak counter is reset at the start of every measured call, so **concurrent measured calls share one tracker** and their numbers are not independent. Only memory allocated through Python's allocator is seen (C extensions that bypass it are invisible), and tracing slows the program.
-- **`profile`** on an `async def` function enables the profiler for the whole awaited coroutine, so work the event loop does for **other tasks** while this one is suspended is included in the results. If another profiler is already active, python-wrap logs a warning once and runs the function unprofiled.
+- **`measure_memory`** uses `tracemalloc`, which is process-global. Measured calls are therefore **serialised**: a measured call that starts while another one runs in a different thread or task waits for it (coroutines wait with `await`, without blocking the loop), so two measurements never share the peak counter. Allocations made by *unmeasured* threads or tasks during a call are still counted. Nested measured calls (and tasks or `asyncio.to_thread` workers started inside one) join the outer measurement instead of waiting. `exclusive=False` turns serialisation off. Only memory allocated through Python's allocator is seen (C extensions that bypass it are invisible), and tracing slows the program.
+- **`profile`** on an `async def` function switches the profiler on only while that coroutine runs and off at every `await`, so work the event loop does for other tasks is not included. cProfile allows one active profiler per thread (per process on Python 3.12+): overlapping profiled calls, including concurrent tasks of one profiled coroutine function, run unprofiled with a warning logged once. Work handed to threads or to tasks the function creates is not profiled.
 
 ## `revert_on_failure`
 
@@ -101,12 +101,15 @@ when that gap matters. [Coordination details](../features/concurrency/leases-and
 `max_waiting` on a shared bulkhead is per process; the backend enforces global active
 capacity. Shared bulkhead `active`/`waiting` statistics are local. External cache counts
 can be unknown (`CacheInfo.currsize is None`), and synchronous Redis cache operations
-can block an async wrapper. An explicit health registry is a structural snapshot, not
+block an async `memoize` wrapper: use `amemoize` with `AsyncRedisStore` or
+`ThreadedStore(RedisStore(...))`, and `AsyncRedisWindow` for async rate limits. An explicit health registry is a structural snapshot, not
 proof that a remote service will accept the next request.
 
-Buffered submissions are in-memory and not durable. Shutdown has a bounded drain,
-failed writes are counted, and pending parent records are discarded in forked children.
-Use a durable broker when accepted work must survive a process crash.
+Buffered submissions are in-memory unless the writer has a `journal=`
+(`SQLiteJournal`, `RedisStreamJournal`), which gives at-least-once delivery with replay
+after a restart. Shutdown has a bounded drain, failed writes are counted, and pending
+parent records are discarded in forked children (a child never replays a journal on its
+own). A journal is not a broker: one journal serves one live writer.
 
 ## Other things to know
 

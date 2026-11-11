@@ -27,8 +27,10 @@ class RedisStore:
 
     `size()` is unknown (None); `cache_info()` never scans Redis. `clear()` scans only
     this namespace, escaping glob metacharacters, and deletes in bounded batches.
-    Async memoize currently calls CacheStore methods synchronously; use a local cache
-    on latency-sensitive event loops or supply a fast local adapter.
+    `memoize` on an ``async def`` function calls CacheStore methods synchronously, so
+    every Redis round trip would block the event loop. For async code use
+    ``amemoize(store=ThreadedStore(RedisStore(...)))`` (round trips in worker threads)
+    or `python_wrap.async_cache.AsyncRedisStore` with a ``redis.asyncio`` client.
     """
 
     def __init__(

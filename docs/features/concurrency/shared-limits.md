@@ -43,6 +43,28 @@ is a lighter decorator around a `RedisWindow`. Async wrappers offload backend ca
 set finite Redis I/O timeouts. Backend errors propagate rather than treating an unknown
 admission decision as success. `reset()`/`clear()` is an administrative/test operation.
 
+`RedisWindow` takes a synchronous client, so async callers spend a worker thread on every
+round trip. With a `redis.asyncio` client use `AsyncRedisWindow` instead: same Lua
+script, keys and semantics (sync and async processes can share one window), but
+`acquire()` is awaited on the event loop. It works with `shared_rate_limit` and
+`RateLimiter(backend=...)` on `async def` functions only; decorating a synchronous
+function with it raises `TypeError`.
+
+<!-- skip -->
+```python
+import redis.asyncio as aioredis
+
+from python_wrap import AsyncRedisWindow, RateLimiter, shared_rate_limit
+
+window = AsyncRedisWindow(aioredis.Redis(), key="myapp:vendor-window", calls=30, period=60)
+
+@shared_rate_limit(window, block=True)
+async def fetch_trials():
+    return await request_trials()
+
+limiter = RateLimiter(backend=window, name="vendor")  # async def code only
+```
+
 ## Shared circuit breakers
 
 <!-- skip -->

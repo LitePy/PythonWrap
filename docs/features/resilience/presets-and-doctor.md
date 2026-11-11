@@ -106,6 +106,25 @@ assert "PW006" in [finding.code for finding in report.findings]  # timeout outsi
 | PW009 | warning | A sync `timeout` cannot stop the function here (non-main thread, no `SIGALRM`, `use_signals=False`): side effects may continue. Poll `checkpoint()`. |
 | PW010 | warning | `timeout` would take over an existing `SIGALRM` handler or armed timer. |
 | PW011 | warning | `memoize` on a method with `self` in the key and no `maxsize`, `ttl` or `store`: instances are pinned forever. Use `per_instance=True`. |
+| PW012 | warning | With `multiprocess=True`: a breaker, bulkhead, rate limiter or adaptive limiter without a shared backend, so every worker process enforces its own copy of the limit. |
+
+Breakers, bulkheads and limiters keep their state in the process by default. Under a
+process pool (gunicorn or uvicorn workers, Celery prefork, `ProcessPoolExecutor`) that
+means N workers allow N times the configured limit, and each worker learns about an
+outage separately. Tell the doctor the code runs that way to get PW012:
+
+```python
+from python_wrap import CircuitBreaker, policy, timeout
+from python_wrap.doctor import explain
+
+stack = policy(breaker=CircuitBreaker(name="vendor"), timeout=timeout(2))
+report = explain(stack, multiprocess=True)
+assert [finding.code for finding in report.findings] == ["PW012"]
+```
+
+Give the layer a shared backend (`RedisBreakerState`, `SQLiteBreakerState`, a lease
+backend for bulkheads, a Redis window for limiters) or size the limit per worker on
+purpose.
 
 Use it in a test so a risky change fails CI:
 
@@ -127,6 +146,7 @@ test_resilience_stacks_are_safe()
 python -m python_wrap doctor myapp.clients:users_policy myapp.jobs:sync_orders
 python -m python_wrap doctor --non-idempotent myapp.payments:charge
 python -m python_wrap doctor --strict myapp.clients:users_policy   # warnings fail too
+python -m python_wrap doctor --multiprocess myapp.clients:users_policy  # PW012 checks
 ```
 
 The exit status is 1 when any report has an error (or any finding with `--strict`).

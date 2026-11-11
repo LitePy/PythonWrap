@@ -115,6 +115,30 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
 - Doctor code PW011: a `memoize`d method keyed on `self` with no `maxsize`, `ttl` or `store`
   pins every instance it sees. The fix is the existing `memoize(per_instance=True)`, which
   keeps instances collectable through weak references. No default changed.
+- Doctor check PW012: `explain(..., multiprocess=True)`, `doctor(..., multiprocess=True)`
+  and `python -m python_wrap doctor --multiprocess` warn about every breaker, bulkhead,
+  rate limiter or adaptive limiter without a shared backend, since each worker process
+  then enforces its own copy of the limit. Doctor layers now report `shared` for
+  bulkheads and rate limiters and recognise `AdaptiveLimiter` layers.
+- Async-friendly Redis backends. `AsyncRedisWindow` is `RedisWindow` for `redis.asyncio`
+  clients (same Lua script and keys): `shared_rate_limit` and `RateLimiter(backend=...)`
+  await it on the event loop instead of spending a worker thread per round trip, and
+  reject it on synchronous functions with `TypeError`. `ThreadedStore(store,
+  executor=None)` turns any synchronous `CacheStore` (such as `RedisStore` with a plain
+  `redis.Redis` client) into an `AsyncCacheStore` for `amemoize`, running each call in a
+  worker thread so it never blocks the loop.
+- Durable buffered writers: `buffered(journal=...)`, `Buffered(journal=...)` and
+  `AsyncBuffered(journal=...)` persist each accepted record before `submit` returns and
+  remove it only after its batch is written, giving at-least-once delivery. Records left
+  over (crash, failed batch, disabled or closed writer) are replayed on the next first
+  `submit` or an explicit `replay()`. Journals: `SQLiteJournal` (stdlib, local file),
+  `RedisStreamJournal` (Redis stream), or any `BufferJournal` implementation. Opt-in;
+  without a journal nothing changes.
+- `enforce_types(strict=True)` raises `UnsupportedAnnotationError` (a `TypeError`, in
+  `python_wrap.validation`) for annotations it cannot check (protocols that are not
+  `runtime_checkable`, unresolvable forward references, `ClassVar`, `Self`...) instead of
+  accepting them silently; vetted at decoration, or on the first call when a forward
+  reference resolves later.
 
 ### Security
 
@@ -152,6 +176,21 @@ plus a manual review); each has a regression test in `tests/test_security_fixes.
   predicates, a framework matrix (oldest and newest Flask, FastAPI, Django, Celery,
   httpx, requests), a benchmark comparison and soak job, and a coverage floor
   (`fail_under = 80`).
+- `enforce_types` now checks `TypedDict` annotations (required keys present, each present
+  key's value checked; extra keys allowed) and parameterised `runtime_checkable`
+  protocols such as `SupportsAbs[int]` (`isinstance`), which it used to accept unchecked.
+  A dict missing a required key now raises `ArgumentTypeError`.
+- `measure_memory` serialises measured calls process-wide (`tracemalloc` has one peak
+  counter): a measured call that overlaps another in a different thread or task waits for
+  it (coroutines without blocking the loop), so concurrent measurements no longer share
+  one tracker. Nested measured calls and tasks or `asyncio.to_thread` workers started
+  inside a measured call join it instead of waiting. New `exclusive=False` restores the
+  old, unserialised behaviour.
+- `profile` on an `async def` function now profiles only that coroutine's own steps: the
+  profiler is switched off at every `await` and back on when it resumes, so work the event
+  loop does for other tasks is no longer attributed to it. Overlapping profiled calls run
+  unprofiled with a warning logged once (cProfile allows one active profiler per thread,
+  per process on 3.12+); this is now documented.
 
 ### Fixed
 

@@ -13,7 +13,7 @@ from python_wrap import _core, _fork
 from python_wrap._runtime import digest, seconds
 from python_wrap.errors import RateLimitExceeded
 
-__all__ = ["Quota", "QuotaExhausted", "RedisWindow", "shared_rate_limit"]
+__all__ = ["AsyncRedisWindow", "Quota", "QuotaExhausted", "RedisWindow", "shared_rate_limit"]
 F = TypeVar("F", bound=Callable[..., Any])
 
 
@@ -111,9 +111,7 @@ redis.call('ZADD',KEYS[1],now,ARGV[3]); redis.call('PEXPIRE',KEYS[1],ARGV[2]); r
 """
 
 
-class RedisWindow:
-    """Atomic sliding-window admission using the Redis server's clock."""
-
+class _WindowConfig:
     def __init__(self, client: Any, key: str, *, calls: int, period: float | str) -> None:
         if isinstance(calls, bool) or not isinstance(calls, int) or calls < 1 or not key:
             raise ValueError("calls must be positive and key nonempty")
@@ -122,36 +120,117 @@ class RedisWindow:
         self.client, self.key, self.calls = client, key, calls
         self.period = seconds(period)
 
-    def acquire(self, key: Any = None) -> float:
-        """Return zero when admitted, otherwise seconds until the oldest slot expires."""
+    def _eval_args(self, key: Any) -> tuple[Any, ...]:
         return (
-            float(
-                self.client.eval(
-                    _WINDOW,
-                    1,
-                    self.key + ":" + digest(key),
-                    self.calls,
-                    max(1, math.ceil(self.period * 1000)),
-                    uuid.uuid4().hex,
-                )
-            )
-            / 1000
+            _WINDOW,
+            1,
+            self.key + ":" + digest(key),
+            self.calls,
+            max(1, math.ceil(self.period * 1000)),
+            uuid.uuid4().hex,
         )
+
+    def _pattern(self) -> str:
+        import re
+
+        return re.sub(r"([\\*?\[\]])", r"\\\1", self.key + ":") + "*"
 
     def admit(self, key: Any = None) -> None:
         # Test-only forced admission; no backend write is needed when limits are bypassed.
         return None
 
-    def clear(self) -> None:
-        import re
 
-        pattern = re.sub(r"([\\*?\[\]])", r"\\\1", self.key + ":") + "*"
-        for key in self.client.scan_iter(match=pattern, count=200):
+class RedisWindow(_WindowConfig):
+    """Atomic sliding-window admission using the Redis server's clock.
+
+    Takes a synchronous ``redis.Redis``-compatible client. Async callers (`RateLimiter`,
+    `shared_rate_limit`) run each round trip in a worker thread; use `AsyncRedisWindow`
+    with a ``redis.asyncio`` client to stay on the event loop instead.
+    """
+
+    def acquire(self, key: Any = None) -> float:
+        """Return zero when admitted, otherwise seconds until the oldest slot expires."""
+        return float(self.client.eval(*self._eval_args(key))) / 1000
+
+    def clear(self) -> None:
+        """Delete every key of this window (all limiter keys)."""
+        for key in self.client.scan_iter(match=self._pattern(), count=200):
             self.client.delete(key)
 
 
-def shared_rate_limit(backend: RedisWindow, *, block: bool = False) -> Callable[[F], F]:
-    """Apply a shared RedisWindow to sync/async functions, respecting test overrides."""
+class AsyncRedisWindow(_WindowConfig):
+    """`RedisWindow` for ``redis.asyncio`` clients: the round trip is awaited, not threaded.
+
+    Same Lua script, keys and semantics as `RedisWindow`, so sync and async processes can
+    share one window. Use it with `shared_rate_limit` or ``RateLimiter(backend=...)`` on
+    ``async def`` functions; synchronous code needs `RedisWindow`. python-wrap never
+    imports redis: pass any client with an awaitable ``eval``/``delete`` and an
+    async-iterator ``scan_iter``.
+
+    Example:
+        ```python
+        import asyncio
+
+        from python_wrap.errors import RateLimitExceeded
+        from python_wrap.quotas import AsyncRedisWindow, shared_rate_limit
+
+
+        class FakeAsyncRedis:  # stands in for redis.asyncio.Redis in this example
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def eval(self, *args: object) -> int:
+                self.calls += 1
+                return 0 if self.calls <= 2 else 500
+
+
+        window = AsyncRedisWindow(FakeAsyncRedis(), "api", calls=2, period=1)
+
+
+        @shared_rate_limit(window)
+        async def call() -> str:
+            return "ok"
+
+
+        async def main() -> None:
+            assert [await call(), await call()] == ["ok", "ok"]
+            try:
+                await call()
+            except RateLimitExceeded as exc:
+                assert exc.retry_after == 0.5
+
+
+        asyncio.run(main())
+        ```
+    """
+
+    async def acquire(self, key: Any = None) -> float:
+        """Return zero when admitted, otherwise seconds until the oldest slot expires."""
+        return float(await self.client.eval(*self._eval_args(key))) / 1000
+
+    async def clear(self) -> None:
+        """Delete every key of this window (all limiter keys)."""
+        async for key in self.client.scan_iter(match=self._pattern(), count=200):
+            await self.client.delete(key)
+
+
+def shared_rate_limit(
+    backend: RedisWindow | AsyncRedisWindow, *, block: bool = False
+) -> Callable[[F], F]:
+    """Apply a shared Redis window to sync/async functions, respecting test overrides.
+
+    With a `RedisWindow`, async functions run each Redis round trip in a worker thread.
+    With an `AsyncRedisWindow` the round trip is awaited on the event loop; it can only
+    decorate ``async def`` functions.
+
+    Raises:
+        TypeError: If an `AsyncRedisWindow` decorates a synchronous function.
+    """
+
+    async def acquire() -> float:
+        if isinstance(backend, AsyncRedisWindow):
+            return await backend.acquire()
+        return await asyncio.to_thread(backend.acquire)
 
     def decorate(func: F) -> F:
         if _core.is_async(func):
@@ -159,7 +238,7 @@ def shared_rate_limit(backend: RedisWindow, *, block: bool = False) -> Callable[
             @functools.wraps(func)
             async def aw(*args: Any, **kw: Any) -> Any:
                 while not _core.overrides.disable_rate_limits:
-                    wait = await asyncio.to_thread(backend.acquire)
+                    wait = await acquire()
                     if wait <= 0:
                         break
                     if not block:
@@ -169,12 +248,19 @@ def shared_rate_limit(backend: RedisWindow, *, block: bool = False) -> Callable[
 
             return cast(F, aw)
 
+        if isinstance(backend, AsyncRedisWindow):
+            raise TypeError(
+                f"{_core.qualname(func)} is synchronous; AsyncRedisWindow needs async def "
+                "functions (use RedisWindow for synchronous code)"
+            )
+        sync_backend = backend
+
         @functools.wraps(func)
         def sw(*args: Any, **kw: Any) -> Any:
             import time
 
             while not _core.overrides.disable_rate_limits:
-                wait = backend.acquire()
+                wait = sync_backend.acquire()
                 if wait <= 0:
                     break
                 if not block:

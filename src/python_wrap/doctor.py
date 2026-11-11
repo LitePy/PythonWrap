@@ -5,14 +5,15 @@ of an already decorated function through ``__wrapped__``. Both return a `Report`
 `findings` flag the combinations that usually cause production incidents: retries
 without a per-attempt timeout, retries of non-idempotent operations, unbounded retries,
 timeouts longer than the whole retry budget, memoized methods keyed on ``self`` with no
-bound (PW011), and layers stacked out of the canonical
-order (`python_wrap.policy.ROLES`).
+bound (PW011), layers stacked out of the canonical order (`python_wrap.policy.ROLES`)
+and, with ``multiprocess=True``, limits that are enforced separately in every worker
+process.
 
 Nothing is called: only configuration attributes are read.
 
 Command line::
 
-    python -m python_wrap doctor package.module:function [--non-idempotent]
+    python -m python_wrap doctor package.module:function [--non-idempotent] [--multiprocess]
 """
 
 from __future__ import annotations
@@ -114,6 +115,7 @@ def _fmt(value: Any) -> str:
 
 def _layer(obj: Any, role: str | None = None) -> Layer:
     """Describe one decorator object or one wrapper function."""
+    from python_wrap.adaptive import AdaptiveLimiter
     from python_wrap.bulkhead import Bulkhead
     from python_wrap.circuit import CircuitBreaker
     from python_wrap.concurrency import RateLimiter, Timeout
@@ -140,9 +142,14 @@ def _layer(obj: Any, role: str | None = None) -> Layer:
             },
         )
     if isinstance(obj, Bulkhead):
-        return Layer(role or "bulkhead", {"max_concurrent": obj.max_concurrent})
+        return Layer(
+            role or "bulkhead",
+            {"max_concurrent": obj.max_concurrent, "shared": obj._shared is not None},
+        )
     if isinstance(obj, RateLimiter):
-        return Layer(role or "limiter", {"name": obj.name})
+        return Layer(role or "limiter", {"name": obj.name, "shared": obj._backend is not None})
+    if isinstance(obj, AdaptiveLimiter):
+        return Layer(role or "adaptive", {"name": obj.name, "shared": False})
     if callable(getattr(obj, "cache_info", None)):
         return Layer(role or "cache", _cache_settings(obj))
     return Layer(role or "unknown", {"decorator": getattr(obj, "__qualname__", type(obj).__name__)})
@@ -174,8 +181,43 @@ def _cache_settings(obj: Any) -> dict[str, Any]:
     return {"self_in_key": self_in_key and params.get("key") is None, "bounded": bounded}
 
 
-def _check(layers: Sequence[Layer], idempotent: bool) -> tuple[Finding, ...]:
+# Layers whose limit is state: without a shared backend each process keeps its own.
+_PER_PROCESS_STATE = {
+    "breaker": "its failure count and open/closed state",
+    "bulkhead": "its concurrency cap",
+    "limiter": "its rate limit",
+    "adaptive": "its adaptive concurrency limit",
+}
+
+
+def _check_processes(layers: Sequence[Layer]) -> list[Finding]:
+    """PW012: limits that every worker process enforces on its own."""
     found: list[Finding] = []
+    for layer in layers:
+        what = _PER_PROCESS_STATE.get(layer.role)
+        if what is None or layer.settings.get("shared"):
+            continue
+        label = layer.settings.get("name")
+        title = f"{layer.role} {label!r}" if label else layer.role
+        found.append(
+            Finding(
+                "PW012",
+                "warning",
+                f"{title} keeps {what} in this process only: under a process pool "
+                "(gunicorn/uvicorn workers, Celery prefork, ProcessPoolExecutor) every "
+                "worker enforces it separately, so N workers allow N times the configured "
+                "limit and each discovers an outage on its own. Give it a shared backend "
+                "(RedisBreakerState/SQLiteBreakerState, a lease backend, a Redis window) "
+                "or size the limit per worker on purpose.",
+            )
+        )
+    return found
+
+
+def _check(
+    layers: Sequence[Layer], idempotent: bool, multiprocess: bool = False
+) -> tuple[Finding, ...]:
+    found: list[Finding] = _check_processes(layers) if multiprocess else []
     roles = [layer.role for layer in layers]
     retries = [layer for layer in layers if layer.role == "retry"]
     timeouts = [layer for layer in layers if layer.role == "timeout"]
@@ -317,7 +359,7 @@ def _check(layers: Sequence[Layer], idempotent: bool) -> tuple[Finding, ...]:
     return tuple(found)
 
 
-def explain(target: Any, *, idempotent: bool = True) -> Report:
+def explain(target: Any, *, idempotent: bool = True, multiprocess: bool = False) -> Report:
     """Describe a `Policy` (or a decorated function) and lint its configuration.
 
     Args:
@@ -325,6 +367,10 @@ def explain(target: Any, *, idempotent: bool = True) -> Report:
             this is the same as `doctor`).
         idempotent: Whether the protected operation is safe to repeat. Pass False for
             payments, emails, non-idempotent POSTs: any retry layer is then an error.
+        multiprocess: Whether the code runs in several worker processes (prefork web
+            servers, Celery prefork, process pools). Breakers, bulkheads and rate
+            limiters without a shared backend then get a PW012 warning: per-worker
+            state is the default.
 
     Returns:
         A `Report`; ``str(report)`` is a readable summary and ``report.ok`` is False
@@ -342,7 +388,7 @@ def explain(target: Any, *, idempotent: bool = True) -> Report:
         ```
     """
     if not isinstance(target, Policy):
-        return doctor(target, idempotent=idempotent)
+        return doctor(target, idempotent=idempotent, multiprocess=multiprocess)
     layers: list[Layer] = [_layer(item, "outer") for item in target._outer]
     for role in ROLES:
         layers += [_layer(item, role) for item in target._roles.get(role, ())]
@@ -353,10 +399,14 @@ def explain(target: Any, *, idempotent: bool = True) -> Report:
         _layer(item, None) if layer.role in {"outer", "inner"} else layer
         for layer, item in zip(layers, target._layers(), strict=True)
     ]
-    return Report(target.name or repr(target), tuple(layers), _check(layers, idempotent))
+    return Report(
+        target.name or repr(target), tuple(layers), _check(layers, idempotent, multiprocess)
+    )
 
 
-def doctor(func: Callable[..., Any], *, idempotent: bool = True) -> Report:
+def doctor(
+    func: Callable[..., Any], *, idempotent: bool = True, multiprocess: bool = False
+) -> Report:
     """Walk a decorated function's ``__wrapped__`` chain and lint the layers found.
 
     Only python-wrap layers are listed (plain ``functools.wraps`` decorators are
@@ -365,6 +415,7 @@ def doctor(func: Callable[..., Any], *, idempotent: bool = True) -> Report:
     Args:
         func: The decorated function (or bound method).
         idempotent: See `explain`.
+        multiprocess: See `explain`.
 
     Returns:
         A `Report`.
@@ -395,7 +446,7 @@ def doctor(func: Callable[..., Any], *, idempotent: bool = True) -> Report:
         elif callable(getattr(current, "cache_info", None)):
             layers.append(Layer("cache", _cache_settings(current)))
         current = getattr(current, "__wrapped__", None)
-    return Report(name, tuple(layers), _check(layers, idempotent))
+    return Report(name, tuple(layers), _check(layers, idempotent, multiprocess))
 
 
 def _resolve(spec: str) -> Any:
@@ -420,13 +471,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="treat the targets as unsafe to repeat (any retry is an error)",
     )
+    parser.add_argument(
+        "--multiprocess",
+        action="store_true",
+        help="the targets run in several worker processes (flag limits kept per process)",
+    )
     parser.add_argument("--strict", action="store_true", help="exit 1 on warnings too")
     args = parser.parse_args(argv)
     if "" not in sys.path:
         sys.path.insert(0, "")
     status = 0
     for spec in args.targets:
-        report = explain(_resolve(spec), idempotent=not args.non_idempotent)
+        report = explain(
+            _resolve(spec), idempotent=not args.non_idempotent, multiprocess=args.multiprocess
+        )
         print(report)
         if not report.ok or (args.strict and report.findings):
             status = 1

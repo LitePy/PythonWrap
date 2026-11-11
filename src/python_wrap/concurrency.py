@@ -1190,6 +1190,9 @@ class RateLimiter:
         block: What the decorator and ``with`` do when over the limit: ``False``
             (default) raises `RateLimitExceeded`, ``True`` waits for a slot.
         name: Label for error messages and events.
+        backend: A shared window such as `python_wrap.quotas.RedisWindow` (called in a
+            worker thread from async code) or `python_wrap.quotas.AsyncRedisWindow`
+            (awaited on the event loop; such a limiter only works in ``async def`` code).
 
     Raises:
         TypeError: If no limit is given, or only one of ``calls`` and ``period``.
@@ -1233,6 +1236,8 @@ class RateLimiter:
         if backend is not None and calls is None and limits is None:
             calls, period = backend.calls, backend.period
         self._backend = backend
+        # A backend whose acquire() is a coroutine (redis.asyncio) is awaited directly.
+        self._async_backend = backend is not None and _core.is_async(backend.acquire)
         self.limits = _limits(calls, period, limits)
         if backend is not None and self.limits != ((backend.calls, backend.period),):
             raise ValueError("limiter limits must match its backend's calls and period")
@@ -1266,6 +1271,11 @@ class RateLimiter:
         """Take a slot in a thread. ``strict`` raises on rejection instead of returning False."""
         if _core.overrides.disable_rate_limits:
             return True
+        if self._async_backend:
+            raise TypeError(
+                f"{label}: this limiter has an async backend; use it from async def code "
+                "(acquire_async, async with, or an async decorated function)"
+            )
         wait = self._window.acquire(key)
         if wait <= 0:
             return True
@@ -1291,17 +1301,20 @@ class RateLimiter:
         _core.emit("rate_limit.waited", label, seconds=_core.monotonic() - start)
         return True
 
+    async def _aacquire(self, key: Hashable) -> float:
+        if self._async_backend:
+            return float(await self._window.acquire(key))
+        if self._backend is not None:
+            return float(await asyncio.to_thread(self._window.acquire, key))
+        return float(self._window.acquire(key))
+
     async def _atake(
         self, key: Hashable, label: str, *, block: bool, timeout: float | None, strict: bool
     ) -> bool:
         """`_take` for coroutines: waits with ``await``."""
         if _core.overrides.disable_rate_limits:
             return True
-        wait = (
-            await asyncio.to_thread(self._window.acquire, key)
-            if self._backend is not None
-            else self._window.acquire(key)
-        )
+        wait = await self._aacquire(key)
         if wait <= 0:
             return True
         if not block:
@@ -1317,13 +1330,9 @@ class RateLimiter:
             await _core.async_sleep(wait)
             if _core.overrides.disable_rate_limits:
                 break
-            wait = (
-                await asyncio.to_thread(self._window.acquire, key)
-                if self._backend is not None
-                else self._window.acquire(key)
-            )
+            wait = await self._aacquire(key)
             if wait > 0 and _core.overrides.no_sleep:
-                if self._backend is not None:
+                if self._backend is not None and not self._async_backend:
                     await asyncio.to_thread(self._window.admit, key)
                 else:
                     self._window.admit(key)
@@ -1341,8 +1350,11 @@ class RateLimiter:
 
         Meant for tests: share one `RateLimiter` (or reach a `rate_limit` limiter with
         `limiter_of`) and reset it between tests. Thread-safe; calls waiting for a slot
-        re-check and may then go through.
+        re-check and may then go through. With an async backend, ``await
+        backend.clear()`` instead.
         """
+        if self._async_backend:
+            raise TypeError("this limiter has an async backend; await backend.clear() instead")
         self._window.clear()
 
     def try_acquire(self) -> bool:
@@ -1440,6 +1452,12 @@ class RateLimiter:
             async_wrapper.__rate_limiter_for__ = for_instance  # type: ignore[attr-defined]
             async_wrapper.__python_wrap_layer__ = ("limiter", self)  # type: ignore[attr-defined]
             return cast(F, async_wrapper)
+
+        if self._async_backend:
+            raise TypeError(
+                f"{label} is synchronous but this limiter has an async backend; "
+                "use RedisWindow for synchronous code"
+            )
 
         @functools.wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> Any:

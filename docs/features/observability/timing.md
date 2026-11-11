@@ -122,7 +122,7 @@ assert records[0].net_bytes > 0                     # the list is still alive
 `peak_bytes` is the highest traced allocation during the call, relative to its start; `net_bytes` is the memory still held at the end minus at the start (it can be negative).
 
 !!! note
-    `tracemalloc` is process-global. Allocations by other threads or tasks while the call runs are counted too, and tracing slows the program. See [Limitations](../../project/limitations.md).
+    `tracemalloc` is process-global, so measured calls are serialised: one that starts while another runs (in another thread or task) waits for it, and coroutines wait without blocking the event loop. Nested measured calls join the outer one. Pass `exclusive=False` to turn this off. Allocations by unmeasured threads or tasks are still counted, and tracing slows the program. See [Limitations](../../project/limitations.md).
 
 ## `profile`
 
@@ -143,6 +143,8 @@ assert isinstance(captured[0], pstats.Stats)
 ```
 
 `sort` is any `pstats.SortKey` value (`"cumulative"` by default, or `"tottime"`, `"calls"`, ...); `limit` is the number of rows logged (`None` for all). If another profiler is already active, a warning is logged once and the function runs unprofiled.
+
+On an `async def` function the profiler is on only while that coroutine itself runs: it is switched off at every `await`, so the other tasks the event loop runs meanwhile are not in the report. Only one profiled call can be active per thread (per process on Python 3.12+), so concurrent tasks of a profiled coroutine run unprofiled, with the warning above. Use `profile` for focused investigations rather than on hot concurrent paths.
 
 ## See also
 

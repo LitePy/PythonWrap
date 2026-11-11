@@ -4,7 +4,8 @@
 loop every cache read and write is a blocking network round trip. This module provides
 the native async path: an `AsyncCacheStore` protocol whose methods are coroutines, two
 implementations (`AsyncMemoryStore`, `AsyncRedisStore` for ``redis.asyncio``-compatible
-clients) and the `amemoize` decorator for ``async def`` functions.
+clients), `ThreadedStore` to run any synchronous store in worker threads, and the
+`amemoize` decorator for ``async def`` functions.
 
 Stored entries are opaque ``(value, expires_at)`` pairs; ``expires_at`` is a Unix
 timestamp (or None) read through ``_core.wall_time`` so ``fake_clock`` controls it.
@@ -13,6 +14,7 @@ timestamp (or None) read through ``_core.wall_time`` so ``fake_clock`` controls 
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import copy
 import functools
 import inspect
@@ -34,6 +36,7 @@ __all__ = [
     "AsyncCacheStore",
     "AsyncMemoryStore",
     "AsyncRedisStore",
+    "ThreadedStore",
     "amemoize",
     "json_codec",
 ]
@@ -270,6 +273,111 @@ class AsyncRedisStore:
     def size(self) -> None:
         """Return None: an exact distributed entry count is intentionally not scanned."""
         return None
+
+
+class ThreadedStore:
+    """Use a synchronous `CacheStore` from async code without blocking the event loop.
+
+    Every ``get``/``set``/``delete``/``clear`` call runs the wrapped store's method in a
+    worker thread (``asyncio.to_thread``, or ``executor`` when given), so a network
+    store such as `python_wrap.stores.RedisStore` with a plain ``redis.Redis`` client
+    becomes an `AsyncCacheStore` for `amemoize`. Prefer `AsyncRedisStore` when a
+    ``redis.asyncio`` client is available: it needs no threads.
+
+    The wrapped store must be thread-safe (the `CacheStore` contract already requires
+    it). A worker thread cannot be interrupted, so a cancelled caller stops waiting but
+    the store call still finishes in the background.
+
+    Args:
+        store: Any synchronous `CacheStore`.
+        executor: A `concurrent.futures.Executor` to run the calls in; ``None`` uses the
+            event loop's default executor (via ``asyncio.to_thread``, which keeps context
+            variables).
+
+    Example:
+        ```python
+        import asyncio
+
+        from python_wrap.async_cache import ThreadedStore, amemoize
+
+
+        class DictStore:  # stands in for RedisStore(redis.Redis(...), prefix=...)
+            def __init__(self) -> None:
+                self.data: dict[object, object] = {}
+
+            def get(self, key):
+                return self.data.get(key)
+
+            def set(self, key, entry, ttl):
+                self.data[key] = entry
+
+            def delete(self, key):
+                return self.data.pop(key, None) is not None
+
+            def clear(self):
+                self.data.clear()
+
+            def __len__(self):
+                return len(self.data)
+
+
+        calls = []
+
+
+        @amemoize(store=ThreadedStore(DictStore()))
+        async def lookup(user_id: int) -> str:
+            calls.append(user_id)
+            return f"user-{user_id}"
+
+
+        async def main() -> None:
+            assert await lookup(1) == await lookup(1) == "user-1"
+            assert calls == [1]
+
+
+        asyncio.run(main())
+        ```
+    """
+
+    def __init__(self, store: Any, *, executor: concurrent.futures.Executor | None = None):
+        for method in ("get", "set", "delete", "clear"):
+            if not callable(getattr(store, method, None)):
+                raise TypeError(f"store must have a callable {method}() method")
+            if inspect.iscoroutinefunction(getattr(store, method)):
+                raise TypeError("store is already asynchronous; pass it to amemoize directly")
+        self.store, self.executor = store, executor
+
+    async def _call(self, func: Callable[..., Any], *args: Any) -> Any:
+        if self.executor is None:
+            return await asyncio.to_thread(func, *args)
+        return await asyncio.get_running_loop().run_in_executor(self.executor, func, *args)
+
+    async def get(self, key: Hashable, /) -> Any | None:
+        """Return the wrapped store's entry, read in a worker thread."""
+        return await self._call(self.store.get, key)
+
+    async def set(self, key: Hashable, entry: Any, ttl: float | None, /) -> None:
+        """Store an entry from a worker thread."""
+        await self._call(self.store.set, key, entry, ttl)
+
+    async def delete(self, key: Hashable, /) -> bool:
+        """Delete one entry from a worker thread; report whether it existed."""
+        return bool(await self._call(self.store.delete, key))
+
+    async def clear(self) -> None:
+        """Clear the wrapped store from a worker thread."""
+        await self._call(self.store.clear)
+
+    def size(self) -> int | None:
+        """The wrapped store's ``size()`` (None if unknown), else ``len()``, else None."""
+        size = getattr(self.store, "size", None)
+        if callable(size):
+            value = size()
+            return None if value is None else int(value)
+        try:
+            return len(self.store)
+        except TypeError:
+            return None
 
 
 def _split(entry: Any) -> tuple[Any, float | None] | None:
