@@ -26,6 +26,15 @@ cancellation, per-instance state for `throttle`/`debounce`/`rate_limit`, single-
   `malformed_json`, `slow_first_token`, `stalled_stream`, `invalid_tool_call`, `refusal`),
   also loadable from `PW_CHAOS` via an `"llm"` key. Look-alike errors live in
   `python_wrap.llm_testing`.
+- `python_wrap.genai`: AI observability and compliance. `traced_llm` / `traced_tool` publish
+  `genai.llm_call` / `genai.tool_call` events with run id, step, tool, model, token usage
+  (SDK-free), cost from an optional price table, latency and inner retry attempts;
+  `instrument()` sets defaults and emits OpenTelemetry GenAI-convention spans when
+  OpenTelemetry is installed. `Redactor` scrubs secrets, emails, card numbers and custom
+  patterns and truncates text; content capture is opt-in. `AuditTape` records calls to
+  memory, JSONL or SQLite; `replay()` returns a `ReplayProvider` serving recorded results
+  with `ReplayMismatch` detection. New `observability.enable_genai` and
+  `genai_span_attributes`.
 - Cooperative cancellation for sync `timeout`: `CancelToken`, `cancel_requested()`,
   `checkpoint()` and `current_token()`. The token is cancelled when the limit is hit, so a
   function that cannot be stopped preemptively (worker-thread fallback, Windows) can stop

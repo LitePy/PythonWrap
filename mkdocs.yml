@@ -202,6 +202,7 @@ nav:
       - Web helpers: features/web-helpers.md
   - AI & agents:
       - Testing agents: features/ai/testing-agents.md
+      - AI observability and audit: features/ai/observability.md
   - Testing:
       - testing/index.md
       - Chaos and fault injection: testing/chaos.md

@@ -21,6 +21,7 @@ $ python examples/resilient_http.py
 | [`llm_chaos.py`](llm_chaos.py) | `fake_llm` + `chaos.llm` faults + `fake_clock`: an agent survives rate limits, overload and broken JSON in milliseconds | [Testing agents](../docs/features/ai/testing-agents.md) |
 | [`durable_buffer.py`](durable_buffer.py) | `Buffered(journal=SQLiteJournal(...))`: records survive a failed destination and a restart, then `replay()` delivers them | [Durable writers](../docs/features/concurrency/buffered-writes.md#durable-writers) |
 | [`strict_validation.py`](strict_validation.py) | `enforce_types(strict=True)`, `TypedDict` checking, `UnsupportedAnnotationError`, doctor `multiprocess=True` (PW012) | [Validation](../docs/features/correctness/validation.md#supported-annotations) |
+| [`agent_audit_trail.py`](agent_audit_trail.py) | `traced_llm`/`traced_tool`, redacted `AuditTape`, retry attempt linkage, `replay` with mismatch detection | [AI observability](../docs/features/ai/observability.md) |
 
 Several scripts use `python_wrap.testing.fake_clock` so that backoff sleeps and cache expiry take no real time. That is a handy trick in your own scripts and tests too; see [Testing code that uses python-wrap](../docs/cookbook/testing-your-code.md).
 
