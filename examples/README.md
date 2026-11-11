@@ -31,3 +31,14 @@ $ python examples/resilient_http.py
 Several scripts use `python_wrap.testing.fake_clock` so that backoff sleeps and cache expiry take no real time. That is a handy trick in your own scripts and tests too; see [Testing code that uses python-wrap](../docs/cookbook/testing-your-code.md).
 
 `tests/test_examples.py` runs every script in this directory in a subprocess, so the examples cannot rot.
+
+## Example projects
+
+Multi-file applications with their own README and tests live in [`projects/`](projects/). See [Example projects](../docs/cookbook/example-projects.md).
+
+| Project | Shows |
+| --- | --- |
+| [`projects/orders_service/`](projects/orders_service/) | An orders service: `http_client` policy, `memoize` + `singleflight`, `idempotent`, per-user `rate_limit`, a journaled `buffered` email outbox with `replay`, `HealthRegistry`, events, `doctor` |
+| [`projects/support_agent/`](projects/support_agent/) | A support agent: `@tool` with approval and idempotency, `RunGuard`, `Budget`, `llm_client`, `fallback_models`, `traced_*` with `Redactor`, `AuditTape` replay, `chaos.llm`, `doctor` |
+
+`tests/test_example_projects.py` runs each project's tests and `main.py` in a subprocess.
