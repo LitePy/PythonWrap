@@ -24,6 +24,7 @@ $ python examples/resilient_http.py
 | [`llm_client.py`](llm_client.py) | `llm_client` retrying 529 after `Retry-After` but not refusals, per-user dollar `Budget`, `token_rate_limit`, `fallback_models`, `stream_timeout`, `llm_cache` against a fake provider | [LLM calls](../docs/features/ai/llm-calls.md) |
 | [`strict_validation.py`](strict_validation.py) | `enforce_types(strict=True)`, `TypedDict` checking, `UnsupportedAnnotationError`, doctor `multiprocess=True` (PW012) | [Validation](../docs/features/correctness/validation.md#supported-annotations) |
 | [`agent_audit_trail.py`](agent_audit_trail.py) | `traced_llm`/`traced_tool`, redacted `AuditTape`, retry attempt linkage, `replay` with mismatch detection | [AI observability](../docs/features/ai/observability.md) |
+| [`mcp_client_demo.py`](mcp_client_demo.py) | Spawns `python -m python_wrap mcp`, performs the MCP handshake, lists tools, runs the `doctor` tool on two sample policies and asks for a recipe | [Agent-friendly tooling](../docs/features/ai/agent-friendly.md#the-mcp-server) |
 
 Several scripts use `python_wrap.testing.fake_clock` so that backoff sleeps and cache expiry take no real time. That is a handy trick in your own scripts and tests too; see [Testing code that uses python-wrap](../docs/cookbook/testing-your-code.md).
 

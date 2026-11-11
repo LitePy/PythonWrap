@@ -1,0 +1,214 @@
+# python-wrap
+
+> Everyday Python decorators that just work. Retry, cache, time out, rate limit and more. Typed, async-aware, zero dependencies.
+
+Install with `pip install python-wrap` (Python 3.10+, no runtime dependencies). Before writing code with it, read the agent guide (`python -m python_wrap guide`), find the right API with `python -m python_wrap recipe <need>` or `python -m python_wrap api search <words>`, check exact parameters with `python -m python_wrap api <symbol>`, and lint the result with `python -m python_wrap doctor module:attribute`. `python -m python_wrap mcp` serves the same tools over the Model Context Protocol. Everything in one file: [llms-full.txt](https://pythonwrap.readthedocs.io/llms-full.txt).
+
+## Docs
+
+- [Home](https://pythonwrap.readthedocs.io/): Everyday Python decorators that just work. Retry, cache, time out, rate limit and more. Typed, async-aware, zero dependencies.
+
+## Get started
+
+- [Get started](https://pythonwrap.readthedocs.io/get-started/): python-wrap is a set of decorators for the problems every project meets: calls that fail, work that repeats, load that needs limiting, and code you cannot see into.
+- [Installation](https://pythonwrap.readthedocs.io/get-started/installation/): python-wrap needs Python 3.10 or newer and has no runtime dependencies.
+- [Quickstart](https://pythonwrap.readthedocs.io/get-started/quickstart/): In about ten minutes you will take one fragile function and make it resilient, cached, observable and fast to test.
+- [Choose a decorator](https://pythonwrap.readthedocs.io/get-started/choosing/): Find your problem, use the decorator in the second column.
+- [Async and methods](https://pythonwrap.readthedocs.io/get-started/async-and-methods/): Every decorator in python-wrap works on `async def` functions.
+- [Stacking decorators](https://pythonwrap.readthedocs.io/get-started/stacking/): Decorators apply bottom to top: the one nearest the `def` wraps the function first, and the one at the top is the outermost layer, the first to see a call and the last to see th...
+- [Errors](https://pythonwrap.readthedocs.io/get-started/errors/): Every exception python-wrap raises on its own behalf derives from one base class, `PythonWrapError`.
+
+## Features
+
+- [Features](https://pythonwrap.readthedocs.io/features/): Every feature works on plain functions, `async def` functions and methods, keeps the wrapped function's signature for your type checker, and has no dependencies.
+- [Developer tools](https://pythonwrap.readthedocs.io/features/devtools/): Tools for evolving an API, faking data, and keeping decorator stacks tidy: `deprecate`, `mock_data`, `compose`, `wrap_methods` and `no_debug`.
+- [Configuration](https://pythonwrap.readthedocs.io/features/configuration/): Repeating `retry(max_attempts=5, delay=0.5, ...)` or `redact=(...)` on every decorator is how defaults drift.
+- [Dynamic switches](https://pythonwrap.readthedocs.io/features/switches/): Disable a misbehaving integration without rebuilding its decorator stack.
+- [Web helpers](https://pythonwrap.readthedocs.io/features/web-helpers/): Server-side helpers for HTTP services: safe POST retries with an `Idempotency-Key` header, and standards-shaped responses when a rate limit, circuit breaker or bulkhead rejects...
+
+## Features: Resilience
+
+- [Resilience](https://pythonwrap.readthedocs.io/features/resilience/): Calls to networks, disks and other services fail, stall or get slow.
+- [Retry](https://pythonwrap.readthedocs.io/features/resilience/retry/): `retry` calls the function again when it raises, so transient failures (a dropped connection, a 503) do not reach your caller.
+- [HTTP clients](https://pythonwrap.readthedocs.io/features/resilience/http-clients/): Retrying an HTTP call is not the same as retrying a function.
+- [Circuit breaker](https://pythonwrap.readthedocs.io/features/resilience/circuit-breaker/): When a dependency is down, retrying makes things worse.
+- [Timeout and deadline](https://pythonwrap.readthedocs.io/features/resilience/timeout/): `timeout` raises `TimeoutExpired` (a subclass of the built-in `TimeoutError`) if a call runs too long.
+- [Fallback and suppress](https://pythonwrap.readthedocs.io/features/resilience/fallback/): `fallback` returns a value, or the result of a handler, when the function raises.
+- [Hedged requests](https://pythonwrap.readthedocs.io/features/resilience/hedge/): Most calls to a replicated service are fast, but a few hit a slow replica, a GC pause, or a lost packet.
+- [Policies](https://pythonwrap.readthedocs.io/features/resilience/policies/): A policy is a reusable, named bundle of decorators.
+- [Named policies and predicates](https://pythonwrap.readthedocs.io/features/resilience/named-policies/): Use an immutable `policy(...)` for a fixed stack.
+- [Presets and the policy doctor](https://pythonwrap.readthedocs.io/features/resilience/presets-and-doctor/): Two tools for getting a resilience stack right: presets give you sensible numbers to start from, and the doctor explains any stack and flags the combinations that cause producti...
+- [Circuit breakers across processes](https://pythonwrap.readthedocs.io/features/resilience/multi-process-breakers/): A `CircuitBreaker` keeps its state in memory.
+
+## Features: Caching and batching
+
+- [Caching and batching](https://pythonwrap.readthedocs.io/features/caching/): These decorators avoid doing the same work twice: remembering a result, running setup once, computing an attribute lazily, sharing one in-flight call between duplicate callers,...
+- [Memoize](https://pythonwrap.readthedocs.io/features/caching/memoize/): Cache a function's result per argument values, so repeated calls with the same arguments skip the work.
+- [Shared stores and credentials](https://pythonwrap.readthedocs.io/features/caching/stores-and-credentials/): Use `memoize` for ordinary results, `RedisStore` to share them between processes, and `expiring` for loaders that return a credential with a relative lifetime.
+- [Async cache stores](https://pythonwrap.readthedocs.io/features/caching/async-stores/): `memoize(store=RedisStore(...))` calls its store synchronously.
+- [Once](https://pythonwrap.readthedocs.io/features/caching/once/): Run a function a single time; later calls return the first result and ignore their arguments.
+- [Cached property](https://pythonwrap.readthedocs.io/features/caching/cached-property/): Like `functools.cached_property`, plus `ttl`, per-instance locking, `async def` getters and explicit invalidation.
+- [Singleflight](https://pythonwrap.readthedocs.io/features/caching/singleflight/): While a call for a given key is running, further calls with the same key wait and receive the same result or exception.
+- [Batching](https://pythonwrap.readthedocs.io/features/caching/batching/): Fold many single-item calls made close together into one bulk call.
+
+## Features: Concurrency and limits
+
+- [Concurrency and limits](https://pythonwrap.readthedocs.io/features/concurrency/): Control how often a function runs, how many calls run at once, and how you run many awaitables or blocking calls without hand-writing the plumbing.
+- [Rate limits](https://pythonwrap.readthedocs.io/features/concurrency/rate-limits/): Allow at most N calls per time window, and either reject or delay the rest.
+- [Throttle and debounce](https://pythonwrap.readthedocs.io/features/concurrency/throttle-debounce/): Collapse bursts of calls.
+- [Bulkheads](https://pythonwrap.readthedocs.io/features/concurrency/bulkheads/): Cap how many calls use a limited resource at once, and refuse to build an unbounded queue in front of it.
+- [Adaptive limits](https://pythonwrap.readthedocs.io/features/concurrency/adaptive-limits/): A fixed bulkhead needs a number chosen in advance.
+- [Graceful shutdown](https://pythonwrap.readthedocs.io/features/concurrency/graceful-shutdown/): Stop background work, flush what is buffered and let in-flight calls finish, in one ordered pass with one time budget.
+- [Async helpers](https://pythonwrap.readthedocs.io/features/concurrency/async-helpers/): Small helpers for the things every asyncio project ends up hand-writing: bounded `gather`, bounded `map`, racing, and calling async code from sync code.
+- [Run in a thread](https://pythonwrap.readthedocs.io/features/concurrency/run-in-thread/): Start each call in a new thread and get a `concurrent.futures.Future` back.
+- [Periodic tasks](https://pythonwrap.readthedocs.io/features/concurrency/periodic/): Run a function every N seconds in the background, and stop it cleanly.
+- [Leases and idempotency](https://pythonwrap.readthedocs.io/features/concurrency/leases-and-idempotency/): Use a lease to exclude overlapping work, and idempotency to remember completed results.
+- [Shared limits and quotas](https://pythonwrap.readthedocs.io/features/concurrency/shared-limits/): Default limiters, breakers and bulkheads are in-process.
+- [Buffered writes](https://pythonwrap.readthedocs.io/features/concurrency/buffered-writes/): `batch_calls` makes each caller await its result.
+- [Migrating a lock helper](https://pythonwrap.readthedocs.io/features/concurrency/lock-compat/): Many services carry a small module that wraps Redis `SET NX EX` and `DEL` behind calls such as `with named_lock(name, suffix):`, `acquire_lock(name)` and `release_lock(name)`.
+
+## Features: Observability
+
+- [Observability](https://pythonwrap.readthedocs.io/features/observability/): Find out how long calls take, how much they allocate, what they were called with, who called them, and how often they fail.
+- [Logging](https://pythonwrap.readthedocs.io/features/observability/logging/): Log what a function was called with, what it returned, and who called it.
+- [Audit](https://pythonwrap.readthedocs.io/features/observability/audit/): Record who called a function, with what, and how it ended.
+- [Timing and profiling](https://pythonwrap.readthedocs.io/features/observability/timing/): Measure how long calls take, how much they allocate, and where the time goes.
+- [Metrics and events](https://pythonwrap.readthedocs.io/features/observability/metrics/): See what your code does in production, with no dependencies: in-process call statistics, and an event stream you can forward to your monitoring system.
+- [Exporters](https://pythonwrap.readthedocs.io/features/observability/exporters/): Turn the event stream into Prometheus metrics or StatsD datagrams.
+- [Live dashboard](https://pythonwrap.readthedocs.io/features/observability/dashboard/): A single page that shows what the resilience decorators are doing right now: circuit breaker states, retry, give-up, rejection and timeout rates over the last minute, bulkhead s...
+- [Circuit breaker alerts](https://pythonwrap.readthedocs.io/features/observability/alerts/): Tell a chat channel when a dependency trips its breaker, without adding network calls to the request path.
+- [Context, telemetry and health](https://pythonwrap.readthedocs.io/features/observability/production/): These helpers connect existing application logging and providers to decorator events.
+
+## Features: Correctness
+
+- [Correctness](https://pythonwrap.readthedocs.io/features/correctness/): Keep bad data out and keep objects consistent when something goes wrong halfway.
+- [Validation](https://pythonwrap.readthedocs.io/features/correctness/validation/): Reject bad input at the door, with an error that names the parameter.
+- [State and transactions](https://pythonwrap.readthedocs.io/features/correctness/state/): Keep objects consistent when something goes wrong halfway.
+- [Batch processing](https://pythonwrap.readthedocs.io/features/correctness/batch-processing/): `process_batches` runs a handler for each input, records an outcome, and keeps going when an ordinary item exception occurs.
+
+## AI & agents
+
+- [LLM calls](https://pythonwrap.readthedocs.io/features/ai/llm-calls/): Calls to a hosted language model fail in their own ways.
+- [Testing agents](https://pythonwrap.readthedocs.io/features/ai/testing-agents/): Code that calls a model API fails in ways ordinary services do not: a 429 with a `Retry-After`, a 529 "overloaded", JSON cut off mid-object, a stream that goes quiet, a tool cal...
+- [AI observability and audit](https://pythonwrap.readthedocs.io/features/ai/observability/): Trace LLM and tool calls, keep secrets out of logs, and record an audit tape you can replay in tests.
+- [Agent tool safety](https://pythonwrap.readthedocs.io/features/ai/agent-safety/): When a model drives a tool-calling loop, four things go wrong in practice:
+- [Agent-friendly tooling](https://pythonwrap.readthedocs.io/features/ai/agent-friendly/): python-wrap ships tools that help AI coding agents (and people) pick the right API and use it correctly: an `llms.txt` index, a machine-readable API index, plain-language recipe...
+
+## Testing
+
+- [Testing code that uses these decorators](https://pythonwrap.readthedocs.io/testing/): Decorators that wait or remember make tests slow or order-dependent.
+- [Chaos and fault injection](https://pythonwrap.readthedocs.io/testing/chaos/): Resilience code (retries, timeouts, circuit breakers, fallbacks) only earns its keep when something fails, and that is rare.
+
+## Cookbook
+
+- [Cookbook](https://pythonwrap.readthedocs.io/cookbook/): The guides explain one decorator at a time.
+- [Resilient HTTP client](https://pythonwrap.readthedocs.io/cookbook/resilient-http-client/): For ready-made httpx transports, a `requests` adapter and method-safety rules, see
+- [Async crawler and bulk fetch](https://pythonwrap.readthedocs.io/cookbook/async-crawler/): You need to fetch thousands of URLs (a crawl, a nightly sync, "enrich these 50,000 rows from an API").
+- [FastAPI](https://pythonwrap.readthedocs.io/cookbook/fastapi/): A web endpoint reads a profile, a feed or a price list from a slow backend.
+- [Django](https://pythonwrap.readthedocs.io/cookbook/django/): A Django codebase accumulates a service layer: functions such as `get_plan(user)` or `upgrade(user, plan)` that views, tasks and management commands all call.
+- [CLI tools and scripts](https://pythonwrap.readthedocs.io/cookbook/cli-and-scripts/): Scripts and command-line tools have their own small recurring needs:
+- [DataLoader-style batching](https://pythonwrap.readthedocs.io/cookbook/dataloader-batching/): You render a list of 20 posts, and each post needs its author.
+- [Testing your code](https://pythonwrap.readthedocs.io/cookbook/testing-your-code/): Decorators that wait and remember make tests slow and order-dependent:
+- [Observability](https://pythonwrap.readthedocs.io/cookbook/observability/): You need to know *what happened* in production: which function was called, with what, by whom, how long it took and how it ended.
+- [Framework integrations](https://pythonwrap.readthedocs.io/cookbook/framework-integrations/): The adapters are optional imports.
+- [Existing FastAPI application](https://pythonwrap.readthedocs.io/cookbook/existing-fastapi-app/): PythonWrap can standardize resilience controls and diagnostics around service functions.
+
+## API reference
+
+- [API reference](https://pythonwrap.readthedocs.io/api/): These pages are generated from the docstrings, so they always match the code.
+- [Configuration](https://pythonwrap.readthedocs.io/api/config/): Project-wide defaults for python-wrap decorators.
+- [Developer tools](https://pythonwrap.readthedocs.io/api/devtools/): Developer tools: deprecation warnings, mock data and decorator composition.
+- [Switches](https://pythonwrap.readthedocs.io/api/switches/): Dynamic kill switches, with explicit sources and bounded local read caching.
+- [Testing helpers](https://pythonwrap.readthedocs.io/api/testing/): Helpers for testing code that uses python-wrap (and code that waits or retries).
+- [Chaos](https://pythonwrap.readthedocs.io/api/chaos/): Fault injection for resilience code: latency, errors and canned results on demand.
+- [LLM testing](https://pythonwrap.readthedocs.io/api/llm_testing/): Test doubles for LLM-calling code: a scripted fake provider and LLM-shaped faults.
+- [Migration tool](https://pythonwrap.readthedocs.io/api/migrate/): Codemod that rewrites tenacity and backoff decorators to ``python_wrap.retry``.
+- [API index and recipes](https://pythonwrap.readthedocs.io/api/introspect/): A machine-readable index of the public API, plain-language recipes and the agent guide.
+- [MCP server](https://pythonwrap.readthedocs.io/api/mcp/): A dependency-free, read-only Model Context Protocol server: ``python -m python_wrap mcp``.
+- [Errors](https://pythonwrap.readthedocs.io/api/errors/): Exceptions raised by python-wrap.
+
+## API reference: Resilience
+
+- [Retry and fallback](https://pythonwrap.readthedocs.io/api/retry/): Retry a function when it raises (or returns a bad value), with optional backoff.
+- [Circuit breaker](https://pythonwrap.readthedocs.io/api/circuit/): Circuit breaker decorator and class.
+- [Deadline](https://pythonwrap.readthedocs.io/api/deadline/): Give the enclosed block (and everything it calls) at most ``seconds`` seconds.
+- [Hedging](https://pythonwrap.readthedocs.io/api/hedging/): Hedged requests: `hedge` starts a backup attempt when the first one is slow.
+- [Policies](https://pythonwrap.readthedocs.io/api/policy/): Build a reusable `Policy` from decorators placed in named roles.
+- [Named registry](https://pythonwrap.readthedocs.io/api/policies/): Constant: <python_wrap.policies.PolicyRegistry object>
+- [LLM calls](https://pythonwrap.readthedocs.io/api/llm/): Wrappers for LLM calls: classified retries, spend budgets, token rate limits, model fallback chains, streaming timeouts and a response cache.
+- [Presets](https://pythonwrap.readthedocs.io/api/presets/): Opinionated, documented starting points for the most common resilience stacks.
+- [Doctor](https://pythonwrap.readthedocs.io/api/doctor/): Explain and lint resilience stacks: which layers wrap a function, and what is risky.
+- [Predicates](https://pythonwrap.readthedocs.io/api/predicates/): Composable exception predicates without importing HTTP or database drivers.
+- [HTTP clients](https://pythonwrap.readthedocs.io/api/http/): HTTP client integration: retry policy, httpx transports, requests adapter, generic decorator.
+
+## API reference: Caching and batching
+
+- [Caching](https://pythonwrap.readthedocs.io/api/caching/): Caching decorators: `memoize`, `cache`, `once` and `cached_property`.
+- [Batching](https://pythonwrap.readthedocs.io/api/batching/): Coalesce many single-item calls into one batched call: `batch_calls`.
+- [Redis stores](https://pythonwrap.readthedocs.io/api/stores/): Optional Redis cache adapter.
+- [Async cache](https://pythonwrap.readthedocs.io/api/async_cache/): Async cache stores and ``amemoize``: caching without blocking the event loop.
+- [Expiring credentials](https://pythonwrap.readthedocs.io/api/credentials/): Expiring credential caching with one refresh per key and explicit invalidation.
+- [Buffered writers](https://pythonwrap.readthedocs.io/api/buffering/): Bounded, explicit-lifecycle background writers for batches of independent records.
+- [Batch processing](https://pythonwrap.readthedocs.io/api/processing/): Per-item batch outcomes and explicit checkpoints for resumable processing.
+
+## API reference: Concurrency and limits
+
+- [Concurrency](https://pythonwrap.readthedocs.io/api/concurrency/): Concurrency and flow-control decorators.
+- [Async helpers](https://pythonwrap.readthedocs.io/api/aio/): Small asyncio helpers that every async project ends up writing.
+- [Bulkhead](https://pythonwrap.readthedocs.io/api/bulkhead/): Bulkheads: cap how many calls run at once, and how many may queue for a slot.
+- [Adaptive limits](https://pythonwrap.readthedocs.io/api/adaptive/): Adaptive concurrency limits and per-key limiter pools.
+- [Graceful shutdown](https://pythonwrap.readthedocs.io/api/lifecycle/): Graceful shutdown: stop, flush and drain everything in one ordered pass.
+- [Periodic](https://pythonwrap.readthedocs.io/api/periodic/): Run the decorated function every ``interval`` seconds in the background.
+- [Coordination](https://pythonwrap.readthedocs.io/api/coordination/): Local and distributed owner-checked leases and single-instance decorators.
+- [Idempotency](https://pythonwrap.readthedocs.io/api/idempotency/): Result retention guarded by renewable owner-checked leases.
+- [Quotas and shared windows](https://pythonwrap.readthedocs.io/api/quotas/): Atomic Redis rate windows and explicit run budgets.
+- [Shared backends](https://pythonwrap.readthedocs.io/api/shared/): Redis coordination backends for circuit breakers and bulkheads.
+- [Single-host backends](https://pythonwrap.readthedocs.io/api/local_state/): Share circuit breaker state between processes on one host, without Redis.
+- [Lock helper compatibility](https://pythonwrap.readthedocs.io/api/compat/): Drop-in helpers for code that uses a hand-rolled Redis lock helper.
+
+## API reference: Observability
+
+- [Logging and audit](https://pythonwrap.readthedocs.io/api/logs/): Logging decorators: argument/return logging, audit records and call-stack tracing.
+- [Timing and profiling](https://pythonwrap.readthedocs.io/api/timing/): Measure and log how long each call takes.
+- [Metrics](https://pythonwrap.readthedocs.io/api/metrics/): In-process call metrics: `count_calls` tracks calls, errors, concurrency and latency.
+- [Events](https://pythonwrap.readthedocs.io/api/events/): Observe what python-wrap decorators do: retries, cache hits, circuit changes, ...
+- [Redaction](https://pythonwrap.readthedocs.io/api/redaction/): Redact secrets from log arguments, audit payloads and nested data structures.
+- [OpenTelemetry adapter](https://pythonwrap.readthedocs.io/api/observability/): Opt-in OpenTelemetry and Sentry adapters for decorator events.
+- [Health registry](https://pythonwrap.readthedocs.io/api/health/): Constant: <python_wrap.health.HealthRegistry object>
+- [Exporters](https://pythonwrap.readthedocs.io/api/exporters/): Export the event stream as Prometheus text, prometheus_client collectors or StatsD.
+- [Dashboard](https://pythonwrap.readthedocs.io/api/dashboard/): A small live dashboard of resilience state for local development and staging.
+- [Alerts](https://pythonwrap.readthedocs.io/api/alerts/): Alert a chat webhook when a circuit breaker opens.
+- [Slow calls](https://pythonwrap.readthedocs.io/api/slow/): Slow-call detection for synchronous and asynchronous functions.
+
+## API reference: Correctness
+
+- [Validation](https://pythonwrap.readthedocs.io/api/validation/): Argument validation and runtime type checking.
+- [State](https://pythonwrap.readthedocs.io/api/state/): State safety: `revert_on_failure` and transactions.
+
+## API reference: AI & agents
+
+- [Agents](https://pythonwrap.readthedocs.io/api/agents/): Make agent tool use safe: idempotent tools, run guards, permissions and approvals.
+
+## API reference: Framework adapters
+
+- [Flask](https://pythonwrap.readthedocs.io/api/flask/): Flask request context adapter; Flask is imported only by init_app().
+- [FastAPI and ASGI](https://pythonwrap.readthedocs.io/api/fastapi/): Pure ASGI context middleware for FastAPI/Starlette, with no framework imports.
+- [Django](https://pythonwrap.readthedocs.io/api/django/): Sync/async Django middleware for request context and cooperative deadlines.
+- [Celery](https://pythonwrap.readthedocs.io/api/celery/): Celery integration: task context, Celery-aware retry countdowns and shared breakers.
+- [Web helpers](https://pythonwrap.readthedocs.io/api/web/): Server-side web helpers: Idempotency-Key middleware and rate-limit responses.
+
+## Optional
+
+- [Performance](https://pythonwrap.readthedocs.io/project/performance/): What does a decorator cost on every call?
+- [Limitations](https://pythonwrap.readthedocs.io/project/limitations/): python-wrap tries to do the obvious thing, and where it cannot, to say so.
+- [Migrating to 0.2](https://pythonwrap.readthedocs.io/project/migration/): Version 0.2 is a rewrite of the internals with a handful of deliberate breaking changes.
+- [Migrating to 0.3](https://pythonwrap.readthedocs.io/project/migration-0.3/): 0.3 keeps the existing decorator toolkit and adds production integration helpers.
+- [API stability](https://pythonwrap.readthedocs.io/project/stability/): python-wrap is below 1.0, but it is no longer "anything may change".
+- [Operations runbook](https://pythonwrap.readthedocs.io/project/operations/): How to watch python-wrap in production, what to do when something looks stuck, and how stored state behaves across upgrades.
+- [Threat model](https://pythonwrap.readthedocs.io/project/threat-model/): This page records what python-wrap trusts, what it protects, and the review of its serialization and redaction surfaces.
+- [Production pilot](https://pythonwrap.readthedocs.io/project/pilot/): python-wrap's breadth is ahead of its production track record.
+- [Migrating from tenacity](https://pythonwrap.readthedocs.io/project/migrating-from-tenacity/): python-wrap's `retry` covers the common tenacity patterns with one decorator and plain keyword arguments instead of composable strategy objects.
+- [Migrating from pybreaker](https://pythonwrap.readthedocs.io/project/migrating-from-pybreaker/): python-wrap's `CircuitBreaker` has the same closed, open and half-open cycle as pybreaker.
+- [Migrating from limits](https://pythonwrap.readthedocs.io/project/migrating-from-limits/): The `limits` library separates a *rate limit item* (`5/minute`), a *storage* (memory, Redis, ...) and a *strategy* (fixed window, moving window).
+- [The migration tool](https://pythonwrap.readthedocs.io/project/migrate-tool/): `python -m python_wrap migrate` rewrites the retry decorators of tenacity and backoff to `python_wrap.retry`.
+- [Changelog](https://pythonwrap.readthedocs.io/project/changelog/)

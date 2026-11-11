@@ -75,6 +75,8 @@ path = "src/python_wrap/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/python_wrap"]
+# Packaged data read at run time (agent guide, recipes); always shipped, even if ignored by VCS.
+artifacts = ["src/python_wrap/_data/*.md", "src/python_wrap/_data/*.json"]
 exclude = ["**/__pycache__", "**/*.py[cod]", "**/.DS_Store"]
 
 [tool.hatch.build.targets.sdist]

@@ -103,6 +103,31 @@ behind your existing auth. `Dashboard.serve()` binds to `127.0.0.1` by default.
 `PW_CHAOS` variable is set; it is inert otherwise. Do not set `PW_CHAOS` in production
 deployments unless you are running a deliberate game day.
 
+## Agent tooling and the MCP server
+
+`python -m python_wrap api|recipe|guide` and the MCP server (`python -m python_wrap mcp`)
+only read docstrings, signatures, packaged data files and configuration attributes.
+
+| Input | Source | Handling |
+| --- | --- | --- |
+| JSON-RPC messages on stdin | The MCP client (an editor or coding agent) | Untrusted: one message per line, at most 1 MiB; malformed JSON, batches, wrong types and unknown methods or tools get JSON-RPC errors; a failing tool returns `isError` and never stops the server |
+| `import_path` (`doctor`, `explain_policy`) | The agent, possibly steered by prompt injection | Must match `package.module:attribute` (identifiers only, no dunder attributes); the module must already be importable (`importlib.util.find_spec`); optional `--allow PREFIX` restricts it to your packages |
+| `source` (`migrate_preview`) | The agent | Parsed with `ast` only, never executed; at most 1 MiB; the result is a diff, nothing is written |
+| Queries (`search_api`, `get_symbol`, `recipe`) | The agent | Matched against the in-memory index; result counts are capped |
+
+Guarantees: no tool writes files, opens sockets, starts processes or calls the inspected
+function or policy. Output written by imported modules is redirected to stderr so it
+cannot inject protocol messages.
+
+Accepted risk: **importing a module runs its top-level code**, as with
+`python -m python_wrap doctor`. An agent could ask to import any importable module, for
+example one with side effects at import time. Run the server only in environments whose
+installed code you trust, and pass `--allow myapp` to limit imports to your own package.
+The server holds no credentials of its own, but imported modules run with the server's
+privileges and environment variables.
+
+Regression tests: `tests/test_mcp.py`, `tests/test_introspect.py`.
+
 ## Accepted risks
 
 - `RedisStore`/`AsyncRedisStore` default to pickle for backward compatibility. Only use them

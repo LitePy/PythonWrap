@@ -290,14 +290,14 @@ def llm_client(
         from python_wrap.llm import Budget
         from python_wrap.presets import llm_client
 
-        claude = llm_client("chat", spend=Budget(tokens=100_000))
+        chat = llm_client("chat", spend=Budget(tokens=100_000))
 
-        @claude
+        @chat
         def complete(prompt: str) -> dict[str, object]:
             return {"usage": {"input_tokens": 10, "output_tokens": 5}}
 
         complete("hi")
-        assert claude.explain().findings == ()
+        assert chat.explain().findings == ()
         ```
     """
     limiters = [layer for layer in (spend, tokens) if layer is not None]
