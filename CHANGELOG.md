@@ -231,6 +231,31 @@ cancellation, per-instance state for `throttle`/`debounce`/`rate_limit`, single-
     server over stdio (`python_wrap.mcp`) with `explain_policy`, `doctor`,
     `migrate_preview`, `search_api`, `get_symbol`, `recipe` and `guide` tools; `--allow`
     restricts which modules it may import. Threat model updated.
+- `EffectLedger`: exactly-once bookkeeping for agent tool side effects. `tool(ledger=...)`
+  records each call as started / succeeded / failed, keyed on the provider's tool-call id
+  (`with_call_id`, `tool_call_id`) when there is one, else on the run id and argument
+  digest. Replays return the stored result, concurrent duplicates run once, a call id
+  reused with other arguments raises `EffectConflict`, and a crash or store failure
+  between the side effect and the record (or a timeout/cancellation) is detected and
+  handed to an `on_unknown` hook (`"retry"`, `EffectResolved(value)`, or `EffectUnknown`).
+  Stores: `MemoryEffectStore`, `SQLiteEffectStore`, `RedisEffectStore` (also built from a
+  `RedisStore(fail_open=False)`). `ToolCall` gains `call_id`; agent-framework context
+  parameters (`RunContext`, `ToolContext`, `RunContextWrapper`) are left out of a tool's
+  argument digest.
+- `python_wrap.adapters.pydantic_ai.PythonWrapCapability`: guarded pydantic-ai tools
+  (`tool`, `wrap(toolset)`, `toolset(...)`) with timeout, a retry that never retries
+  `ModelRetry`, approvals, ledger on `tool_call_id`, loop and tool-call limits, a usage
+  bridge into a python-wrap `Budget`, and `AuditTape` records. Optional extra
+  `python-wrap[pydantic-ai]`.
+- `python_wrap.adapters.openai_agents.AgentsGuard`: guarded `function_tool`s, `wrap()` for
+  existing `FunctionTool`s (sub-agents via `as_tool` included, sharing one
+  `max_tool_calls`), and `RunHooks` / `AgentHooks` feeding `Budget`, `AuditTape` and
+  repeat detection; run-ending errors are re-raised through the SDK's tool error handling.
+  Optional extra `python-wrap[openai-agents]`.
+- `mcp_guard`: per-attempt timeout, retries limited to `retry_tools`, a shared per-server
+  `CircuitBreaker` (`mcp_breaker`) and cooperative cancellation around an MCP `call_tool`
+  function or client object (`MCPGuard`). Doctor checks PW020 (MCP or framework tool call
+  without a timeout) and PW021 (MCP guard retrying every tool).
 
 ### Security
 

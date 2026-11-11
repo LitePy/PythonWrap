@@ -208,6 +208,7 @@ nav:
       - Testing agents: features/ai/testing-agents.md
       - AI observability and audit: features/ai/observability.md
       - Agent tool safety: features/ai/agent-safety.md
+      - Agent frameworks and MCP: features/ai/agent-frameworks.md
       - Agent-friendly tooling: features/ai/agent-friendly.md
   - Testing:
       - testing/index.md

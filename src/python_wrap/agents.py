@@ -17,6 +17,10 @@ yes. This module covers each one without depending on any agent framework or pro
   `ToolRegistry` dispatches tool calls by name (as a model emits them).
 * ``requires_approval=True`` asks a user-supplied approver; no answer, a timeout or an
   error denies.
+* `EffectLedger` records every side effect as started / succeeded / failed, keyed on the
+  provider's tool-call id (`with_call_id`) when there is one: replays return the stored
+  result, concurrent duplicates run once, and a crash between the effect and the record
+  is detected (`EffectUnknown`) and handed to a decision hook.
 
 Everything publishes events (``agent.run.*``, ``tool.*``) through `python_wrap.events`.
 """
@@ -24,19 +28,22 @@ Everything publishes events (``agent.run.*``, ``tool.*``) through `python_wrap.e
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
+import dataclasses
 import fnmatch
 import functools
 import hashlib
 import inspect
 import json
+import math
 import threading
 import uuid
 from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from types import MappingProxyType, TracebackType
-from typing import Any, ParamSpec, TypeVar, cast, overload
+from typing import Any, ParamSpec, Protocol, TypeVar, cast, overload
 
 from python_wrap import _core
 from python_wrap._runtime import seconds as _parse_seconds
@@ -49,11 +56,20 @@ __all__ = [
     "ApprovalDenied",
     "ApprovalTimeout",
     "DryRun",
+    "EffectConflict",
+    "EffectLedger",
+    "EffectRecord",
+    "EffectResolved",
+    "EffectStore",
+    "EffectUnknown",
     "LoopDetected",
+    "MemoryEffectStore",
+    "RedisEffectStore",
     "RunBudgetExceeded",
     "RunCancelled",
     "RunGuard",
     "RunTimeout",
+    "SQLiteEffectStore",
     "Step",
     "StepLimitExceeded",
     "ToolCall",
@@ -66,7 +82,9 @@ __all__ = [
     "record_step",
     "run_id_var",
     "tool",
+    "tool_call_id",
     "tool_spec",
+    "with_call_id",
 ]
 
 P = ParamSpec("P")
@@ -207,6 +225,7 @@ class ToolCall:
     run_id: str | None
     read_only: bool
     description: str = ""
+    call_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -820,6 +839,931 @@ def agent_run(
     )
 
 
+# --------------------------------------------------------------------------- effect ledger
+
+#: The provider's id for the tool call being executed (OpenAI ``tool_call.id``, Anthropic
+#: ``tool_use.id``, pydantic-ai ``tool_call_id``), or None. Adapters set it with
+#: `with_call_id`; an `EffectLedger` keys side effects on it.
+tool_call_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "python_wrap_tool_call_id", default=None
+)
+
+
+@contextlib.contextmanager
+def with_call_id(call_id: str | None) -> Iterator[str | None]:
+    """Make ``call_id`` the current `tool_call_id` for a ``with`` block.
+
+    Framework adapters do this for you; call it yourself when you dispatch the model's
+    tool calls by hand (``with with_call_id(block.id): tools.call(...)``).
+
+    Example:
+        >>> with with_call_id("call_1"):
+        ...     tool_call_id.get()
+        'call_1'
+        >>> tool_call_id.get() is None
+        True
+    """
+    if call_id is not None and (not isinstance(call_id, str) or not call_id):
+        raise ValueError("call_id must be a non-empty string or None")
+    reset = tool_call_id.set(call_id)
+    try:
+        yield call_id
+    finally:
+        tool_call_id.reset(reset)
+
+
+@dataclass(frozen=True)
+class EffectRecord:
+    """What an `EffectLedger` knows about one side effect.
+
+    Attributes:
+        key: The ledger key (tool name plus call id, business key or argument digest).
+        tool: The tool name.
+        state: ``"started"`` (claimed, no outcome recorded yet), ``"succeeded"`` or
+            ``"failed"``.
+        owner: A unique id of the attempt that holds (or held) the record.
+        call_id: The provider's tool-call id, when one was current.
+        arguments: Digest of the canonical arguments.
+        run_id: The agent run the call belonged to.
+        started_at: Wall-clock time the attempt was claimed.
+        lease_until: Wall-clock time after which a ``"started"`` record whose owner never
+            reported back is treated as crashed.
+        finished_at: Wall-clock time the outcome was recorded, or None.
+        result: The stored result of a succeeded call (when ``has_result``).
+        has_result: False when the result could not be stored (not serialisable).
+        error: ``{"type": ..., "message": ...}`` of a failed call.
+        uncertain: True for a failure that may have left the effect half done (a timeout,
+            a cancellation): such a record is handled like a crash.
+        attempts: How many attempts claimed this key.
+    """
+
+    key: str
+    tool: str
+    state: str
+    owner: str
+    call_id: str | None = None
+    arguments: str | None = None
+    run_id: str | None = None
+    started_at: float = 0.0
+    lease_until: float = 0.0
+    finished_at: float | None = None
+    result: Any = None
+    has_result: bool = False
+    error: dict[str, str] | None = None
+    uncertain: bool = False
+    attempts: int = 1
+
+    def to_dict(self) -> dict[str, Any]:
+        """A plain dict (JSON-serialisable when the result is)."""
+        data = {f: getattr(self, f) for f in _RECORD_FIELDS}
+        return data
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> EffectRecord:
+        """Rebuild a record from `to_dict` output; unknown keys are ignored."""
+        return cls(**{k: v for k, v in data.items() if k in _RECORD_FIELDS})
+
+
+_RECORD_FIELDS = (
+    "key", "tool", "state", "owner", "call_id", "arguments", "run_id", "started_at",
+    "lease_until", "finished_at", "result", "has_result", "error", "uncertain", "attempts",
+)  # fmt: skip
+
+
+@dataclass(frozen=True)
+class EffectResolved:
+    """Returned by an ``on_unknown`` hook: the effect did happen and this is its result.
+
+    The ledger records ``value`` as the call's result and returns it, without running
+    the tool again.
+    """
+
+    value: Any = None
+
+
+class EffectUnknown(AgentError):
+    """A side effect may or may not have happened, and no hook decided what to do.
+
+    Raised when a previous attempt claimed the key but never recorded an outcome (the
+    process crashed, or the ledger store failed between the effect and the record), when
+    it failed in a way that may have left the effect half done (a timeout or a
+    cancellation), or when it succeeded but its result could not be stored.
+
+    Attributes:
+        record: The ledger's `EffectRecord`.
+        reason: ``"crashed"``, ``"uncertain"`` or ``"result_lost"``.
+    """
+
+    def __init__(self, message: str, *, record: EffectRecord, reason: str) -> None:
+        super().__init__(message)
+        self.record = record
+        self.reason = reason
+        self.run_id = record.run_id
+
+
+class EffectConflict(AgentError):
+    """A tool-call id was reused with different arguments: a bug in the caller.
+
+    Attributes:
+        record: The record stored for the first use of the id.
+    """
+
+    def __init__(self, message: str, *, record: EffectRecord) -> None:
+        super().__init__(message)
+        self.record = record
+        self.run_id = record.run_id
+
+
+class EffectStore(Protocol):
+    """Where an `EffectLedger` keeps its records; implement it for another backend.
+
+    ``claim`` and ``settle`` must be atomic with respect to every other process sharing
+    the store.
+    """
+
+    def get(self, key: str, /) -> EffectRecord | None:
+        """The live record for ``key``, or None."""
+
+    def claim(self, record: EffectRecord, ttl: float, expect: str | None, /) -> EffectRecord | None:
+        """Write ``record`` if no live record exists or the live one's owner is ``expect``.
+
+        Returns None when written, otherwise the live record that blocked the write.
+        """
+
+    def settle(self, record: EffectRecord, ttl: float, /) -> bool:
+        """Overwrite the live record only if its owner is ``record.owner``; True if written."""
+
+    def delete(self, key: str, /) -> bool:
+        """Forget ``key``; True if something was deleted."""
+
+
+class MemoryEffectStore:
+    """An in-process `EffectStore`: thread-safe, bounded, expiring.
+
+    Use it for a single process. Records survive a crash only in a shared store
+    (`SQLiteEffectStore`, `RedisEffectStore`).
+
+    Args:
+        max_entries: Most records kept; when full the record closest to expiry goes first.
+    """
+
+    def __init__(self, max_entries: int = 10_000) -> None:
+        if isinstance(max_entries, bool) or not isinstance(max_entries, int) or max_entries < 1:
+            raise ValueError("max_entries must be a positive integer")
+        self.max_entries = max_entries
+        self._data: dict[str, tuple[EffectRecord, float]] = {}
+        self._lock = threading.Lock()
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._data)
+
+    def _live(self, key: str) -> EffectRecord | None:
+        entry = self._data.get(key)
+        if entry is None:
+            return None
+        if entry[1] <= _core.wall_time():
+            del self._data[key]
+            return None
+        return entry[0]
+
+    def _put(self, record: EffectRecord, ttl: float) -> None:
+        now = _core.wall_time()
+        self._data.pop(record.key, None)
+        if len(self._data) >= self.max_entries:
+            for old in [k for k, (_, expires) in self._data.items() if expires <= now]:
+                del self._data[old]
+        while len(self._data) >= self.max_entries:
+            del self._data[min(self._data, key=lambda k: self._data[k][1])]
+        self._data[record.key] = (record, now + ttl)
+
+    def get(self, key: str, /) -> EffectRecord | None:
+        with self._lock:
+            return self._live(key)
+
+    def claim(self, record: EffectRecord, ttl: float, expect: str | None, /) -> EffectRecord | None:
+        with self._lock:
+            current = self._live(record.key)
+            if current is not None and current.owner != expect:
+                return current
+            self._put(record, ttl)
+            return None
+
+    def settle(self, record: EffectRecord, ttl: float, /) -> bool:
+        with self._lock:
+            current = self._live(record.key)
+            if current is None or current.owner != record.owner:
+                return False
+            self._put(record, ttl)
+            return True
+
+    def delete(self, key: str, /) -> bool:
+        with self._lock:
+            return self._data.pop(key, None) is not None
+
+
+def _json_dumps(data: Any) -> bytes:
+    return json.dumps(data, separators=(",", ":"), ensure_ascii=False).encode()
+
+
+def _json_loads(data: bytes | str) -> Any:
+    return json.loads(data)
+
+
+class SQLiteEffectStore:
+    """An `EffectStore` in a local SQLite file, shared by every process that opens it.
+
+    Records survive a crash and a restart, so a replayed run finds them. Results are
+    serialised with ``dumps`` (JSON by default: a result JSON cannot encode is not
+    stored, and replaying it raises `EffectUnknown` with reason ``"result_lost"``
+    unless the ``on_unknown`` hook resolves it).
+
+    Args:
+        path: The database file (created if missing).
+        dumps: Serialiser for a record dict (bytes or str).
+        loads: Matching deserialiser.
+        timeout: Seconds to wait for another process's write lock.
+    """
+
+    def __init__(
+        self,
+        path: str | Any,
+        *,
+        dumps: Callable[[Any], bytes | str] = _json_dumps,
+        loads: Callable[[Any], Any] = _json_loads,
+        timeout: float = 30.0,
+    ) -> None:
+        import os
+
+        self.path = os.fspath(path)
+        self.dumps, self.loads, self.timeout = dumps, loads, timeout
+        self._lock = threading.Lock()
+        self._conn: Any = None
+        self._pid = 0
+        with self._lock:
+            self._connection()
+
+    def _connection(self) -> Any:
+        import os
+        import sqlite3
+
+        if self._conn is None or self._pid != os.getpid():
+            conn = sqlite3.connect(
+                self.path, timeout=self.timeout, check_same_thread=False, isolation_level=None
+            )
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS python_wrap_effects (key TEXT PRIMARY KEY, "
+                "owner TEXT NOT NULL, expires REAL NOT NULL, data BLOB NOT NULL)"
+            )
+            self._conn, self._pid = conn, os.getpid()
+        return self._conn
+
+    def _decode(self, row: Any) -> EffectRecord | None:
+        if row is None or row[1] <= _core.wall_time():
+            return None
+        return EffectRecord.from_dict(self.loads(row[0]))
+
+    def get(self, key: str, /) -> EffectRecord | None:
+        with self._lock:
+            row = (
+                self._connection()
+                .execute("SELECT data, expires FROM python_wrap_effects WHERE key = ?", (key,))
+                .fetchone()
+            )
+            return self._decode(row)
+
+    def claim(self, record: EffectRecord, ttl: float, expect: str | None, /) -> EffectRecord | None:
+        data = self.dumps(record.to_dict())
+        with self._lock:
+            conn = self._connection()
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = conn.execute(
+                    "SELECT data, expires, owner FROM python_wrap_effects WHERE key = ?",
+                    (record.key,),
+                ).fetchone()
+                current = self._decode(row)
+                if current is not None and row[2] != expect:
+                    conn.execute("COMMIT")
+                    return current
+                conn.execute(
+                    "INSERT OR REPLACE INTO python_wrap_effects (key, owner, expires, data) "
+                    "VALUES (?, ?, ?, ?)",
+                    (record.key, record.owner, _core.wall_time() + ttl, data),
+                )
+                conn.execute("COMMIT")
+                return None
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+
+    def settle(self, record: EffectRecord, ttl: float, /) -> bool:
+        data = self.dumps(record.to_dict())
+        with self._lock:
+            cursor = self._connection().execute(
+                "UPDATE python_wrap_effects SET data = ?, expires = ? "
+                "WHERE key = ? AND owner = ? AND expires > ?",
+                (data, _core.wall_time() + ttl, record.key, record.owner, _core.wall_time()),
+            )
+            return bool(cursor.rowcount == 1)
+
+    def delete(self, key: str, /) -> bool:
+        with self._lock:
+            cursor = self._connection().execute(
+                "DELETE FROM python_wrap_effects WHERE key = ?", (key,)
+            )
+            return bool(cursor.rowcount == 1)
+
+    def close(self) -> None:
+        """Close this process's connection (reopened on next use)."""
+        with self._lock:
+            if self._conn is not None:
+                self._conn.close()
+                self._conn = None
+
+
+_REDIS_CLAIM = """
+local o=redis.call('HGET',KEYS[1],'owner')
+if (not o) or (ARGV[1]~='' and o==ARGV[1]) then
+ redis.call('DEL',KEYS[1])
+ redis.call('HSET',KEYS[1],'owner',ARGV[2],'data',ARGV[3])
+ redis.call('PEXPIRE',KEYS[1],ARGV[4])
+ return false
+end
+return redis.call('HGET',KEYS[1],'data')
+"""
+
+_REDIS_SETTLE = """
+if redis.call('HGET',KEYS[1],'owner')==ARGV[1] then
+ redis.call('HSET',KEYS[1],'data',ARGV[2])
+ redis.call('PEXPIRE',KEYS[1],ARGV[3])
+ return 1
+end
+return 0
+"""
+
+
+class RedisEffectStore:
+    """An `EffectStore` on Redis, shared by every worker; redis is never imported.
+
+    Each record is one hash updated by a Lua script, so a claim and an outcome are
+    atomic and an outcome is only written by the attempt that owns the record (a stale
+    owner whose lease was taken over cannot overwrite the new one).
+
+    Args:
+        client: A synchronous ``redis.Redis``-compatible client (``eval``, ``hget``,
+            ``delete``).
+        prefix: Namespace for the keys.
+        dumps: Serialiser for a record dict (JSON by default).
+        loads: Matching deserialiser.
+    """
+
+    def __init__(
+        self,
+        client: Any,
+        prefix: str = "python-wrap:effects:",
+        *,
+        dumps: Callable[[Any], bytes | str] = _json_dumps,
+        loads: Callable[[Any], Any] = _json_loads,
+    ) -> None:
+        if not prefix:
+            raise ValueError("RedisEffectStore needs a nonempty prefix")
+        self.client, self.prefix, self.dumps, self.loads = client, prefix, dumps, loads
+
+    @classmethod
+    def from_store(cls, store: Any) -> RedisEffectStore:
+        """Reuse a `python_wrap.stores.RedisStore`'s client, prefix and serialisers."""
+        if getattr(store, "fail_open", False):
+            raise ValueError("an effect ledger requires a RedisStore with fail_open=False")
+        return cls(store.client, store.prefix + "effects:", dumps=store.dumps, loads=store.loads)
+
+    def _key(self, key: str) -> str:
+        return self.prefix + key
+
+    def _decode(self, data: Any) -> EffectRecord | None:
+        return None if data is None else EffectRecord.from_dict(self.loads(data))
+
+    def get(self, key: str, /) -> EffectRecord | None:
+        return self._decode(self.client.hget(self._key(key), "data"))
+
+    def claim(self, record: EffectRecord, ttl: float, expect: str | None, /) -> EffectRecord | None:
+        found = self.client.eval(
+            _REDIS_CLAIM,
+            1,
+            self._key(record.key),
+            expect or "",
+            record.owner,
+            self.dumps(record.to_dict()),
+            max(1, math.ceil(ttl * 1000)),
+        )
+        return None if found is None or found is False else self._decode(found)
+
+    def settle(self, record: EffectRecord, ttl: float, /) -> bool:
+        done = self.client.eval(
+            _REDIS_SETTLE,
+            1,
+            self._key(record.key),
+            record.owner,
+            self.dumps(record.to_dict()),
+            max(1, math.ceil(ttl * 1000)),
+        )
+        return bool(int(done or 0))
+
+    def delete(self, key: str, /) -> bool:
+        return bool(self.client.delete(self._key(key)))
+
+
+def _effect_store(store: Any) -> EffectStore:
+    if store is None:
+        return MemoryEffectStore()
+    if all(callable(getattr(store, name, None)) for name in ("get", "claim", "settle", "delete")):
+        return cast(EffectStore, store)
+    from python_wrap.stores import RedisStore
+
+    if isinstance(store, RedisStore):
+        return RedisEffectStore.from_store(store)
+    if isinstance(store, str) or hasattr(store, "__fspath__"):
+        return SQLiteEffectStore(store)
+    raise TypeError(
+        "store must be an EffectStore, a RedisStore(fail_open=False), a SQLite file path or None"
+    )
+
+
+UnknownHook = Callable[[EffectUnknown], Any]
+
+
+class EffectLedger:
+    """Exactly-once bookkeeping for agent tool side effects, keyed on the tool-call id.
+
+    Every call claims a record (``started``) before the tool runs and records the
+    outcome (``succeeded`` with the result, or ``failed``) after. So:
+
+    * A replay of the same call (the provider's ``call_id`` when one is current, see
+      `with_call_id`; otherwise the tool name, run id and argument digest) returns the
+      stored result without running the tool.
+    * Concurrent identical calls run the tool once; the others wait and get its result.
+    * A ``started`` record nobody finished (the process died between the side effect
+      and the record, or the store failed while recording) is detected once its lease
+      runs out, or at once in the process that saw the store fail. The ``on_unknown``
+      hook then decides: return ``"retry"`` to run again, an `EffectResolved` to record
+      the outcome you looked up yourself, or ``"raise"`` / None to raise `EffectUnknown`.
+    * A failure that may have left the effect half done (``TimeoutError``, cancellation)
+      goes through the same hook; any other failure lets the next call run again.
+
+    Args:
+        store: `MemoryEffectStore` (default), `SQLiteEffectStore`, `RedisEffectStore`, a
+            `python_wrap.stores.RedisStore` with ``fail_open=False``, or a file path
+            (SQLite). Anything implementing `EffectStore` works.
+        ttl: How long records (and replayable results) are kept (``"1d"``).
+        lease: How long a ``started`` record is trusted before it counts as crashed;
+            make it longer than the tool's slowest call (``"5m"``).
+        on_unknown: The decision hook (sync or async), called with the `EffectUnknown`.
+        wait_timeout: Most seconds a duplicate waits for an in-flight call before
+            raising `TimeoutExpired`; None waits until the lease runs out.
+        uncertain: Exception types treated as "the effect may be half done";
+            exceptions that are not ``Exception`` subclasses always are.
+        poll: Seconds between store reads while waiting for another process.
+
+    Example:
+        ```python
+        from python_wrap import EffectLedger, agent_run, tool, with_call_id
+
+        ledger = EffectLedger()
+        charges = []
+
+        @tool(ledger=ledger)
+        def charge(order: str, cents: int) -> str:
+            charges.append(order)
+            return f"charged {order}"
+
+        with agent_run():
+            with with_call_id("call_1"):
+                charge("A-1", 500)
+                charge("A-1", 500)  # a replay of call_1: stored result
+            with with_call_id("call_2"):
+                charge("A-1", 500)  # a new call from the model: runs
+        assert charges == ["A-1", "A-1"]
+        ```
+    """
+
+    def __init__(
+        self,
+        store: Any = None,
+        *,
+        ttl: float | str = "1d",
+        lease: float | str = "5m",
+        on_unknown: UnknownHook | None = None,
+        wait_timeout: float | str | None = None,
+        uncertain: tuple[type[BaseException], ...] = (TimeoutError,),
+        poll: float = 0.05,
+        name: str = "effects",
+    ) -> None:
+        self.store = _effect_store(store)
+        self.ttl = _parse_seconds(ttl)
+        self.lease = _parse_seconds(lease)
+        if self.ttl <= 0 or self.lease <= 0:
+            raise ValueError("ttl and lease must be positive")
+        if self.lease > self.ttl:
+            raise ValueError("lease must not be longer than ttl")
+        if on_unknown is not None and not callable(on_unknown):
+            raise TypeError("on_unknown must be callable")
+        self.on_unknown = on_unknown
+        self.wait_timeout = None if wait_timeout is None else _parse_seconds(wait_timeout)
+        self.uncertain = uncertain
+        if poll <= 0:
+            raise ValueError("poll must be positive")
+        self.poll = poll
+        self.name = name
+        self._lock = threading.Lock()
+        self._events: dict[str, threading.Event] = {}
+        self._orphans: set[str] = set()
+        self._local_store = isinstance(self.store, MemoryEffectStore)
+
+    # -- keys -----------------------------------------------------------------
+    def key(
+        self,
+        tool: str,
+        *,
+        call_id: str | None = None,
+        arguments: Mapping[str, Any] | None = None,
+        run_id: str | None = None,
+        business_key: Any = None,
+    ) -> str:
+        """The ledger key for a call: business key, else call id, else run and digest."""
+        return _effect_key(tool, call_id, canonical(arguments), run_id, business_key)
+
+    def lookup(self, key: str) -> EffectRecord | None:
+        """The live record for ``key`` (see `key`), or None."""
+        return self.store.get(key)
+
+    def forget(self, key: str) -> bool:
+        """Delete the record for ``key`` so the next call runs again."""
+        with self._lock:
+            self._orphans.discard(key)
+        return self.store.delete(key)
+
+    # -- helpers --------------------------------------------------------------
+    def _new(
+        self, key: str, tool: str, digest: str | None, call_id: str | None, attempts: int
+    ) -> EffectRecord:
+        now = _core.wall_time()
+        return EffectRecord(
+            key=key,
+            tool=tool,
+            state="started",
+            owner=uuid.uuid4().hex,
+            call_id=call_id,
+            arguments=digest,
+            run_id=run_id_var.get(),
+            started_at=now,
+            lease_until=now + self.lease,
+            attempts=attempts,
+        )
+
+    def _is_uncertain(self, exc: BaseException) -> bool:
+        if _is_model_retry(exc):
+            return False
+        return not isinstance(exc, Exception) or isinstance(exc, self.uncertain)
+
+    def _verdict(self, current: EffectRecord, digest: str | None) -> tuple[str, str | None]:
+        """What to do about a live record: (action, unknown_reason)."""
+        if (
+            current.call_id is not None
+            and digest is not None
+            and current.arguments is not None
+            and current.arguments != digest
+        ):
+            raise EffectConflict(
+                f"tool call id {current.call_id!r} was reused with different arguments "
+                f"for tool {current.tool!r}",
+                record=current,
+            )
+        if current.state == "succeeded":
+            return ("replay", None) if current.has_result else ("unknown", "result_lost")
+        if current.state == "failed":
+            return ("unknown", "uncertain") if current.uncertain else ("rerun", None)
+        with self._lock:
+            orphan = current.key in self._orphans and current.key not in self._events
+        if orphan or current.lease_until <= _core.wall_time():
+            return "unknown", "crashed"
+        return "wait", None
+
+    def _unknown(self, current: EffectRecord, reason: str) -> EffectUnknown:
+        what = {
+            "crashed": "started but never recorded an outcome (crash or store failure)",
+            "uncertain": "failed in a way that may have left the effect half done",
+            "result_lost": "succeeded but its result could not be stored",
+        }[reason]
+        _core.emit("tool.effect_unknown", current.tool, run_id=current.run_id, reason=reason)
+        return EffectUnknown(
+            f"tool {current.tool!r} ({current.key}): a previous attempt {what}; "
+            "pass EffectLedger(on_unknown=...) to decide",
+            record=current,
+            reason=reason,
+        )
+
+    def _finished(
+        self, owned: EffectRecord, value: Any, exc: BaseException | None
+    ) -> list[EffectRecord]:
+        """Outcome records to try, in order (the second drops an unstorable result)."""
+        now = _core.wall_time()
+        if exc is not None:
+            return [
+                dataclasses.replace(
+                    owned,
+                    state="failed",
+                    finished_at=now,
+                    error={"type": type(exc).__name__, "message": str(exc)[:500]},
+                    uncertain=self._is_uncertain(exc),
+                )
+            ]
+        done = dataclasses.replace(
+            owned, state="succeeded", finished_at=now, result=value, has_result=True
+        )
+        return [done, dataclasses.replace(done, result=None, has_result=False)]
+
+    def _settle(self, owned: EffectRecord, value: Any, exc: BaseException | None) -> None:
+        *first, last = self._finished(owned, value, exc)
+        written: bool | None = None
+        for record in first:
+            try:
+                written = self.store.settle(record, self.ttl)
+                break
+            except (TypeError, ValueError):
+                continue  # the result is not serialisable: store the outcome without it
+        if written is None:
+            written = self.store.settle(last, self.ttl)
+        if not written:
+            _core.get_logger(None).warning(
+                "effect ledger: the record of %s (%s) was taken over after its lease ran "
+                "out; this outcome was not stored",
+                owned.tool,
+                owned.key,
+            )
+
+    def _begin_local(self, key: str) -> threading.Event:
+        event = threading.Event()
+        with self._lock:
+            self._events[key] = event
+            self._orphans.discard(key)
+        return event
+
+    def _end_local(self, key: str, event: threading.Event, orphaned: bool) -> None:
+        with self._lock:
+            if self._events.get(key) is event:
+                del self._events[key]
+            if orphaned:
+                self._orphans.add(key)
+        event.set()
+
+    def _local_event(self, key: str) -> threading.Event | None:
+        with self._lock:
+            return self._events.get(key)
+
+    def _decide(self, error: EffectUnknown, answer: Any) -> Any:
+        if answer == "retry" or isinstance(answer, EffectResolved):
+            return answer
+        if answer is None or answer == "raise":
+            raise error
+        raise TypeError(
+            "on_unknown must return 'retry', 'raise', None or EffectResolved(value); "
+            f"got {answer!r}"
+        )
+
+    # -- sync -----------------------------------------------------------------
+    def execute(
+        self,
+        tool: str,
+        func: Callable[..., R],
+        args: tuple[Any, ...] = (),
+        kwargs: Mapping[str, Any] | None = None,
+        *,
+        key: str,
+        digest: str | None = None,
+        call_id: str | None = None,
+    ) -> R:
+        """Run ``func(*args, **kwargs)`` at most once per ``key``; see the class docs."""
+        kwargs = dict(kwargs or {})
+        attempts = 1
+        expect: str | None = None
+        deadline = None if self.wait_timeout is None else _core.monotonic() + self.wait_timeout
+        while True:
+            mine = self._new(key, tool, digest, call_id, attempts)
+            current = self.store.claim(mine, self.ttl, expect)
+            if current is None:
+                return self._run_sync(mine, func, args, kwargs)
+            expect = None
+            action, reason = self._verdict(current, digest)
+            if action == "replay":
+                return cast(R, current.result)
+            if action == "rerun":
+                expect, attempts = current.owner, current.attempts + 1
+                continue
+            if action == "wait":
+                self._wait_sync(current, deadline)
+                continue
+            assert reason is not None
+            error = self._unknown(current, reason)
+            answer = self.on_unknown(error) if self.on_unknown is not None else None
+            if inspect.isawaitable(answer):
+                answer = asyncio.run(_await(answer))
+            decision = self._decide(error, answer)
+            if decision == "retry":
+                expect, attempts = current.owner, current.attempts + 1
+                continue
+            return cast(R, self._resolve_sync(current, decision.value, attempts))
+
+    def _resolve_sync(self, current: EffectRecord, value: Any, attempts: int) -> Any:
+        mine = self._new(current.key, current.tool, current.arguments, current.call_id, attempts)
+        blocked = self.store.claim(mine, self.ttl, current.owner)
+        if blocked is not None:
+            raise self._unknown(blocked, "crashed")
+        self._settle(mine, value, None)
+        with self._lock:
+            self._orphans.discard(current.key)
+        _core.emit("tool.effect_resolved", current.tool, run_id=current.run_id)
+        return value
+
+    def _run_sync(
+        self,
+        mine: EffectRecord,
+        func: Callable[..., R],
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> R:
+        event = self._begin_local(mine.key)
+        orphaned = True
+        try:
+            try:
+                value = func(*args, **kwargs)
+            except BaseException as exc:
+                try:
+                    self._settle(mine, None, exc)
+                    orphaned = False
+                except Exception:
+                    _core.get_logger(None).exception(
+                        "effect ledger could not record the failure of %s", mine.tool
+                    )
+                raise
+            self._settle(mine, value, None)
+            orphaned = False
+            return value
+        finally:
+            self._end_local(mine.key, event, orphaned)
+
+    def _wait_sync(self, current: EffectRecord, deadline: float | None) -> None:
+        event = self._local_event(current.key)
+        while True:
+            now = _core.wall_time()
+            pause = max(0.0, current.lease_until - now)
+            if deadline is not None:
+                left = deadline - _core.monotonic()
+                if left <= 0:
+                    raise TimeoutExpired(
+                        f"tool {current.tool!r} is still running elsewhere ({current.key})",
+                        seconds=self.wait_timeout or 0.0,
+                    )
+                pause = min(pause, left)
+            if event is not None:
+                event.wait(min(pause, 1.0) if pause else 0)
+                if event.is_set():
+                    return
+            else:
+                _core.sleep(min(self.poll, pause) if pause else 0)
+            latest = self.store.get(current.key)
+            if latest is None or latest.owner != current.owner or latest.state != "started":
+                return
+            if latest.lease_until <= _core.wall_time() or self._orphaned(current.key):
+                return
+
+    def _orphaned(self, key: str) -> bool:
+        with self._lock:
+            return key in self._orphans
+
+    # -- async ----------------------------------------------------------------
+    async def _store(self, method: Callable[..., Any], *args: Any) -> Any:
+        if self._local_store:
+            return method(*args)
+        return await asyncio.to_thread(method, *args)
+
+    async def aexecute(
+        self,
+        tool: str,
+        func: Callable[..., Awaitable[R]],
+        args: tuple[Any, ...] = (),
+        kwargs: Mapping[str, Any] | None = None,
+        *,
+        key: str,
+        digest: str | None = None,
+        call_id: str | None = None,
+    ) -> R:
+        """The async form of `execute` for an ``async def`` ``func``."""
+        kwargs = dict(kwargs or {})
+        attempts = 1
+        expect: str | None = None
+        deadline = None if self.wait_timeout is None else _core.monotonic() + self.wait_timeout
+        while True:
+            mine = self._new(key, tool, digest, call_id, attempts)
+            current = await self._store(self.store.claim, mine, self.ttl, expect)
+            if current is None:
+                return await self._run_async(mine, func, args, kwargs)
+            expect = None
+            action, reason = self._verdict(current, digest)
+            if action == "replay":
+                return cast(R, current.result)
+            if action == "rerun":
+                expect, attempts = current.owner, current.attempts + 1
+                continue
+            if action == "wait":
+                await self._wait_async(current, deadline)
+                continue
+            assert reason is not None
+            error = self._unknown(current, reason)
+            answer = self.on_unknown(error) if self.on_unknown is not None else None
+            if inspect.isawaitable(answer):
+                answer = await answer
+            decision = self._decide(error, answer)
+            if decision == "retry":
+                expect, attempts = current.owner, current.attempts + 1
+                continue
+            value = decision.value
+            mine = self._new(key, tool, current.arguments, current.call_id, attempts)
+            blocked = await self._store(self.store.claim, mine, self.ttl, current.owner)
+            if blocked is not None:
+                raise self._unknown(blocked, "crashed")
+            await self._store(self._settle, mine, value, None)
+            with self._lock:
+                self._orphans.discard(key)
+            _core.emit("tool.effect_resolved", tool, run_id=current.run_id)
+            return cast(R, value)
+
+    async def _run_async(
+        self,
+        mine: EffectRecord,
+        func: Callable[..., Awaitable[R]],
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> R:
+        event = self._begin_local(mine.key)
+        orphaned = True
+        try:
+            try:
+                value = await func(*args, **kwargs)
+            except BaseException as exc:
+                try:
+                    await self._store(self._settle, mine, None, exc)
+                    orphaned = False
+                except Exception:
+                    _core.get_logger(None).exception(
+                        "effect ledger could not record the failure of %s", mine.tool
+                    )
+                raise
+            await self._store(self._settle, mine, value, None)
+            orphaned = False
+            return value
+        finally:
+            self._end_local(mine.key, event, orphaned)
+
+    async def _wait_async(self, current: EffectRecord, deadline: float | None) -> None:
+        while True:
+            pause = max(0.0, current.lease_until - _core.wall_time())
+            if deadline is not None:
+                left = deadline - _core.monotonic()
+                if left <= 0:
+                    raise TimeoutExpired(
+                        f"tool {current.tool!r} is still running elsewhere ({current.key})",
+                        seconds=self.wait_timeout or 0.0,
+                    )
+                pause = min(pause, left)
+            event = self._local_event(current.key)
+            await asyncio.sleep(min(self.poll if event is None else 0.005, pause))
+            if event is not None and event.is_set():
+                return
+            latest = await self._store(self.store.get, current.key)
+            if latest is None or latest.owner != current.owner or latest.state != "started":
+                return
+            if latest.lease_until <= _core.wall_time() or self._orphaned(current.key):
+                return
+
+    def __repr__(self) -> str:
+        return f"EffectLedger({type(self.store).__name__}, lease={self.lease:g}s)"
+
+
+def _effect_key(
+    tool: str, call_id: str | None, digest: str | None, run_id: str | None, business_key: Any
+) -> str:
+    if business_key is not None:
+        return f"{tool}:key:{business_key}"
+    if call_id is not None:
+        return f"{tool}:call:{call_id}"
+    return f"{tool}:{run_id or '-'}:{digest}"
+
+
+def _is_model_retry(exc: BaseException) -> bool:
+    """True for pydantic-ai's ``ModelRetry`` (matched by class name, never imported)."""
+    return any(cls.__name__ == "ModelRetry" for cls in type(exc).__mro__)
+
+
 # --------------------------------------------------------------------------- tools
 
 
@@ -1017,6 +1961,7 @@ def tool(
     dry_result: Any = _MISSING,
     store: Any = None,
     ttl: float | str = "1d",
+    ledger: EffectLedger | None = None,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]: ...
 
 
@@ -1034,6 +1979,7 @@ def tool(
     dry_result: Any = _MISSING,
     store: Any = None,
     ttl: float | str = "1d",
+    ledger: EffectLedger | None = None,
 ) -> Any:
     """Mark a sync or async function as an agent tool with replay-safe side effects.
 
@@ -1068,6 +2014,13 @@ def tool(
         store: Result store for deduplication (shared across processes with
             ``RedisStore(fail_open=False)``); in-process `MemoryResultStore` by default.
         ttl: How long a result is replayed (``"1d"`` by default).
+        ledger: An `EffectLedger` to deduplicate with instead of ``store``: the key is
+            the provider's tool-call id when one is current (`with_call_id`; adapters
+            set it), so a replayed call returns the stored result while a new call from
+            the model runs; without an id it is the run id and argument digest as above.
+            Calls are recorded as started / succeeded / failed, so a crash between the
+            side effect and the record is detected (`EffectUnknown`). A ledger turns
+            deduplication on for read-only tools too, unless ``idempotent_key=False``.
 
     Returns:
         The wrapped function, with the same signature. `tool_spec` reads its `ToolSpec`.
@@ -1102,13 +2055,18 @@ def tool(
             dry_result=dry_result,
             store=store,
             ttl=ttl,
+            ledger=ledger,
         )
     if not callable(func):
         raise TypeError("tool() expects a function")
     if not (idempotent_key is None or isinstance(idempotent_key, bool) or callable(idempotent_key)):
         raise TypeError("idempotent_key must be None, a bool or a callable")
     limit = None if timeout is None else _parse_seconds(timeout)
-    dedupe = idempotent_key is not False and (idempotent_key is not None or not read_only)
+    if ledger is not None and not isinstance(ledger, EffectLedger):
+        raise TypeError("ledger must be an EffectLedger")
+    dedupe = idempotent_key is not False and (
+        idempotent_key is not None or not read_only or ledger is not None
+    )
     is_async = _core.is_async(func)
     spec = ToolSpec(
         name=name or func.__name__,
@@ -1122,7 +2080,9 @@ def tool(
     )
     signature = inspect.signature(func)
     params = list(signature.parameters)
-    skip_first = bool(params) and params[0] in ("self", "cls")
+    skip_first = bool(params) and (
+        params[0] in ("self", "cls") or _is_framework_context(signature.parameters[params[0]])
+    )
 
     core: Callable[..., Any] = func
     if limit is not None:
@@ -1145,8 +2105,53 @@ def tool(
             return f"tool:{spec.name}:key:{idempotent_key(*args, **kwargs)}"
         return f"tool:{spec.name}:{run_id_var.get() or '-'}:{digest}"
 
+    def ledger_key(args: tuple[Any, ...], kwargs: dict[str, Any], digest: str | None) -> str:
+        business = None
+        if callable(idempotent_key) and not isinstance(idempotent_key, bool):
+            business = idempotent_key(*args, **kwargs)
+        return _effect_key(spec.name, tool_call_id.get(), digest, run_id_var.get(), business)
+
     runner: Callable[..., Any] = core
-    if dedupe:
+    if dedupe and ledger is not None:
+        if is_async:
+
+            async def ledger_async(*args: Any, **kwargs: Any) -> Any:
+                _mark_ran(spec)
+                return await core(*args, **kwargs)
+
+            async def run_ledger_async(*args: Any, **kwargs: Any) -> Any:
+                digest = _call_key.get()
+                return await ledger.aexecute(
+                    spec.name,
+                    ledger_async,
+                    args,
+                    kwargs,
+                    key=ledger_key(args, kwargs, digest),
+                    digest=digest,
+                    call_id=tool_call_id.get(),
+                )
+
+            runner = run_ledger_async
+        else:
+
+            def ledger_sync(*args: Any, **kwargs: Any) -> Any:
+                _mark_ran(spec)
+                return core(*args, **kwargs)
+
+            def run_ledger(*args: Any, **kwargs: Any) -> Any:
+                digest = _call_key.get()
+                return ledger.execute(
+                    spec.name,
+                    ledger_sync,
+                    args,
+                    kwargs,
+                    key=ledger_key(args, kwargs, digest),
+                    digest=digest,
+                    call_id=tool_call_id.get(),
+                )
+
+            runner = run_ledger
+    elif dedupe:
         from python_wrap.idempotency import idempotent
 
         def key_of(*args: Any, **kwargs: Any) -> str:
@@ -1167,6 +2172,10 @@ def tool(
 
             runner = idempotent(key=key_of, ttl=ttl, store=store, in_progress="wait")(marked)
 
+    def call_key(args: tuple[Any, ...], kwargs: dict[str, Any], digest: str | None) -> str:
+        # With a ledger the context carries the digest; the ledger builds its own key.
+        return (digest or "") if ledger is not None else make_key(args, kwargs, digest)
+
     def prepare(
         args: tuple[Any, ...], kwargs: dict[str, Any]
     ) -> tuple[_Decision, ToolCall, str | None]:
@@ -1182,6 +2191,7 @@ def tool(
             run_id_var.get(),
             spec.read_only,
             spec.description,
+            tool_call_id.get(),
         )
         return decision, call, digest
 
@@ -1198,7 +2208,7 @@ def tool(
                 _core.emit("tool.call", spec.name, run_id=call.run_id)
                 return await runner(*args, **kwargs)
             state = _CallState()
-            resets = (_call_state.set(state), _call_key.set(make_key(args, kwargs, digest)))
+            resets = (_call_state.set(state), _call_key.set(call_key(args, kwargs, digest)))
             try:
                 result = await runner(*args, **kwargs)
             finally:
@@ -1222,7 +2232,7 @@ def tool(
                 _core.emit("tool.call", spec.name, run_id=call.run_id)
                 return runner(*args, **kwargs)
             state = _CallState()
-            resets = (_call_state.set(state), _call_key.set(make_key(args, kwargs, digest)))
+            resets = (_call_state.set(state), _call_key.set(call_key(args, kwargs, digest)))
             try:
                 result = runner(*args, **kwargs)
             finally:
@@ -1251,6 +2261,28 @@ def tool(
         ),
     )
     return wrapper
+
+
+_CONTEXT_TYPES = ("RunContext", "ToolContext", "RunContextWrapper")
+
+
+def _is_framework_context(param: inspect.Parameter) -> bool:
+    """True for a first parameter that is an agent framework's run context.
+
+    pydantic-ai passes ``ctx: RunContext[...]`` and the OpenAI Agents SDK
+    ``ctx: RunContextWrapper[...]`` / ``ToolContext``; they differ on every call, so they
+    are left out of the argument digest (like ``self``).
+    """
+    annotation = param.annotation
+    if annotation is inspect.Parameter.empty:
+        return False
+    text = annotation if isinstance(annotation, str) else repr(annotation)
+    origin = getattr(annotation, "__origin__", annotation)
+    name = getattr(origin, "__name__", "") if not isinstance(annotation, str) else ""
+    return name in _CONTEXT_TYPES or any(
+        text == kind or text.startswith(kind + "[") or f".{kind}" in text or f"{kind}[" in text
+        for kind in _CONTEXT_TYPES
+    )
 
 
 def _mark_ran(spec: ToolSpec) -> None:

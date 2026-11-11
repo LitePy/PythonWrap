@@ -571,6 +571,39 @@ __all__ = [
     "wrap_methods",
 ]
 
+# Effect ledger, call ids and MCP guards (python_wrap.agents, python_wrap.mcp_guard).
+from .agents import (  # noqa: E402
+    EffectConflict,
+    EffectLedger,
+    EffectRecord,
+    EffectResolved,
+    EffectStore,
+    EffectUnknown,
+    MemoryEffectStore,
+    RedisEffectStore,
+    SQLiteEffectStore,
+    tool_call_id,
+    with_call_id,
+)
+from .mcp_guard import MCPGuard, mcp_breaker, mcp_guard  # noqa: E402
+
+__all__ += [
+    "EffectConflict",
+    "EffectLedger",
+    "EffectRecord",
+    "EffectResolved",
+    "EffectStore",
+    "EffectUnknown",
+    "MCPGuard",
+    "MemoryEffectStore",
+    "RedisEffectStore",
+    "SQLiteEffectStore",
+    "mcp_breaker",
+    "mcp_guard",
+    "tool_call_id",
+    "with_call_id",
+]
+
 # Agent tool-use safety (python_wrap.agents).
 __all__ += [
     "AgentError",
