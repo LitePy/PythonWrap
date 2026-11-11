@@ -112,6 +112,9 @@ Install with `pip install python-wrap` (Python 3.10+, no runtime dependencies). 
 - [Observability](https://pythonwrap.readthedocs.io/cookbook/observability/): You need to know *what happened* in production: which function was called, with what, by whom, how long it took and how it ended.
 - [Framework integrations](https://pythonwrap.readthedocs.io/cookbook/framework-integrations/): The adapters are optional imports.
 - [Existing FastAPI application](https://pythonwrap.readthedocs.io/cookbook/existing-fastapi-app/): PythonWrap can standardize resilience controls and diagnostics around service functions.
+- [Resilient LLM client](https://pythonwrap.readthedocs.io/cookbook/resilient-llm-client/): Calling a model API in production fails in ways ordinary HTTP does not: rate limits that tell you exactly how long to wait, "overloaded" errors that clear in seconds, refusals t...
+- [Agent tool layer](https://pythonwrap.readthedocs.io/cookbook/agent-tool-layer/): An agent loop calls a model, the model asks for tools, tools change the world.
+- [Building with AI coding agents](https://pythonwrap.readthedocs.io/cookbook/building-with-agents/): An AI coding agent that adds retries, caching or rate limits to your code tends to guess: unbounded retries, retried POSTs, decorators in the wrong order.
 
 ## API reference
 
@@ -210,5 +213,5 @@ Install with `pip install python-wrap` (Python 3.10+, no runtime dependencies). 
 - [Migrating from tenacity](https://pythonwrap.readthedocs.io/project/migrating-from-tenacity/): python-wrap's `retry` covers the common tenacity patterns with one decorator and plain keyword arguments instead of composable strategy objects.
 - [Migrating from pybreaker](https://pythonwrap.readthedocs.io/project/migrating-from-pybreaker/): python-wrap's `CircuitBreaker` has the same closed, open and half-open cycle as pybreaker.
 - [Migrating from limits](https://pythonwrap.readthedocs.io/project/migrating-from-limits/): The `limits` library separates a *rate limit item* (`5/minute`), a *storage* (memory, Redis, ...) and a *strategy* (fixed window, moving window).
-- [The migration tool](https://pythonwrap.readthedocs.io/project/migrate-tool/): `python -m python_wrap migrate` rewrites the retry decorators of tenacity and backoff to `python_wrap.retry`.
+- [The migration tool](https://pythonwrap.readthedocs.io/project/migrate-tool/): `python -m python_wrap migrate` rewrites the retry decorators of tenacity and backoff to `python_wrap.retry`, and hand-rolled retry loops around LLM client calls to `llm_retry`...
 - [Changelog](https://pythonwrap.readthedocs.io/project/changelog/)

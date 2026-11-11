@@ -128,6 +128,30 @@ privileges and environment variables.
 
 Regression tests: `tests/test_mcp.py`, `tests/test_introspect.py`.
 
+## Prompt and audit-tape data handling
+
+LLM prompts, tool arguments and model output routinely contain personal data and secrets.
+
+- **Redaction defaults.** `Redactor` masks keys, bearer tokens, JWTs, `password=...` pairs,
+  emails, Luhn-valid card numbers and values under sensitive key names, and truncates long
+  strings and lists. Events and spans carry no prompt or response content unless
+  `capture_content=True` is passed.
+- **The tape stores redacted content.** `AuditTape` is an explicit sink: it keeps inputs,
+  outputs and error messages only after the redactor ran, so replay can work. Use
+  `capture_content=False` for metadata only (tokens, cost, latency, status). Protect a JSONL or
+  SQLite tape file like any log: redaction is pattern based and cannot catch every secret
+  or personal detail, so add your own `patterns` for domain identifiers.
+- **Replay never executes tools.** `replay(tape)` serves recorded results from the tape;
+  it does not call the provider, run the tool function or touch the network. A flow that
+  diverges raises `ReplayMismatch`.
+- **The MCP server is read-only.** It holds no prompts or tapes, exposes no tool that
+  reads a tape, writes files or calls a model, and `migrate_preview` only parses source.
+- **Caches and budgets.** `llm_cache` keys are hashes of the request, but cached values are
+  stored as returned: keep personal data out of shared (Redis) caches or scope the key.
+  `Budget` counters store numbers only.
+
+Regression tests: `tests/test_genai.py`, `tests/test_redaction.py`.
+
 ## Accepted risks
 
 - `RedisStore`/`AsyncRedisStore` default to pickle for backward compatibility. Only use them

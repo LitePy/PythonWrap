@@ -630,8 +630,10 @@ def test_llm_loop_refuses_when_call_uses_loop_variable_or_exception() -> None:
         "            return client.messages.create(model='m', n=n)\n"
         "        except Exception:\n            time.sleep(1)\n"
     )
-    uses_exc = uses_var.replace(", n=n", "").replace("Exception:", "Exception as exc:").replace(
-        "time.sleep(1)", "time.sleep(len(str(exc)))"
+    uses_exc = (
+        uses_var.replace(", n=n", "")
+        .replace("Exception:", "Exception as exc:")
+        .replace("time.sleep(1)", "time.sleep(len(str(exc)))")
     )
     for source in (uses_var, uses_exc):
         result = migrate_source(source)
