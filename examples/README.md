@@ -16,6 +16,7 @@ $ python examples/resilient_http.py
 | [`cli_tools.py`](cli_tools.py) | `timing`, `profile`, `benchmark`, `run_sync`, `debounce`, `throttle` | [CLI tools](../docs/cookbook/cli-and-scripts.md) |
 | [`cooperative_timeout.py`](cooperative_timeout.py) | `checkpoint()`, `cancel_requested()` and `current_token()` stopping a sync function that `timeout` cannot interrupt; `foreign_alarm_state()` | [Timeout](../docs/features/resilience/timeout.md#cooperative-cancellation) |
 | [`dataloader.py`](dataloader.py) | `batch_calls` turning 20 queries into 1 | [DataLoader batching](../docs/cookbook/dataloader-batching.md) |
+| [`per_instance_state.py`](per_instance_state.py) | `throttle`/`debounce`/`rate_limit` with `per_instance=` and `key=`, `limiter_of(instance=)`, `memoize(singleflight=True)` with threads | [FastAPI](../docs/cookbook/fastapi.md#per-instance-state-in-service-classes) |
 | [`audit_logging.py`](audit_logging.py) | `log_args` and `audit` with shared redaction, JSON log lines | [Observability](../docs/cookbook/observability.md) |
 
 Several scripts use `python_wrap.testing.fake_clock` so that backoff sleeps and cache expiry take no real time. That is a handy trick in your own scripts and tests too; see [Testing code that uses python-wrap](../docs/cookbook/testing-your-code.md).

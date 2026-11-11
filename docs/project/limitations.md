@@ -31,7 +31,7 @@ Related details:
 
 ## Shared state on methods
 
-`rate_limit`, `throttle` and `debounce` keep their state on the **decorated function**, not on the instance. When you decorate a method, every instance shares one limiter, one throttle window and one pending debounced call.
+`rate_limit`, `throttle` and `debounce` keep their state on the **decorated function**, not on the instance. When you decorate a method, every instance shares one limiter, one throttle window and one pending debounced call by default. **Addressed with an opt-in:** `per_instance=True` and `key=` split the state (see below and [Per key and per instance](../features/concurrency/throttle-debounce.md#per-key-and-per-instance)). Defaults are unchanged, so existing code keeps the shared behavior until you opt in.
 
 ```python
 from python_wrap import throttle
@@ -57,7 +57,7 @@ What to do:
 
 ## `memoize` on methods
 
-`self` is part of the cache key, so results are per instance, but the cache holds a **strong reference** to every instance it has seen. Instances are therefore never garbage collected while their entries are cached.
+`self` is part of the cache key, so results are per instance, but a plain `@memoize` method holds a **strong reference** to every instance it has seen, so instances are never garbage collected while their entries are cached. **Addressed with an opt-in:** `per_instance=True` (below); the default is unchanged, and `python -m python_wrap doctor` flags the unbounded plain case as PW011.
 
 Mitigations:
 
@@ -66,7 +66,7 @@ Mitigations:
 - Use `key=` that ignores `self` (for results that do not depend on the instance), so the instance is not stored.
 - Call `cache_clear()` when a long-lived cache has served its purpose.
 
-Also note that for sync functions two threads that miss on the same key at the same moment may both compute the value (the function is never called while holding the lock); the last stored result wins. Pass `singleflight=True` to `memoize` if the computation must not run twice.
+Also note that for sync functions two threads that miss on the same key at the same moment may both compute the value (the function is never called while holding the lock); the last stored result wins. Pass `singleflight=True` to `memoize` if the computation must not run twice ([details](../features/caching/memoize.md#one-computation-per-key-across-threads)).
 
 ## `measure_memory` and `profile`
 

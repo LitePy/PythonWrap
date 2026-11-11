@@ -68,6 +68,9 @@ Sync functions de-duplicate across threads. Async functions de-duplicate across 
 !!! warning "State on methods"
     On a **method**, `singleflight` state belongs to the decorated function and is shared by every instance. The default key includes `self`, which separates instances; if you pass `key=`, include whatever must keep instances apart. See [Limitations](../../project/limitations.md).
 
+!!! tip "Memoize with singleflight"
+    To both cache results and run a missing key once across threads, use [`memoize(singleflight=True)`](memoize.md#one-computation-per-key-across-threads) instead of stacking the two.
+
 ## See also
 
 - [Memoize](memoize.md), [Batching](batching.md)

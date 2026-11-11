@@ -107,8 +107,37 @@ else:
     raise AssertionError("ana is over her limit")
 ```
 
-!!! tip "Per-instance limits on methods"
-    Use `per_instance=True` to give each instance its own limiter (held through a weak reference, so instances stay collectable; reach one with `limiter_of(obj.method, instance=obj)`), or `key=` with an identifying attribute.
+### One limit per instance
+
+On a method, the limiter is shared by every instance unless you pass `per_instance=True`. Each instance then gets its own limiter, held through a weak reference (instances stay collectable and need not be hashable; they must be weak-referenceable). It can be combined with `key=`, which is then applied inside each instance. Reach an instance's limiter with `limiter_of(func, instance=obj)`; it returns `None` until that instance has called the method.
+
+```python
+from python_wrap import RateLimitExceeded, rate_limit
+from python_wrap.concurrency import limiter_of
+
+class Client:
+    @rate_limit(1, 60.0, per_instance=True)
+    def call(self) -> str:
+        return "ok"
+
+a, b = Client(), Client()
+assert a.call() == "ok"
+assert b.call() == "ok"                      # its own budget
+try:
+    a.call()
+except RateLimitExceeded:
+    pass
+else:
+    raise AssertionError("a is over its limit")
+
+limiter = limiter_of(Client.call, instance=a)
+assert limiter is not None
+limiter.reset()
+assert a.call() == "ok"
+assert limiter_of(Client.call, instance=Client()) is None   # never called
+```
+
+See [Throttle and debounce](throttle-debounce.md#per-key-and-per-instance) for the same options on `throttle` and `debounce`.
 
 ## Several limits at once
 
