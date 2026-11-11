@@ -68,6 +68,21 @@ Unreleased on `main`; see the [CHANGELOG](https://github.com/LitePy/PythonWrap/b
 The [stable core](https://pythonwrap.readthedocs.io/en/latest/project/stability/) (retry,
 circuit breaker, timeout, policies, presets) is now frozen ahead of 1.0.
 
+## New in 0.4 (beta)
+
+| Need | API |
+| --- | --- |
+| Stop sync work cooperatively when `timeout` fires | `checkpoint()`, `cancel_requested()`, `CancelToken` |
+| State per instance or per key on methods | `throttle`/`debounce`/`rate_limit` with `key=`, `per_instance=` |
+| One computation per cache miss across threads | `memoize(..., singleflight=True)` |
+| Catch risky stacks before production | `doctor` checks PW009 to PW012, `doctor --multiprocess` |
+| Redis windows from async code | `AsyncRedisWindow`, `ThreadedStore` |
+| Buffered writes that survive a crash | `buffered(..., journal=SQLiteJournal(...))`, `replay()` |
+| Reject annotations that cannot be checked | `enforce_types(strict=True)`, TypedDict and Protocol checks |
+
+Install the beta with `pip install --pre python-wrap`. See the
+[changelog](https://pythonwrap.readthedocs.io/en/latest/project/changelog/) for details.
+
 ## New in 0.3
 
 The toolkit now includes production integration helpers alongside the existing decorators:

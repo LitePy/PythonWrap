@@ -10,6 +10,14 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
 
 ## [Unreleased]
 
+## [0.4.0b1] - 2026-11-11
+
+First beta. The public API is feature-complete for 0.4: the remaining work before the
+stable release is feedback, bug fixes and documentation. Highlights: cooperative timeout
+cancellation, per-instance state for `throttle`/`debounce`/`rate_limit`, single-flight
+`memoize`, doctor checks PW009-PW012, `AsyncRedisWindow`, durable buffer journals and
+`enforce_types(strict=True)`. Python 3.10 to 3.14 are tested.
+
 ### Added
 
 - Cooperative cancellation for sync `timeout`: `CancelToken`, `cancel_requested()`,
@@ -574,7 +582,8 @@ Core:
 
 Initial release.
 
-[Unreleased]: https://github.com/LitePy/PythonWrap/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/LitePy/PythonWrap/compare/v0.4.0b1...HEAD
+[0.4.0b1]: https://github.com/LitePy/PythonWrap/compare/v0.3.0...v0.4.0b1
 [0.3.0]: https://github.com/LitePy/PythonWrap/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/LitePy/PythonWrap/compare/v0.1.0...v0.2.1
 [0.1.0]: https://github.com/LitePy/PythonWrap/releases/tag/v0.1.0
