@@ -196,13 +196,12 @@ nav:
           - Validation: features/correctness/validation.md
           - State and transactions: features/correctness/state.md
           - Batch processing: features/correctness/batch-processing.md
-      - AI & agents:
-          - LLM calls: features/ai/llm-calls.md
       - Developer tools: features/devtools.md
       - Configuration: features/configuration.md
       - Dynamic switches: features/switches.md
       - Web helpers: features/web-helpers.md
   - AI & agents:
+      - LLM calls: features/ai/llm-calls.md
       - Testing agents: features/ai/testing-agents.md
       - AI observability and audit: features/ai/observability.md
       - Agent tool safety: features/ai/agent-safety.md
