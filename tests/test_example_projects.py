@@ -1,4 +1,4 @@
-"""Each project in ``examples/projects/`` must run its own tests and its ``main.py``."""
+"""Each project in ``examples/projects/`` must run its own tests and its ``main.py`` or ``run.py``."""
 
 from __future__ import annotations
 
@@ -41,8 +41,9 @@ def test_project_tests_pass(project: Path) -> None:
 
 @pytest.mark.parametrize("project", PROJECTS, ids=lambda p: p.name)
 def test_project_main_runs(project: Path) -> None:
+    entry = next(p for p in (project / "main.py", project / "run.py") if p.exists())
     result = subprocess.run(
-        [sys.executable, str(project / "main.py")],
+        [sys.executable, str(entry)],
         capture_output=True,
         text=True,
         timeout=30,
