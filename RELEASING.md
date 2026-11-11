@@ -42,7 +42,10 @@ was removed; revoke the token it used at <https://pypi.org/manage/account/token/
    uv run mypy
    uv run mkdocs build --strict
    uv build && uvx twine check --strict dist/* && rm -rf dist
+   python scripts/smoke_wheel.py   # wheel in a fresh venv: version, no deps, py.typed, CLIs
    ```
+
+   The default `pytest` run includes the `tests/e2e/` happy-path scenarios.
 
 4. **Merge to `main`**, after the local checks pass. CI and docs run only on pushes
    to `main`, so PR updates do not start Actions runs. Wait for both workflows on the

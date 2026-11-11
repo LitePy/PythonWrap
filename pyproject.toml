@@ -95,6 +95,7 @@ exclude = ["**/__pycache__", "**/*.py[cod]", "**/.DS_Store"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--strict-markers -q"
+markers = ["e2e: release-grade happy-path scenarios that use only the public API"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 filterwarnings = ["error::pytest.PytestUnraisableExceptionWarning"]
