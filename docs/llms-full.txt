@@ -1782,6 +1782,241 @@ A runnable version lives in `examples/llm_chaos.py`.
 
 ---
 
+Source: https://pythonwrap.readthedocs.io/features/ai/shared-limits-and-cassettes/
+
+## Shared limits, validated output and cassettes
+
+Three problems show up once an LLM-backed service runs in more than one process or gets a real test suite:
+
+- N workers each think they own the whole tokens-per-minute quota, so together they cause a 429 storm.
+- The model returns JSON that does not validate, and every retry resends (and pays for) the whole prompt.
+- Tests either hit the real API or mock it so far from the wire that the SDK's own error handling is never exercised.
+
+This page covers the pieces that fix them. All of it has zero dependencies: `httpx`, `redis` and `pydantic` are never imported at module import time.
+
+### One token bucket for every worker
+
+`token_rate_limit` keeps its bucket in memory. Pass `store=` a shared window and the bucket lives in storage every worker reaches.
+
+```python
+import os
+import tempfile
+
+from python_wrap.llm import token_rate_limit
+from python_wrap.llm_shared import SQLiteTokenWindow
+
+path = os.path.join(tempfile.mkdtemp(), "tokens.db")
+
+# In every worker process: the same file, the same limit.
+limit = token_rate_limit(60_000, estimate=2_000, block=False, store=SQLiteTokenWindow(path))
+
+@limit
+def complete(prompt: str) -> dict[str, object]:
+    return {"usage": {"input_tokens": 500, "output_tokens": 100}}
+
+complete("hello")  # reserves 2000, settles at the real 600, for the whole fleet
+assert 59_000 < limit.available < 59_500
+```
+
+| Window | Shares across | Notes |
+| --- | --- | --- |
+| `SQLiteTokenWindow(path, name=...)` | processes on one host | WAL journal, one `BEGIN IMMEDIATE` transaction per operation; a corrupt file is moved to `<path>.corrupt` and rebuilt |
+| `RedisTokenWindow(client, name=...)` | every host | one Lua script per operation, using the Redis server's clock; keys expire by themselves |
+| `AsyncRedisTokenWindow(client, name=...)` | every host, async | the same script awaited on a `redis.asyncio` client |
+
+Every worker must use the same `tokens_per_minute`; the window name picks the bucket, so one file or Redis can hold several. A sync window used from an `async def` runs its round trip in a worker thread.
+
+`SQLiteBudgetBackend(path)` is a `BudgetBackend` on the same idea: `Budget(tokens=..., backend=SQLiteBudgetBackend(path))` shares its counters across local processes, with `period=` expiry.
+
+#### When storage fails
+
+By default a window **fails open**: if the file is locked or Redis is unreachable it emits `rate_limit.store_error` and uses a private in-memory bucket for that call, so an outage degrades to per-process limiting instead of stopping every LLM call. Pass `fail_open=False` to raise instead.
+
+#### Backing off together
+
+`observe_headers(headers)` feeds a provider's own numbers into the window. It understands `x-ratelimit-remaining-tokens` and `x-ratelimit-reset-tokens` (`"6m0s"`, `"20ms"`), the `anthropic-ratelimit-*` family (RFC 3339 reset times, separate input and output limits), `retry-after` (seconds or an HTTP date) and `retry-after-ms`. The remaining count only ever lowers the bucket. `Retry-After` (or the reset time when no tokens remain) blocks every worker until then.
+
+```python
+import os
+import tempfile
+
+from python_wrap.errors import RateLimitExceeded
+from python_wrap.llm import token_rate_limit
+from python_wrap.llm_shared import SQLiteTokenWindow, parse_rate_limit_headers
+
+path = os.path.join(tempfile.mkdtemp(), "tokens.db")
+worker_a = token_rate_limit(60_000, estimate=100, block=False, store=SQLiteTokenWindow(path))
+worker_b = token_rate_limit(60_000, estimate=100, block=False, store=SQLiteTokenWindow(path))
+
+worker_a.observe_headers({"retry-after": "30"})  # worker A saw a 429
+try:
+    worker_b(lambda: "sent")()  # worker B waits as well
+except RateLimitExceeded as exc:
+    assert 29 < exc.retry_after <= 30
+
+hint = parse_rate_limit_headers({"x-ratelimit-remaining-tokens": "0", "x-ratelimit-reset-tokens": "2s"})
+assert hint.block_seconds == 2
+```
+
+A decorated function that raises an error carrying response headers (`exc.headers` or `exc.response.headers`, as SDK status errors do) feeds them back automatically, so a 429 needs no extra code. Use `await limit.aobserve_headers(...)` from async code.
+
+### Validated structured output
+
+`validated(parse)` wraps a call that should return structured text. `parse` is any callable that raises on bad output: `Model.model_validate_json` from pydantic (a class with that method is used directly), a JSON-schema checker, or `json.loads` plus your own checks.
+
+```python
+import json
+
+from python_wrap.llm_validate import ValidationRepairExhausted, validated
+
+replies = iter(['{"city": ', '{"city": "Oslo"}'])  # cut off, then fixed
+sent = []
+
+def parse(text: str) -> dict[str, str]:
+    data = json.loads(text)
+    if "city" not in data:
+        raise ValueError("missing 'city'")
+    return data
+
+@validated(parse, max_repairs=2)
+def ask(messages: list[dict[str, str]]) -> str:
+    sent.append(messages)
+    return next(replies)
+
+assert ask(messages=[{"role": "user", "content": "Where?"}]) == {"city": "Oslo"}
+assert sent[1][-1]["role"] == "user"  # the repair turn carries only the error text
+assert sent[1][-2] == {"role": "assistant", "content": '{"city": '}
+
+@validated(parse, max_repairs=1)
+def hopeless(messages: list[dict[str, str]]) -> str:
+    return "not json"
+
+try:
+    hopeless(messages=[])
+except ValidationRepairExhausted as exc:
+    assert len(exc.attempts) == 2 and exc.reason == "max_repairs"
+```
+
+- **`repair="error_only"`** (default) continues the chat: the model's reply and just the validation error are added to `messages=`. **`"full"`** restates the previous reply and the error in a single user turn. Both also work for a `prompt=` string; for other call shapes pass `reask=(args, kwargs, previous, error) -> (args, kwargs)`.
+- **Hard caps.** There are never more than `1 + max_repairs` calls. `max_tokens=` stops repairing once the attempts' reported usage reaches it, and `budget=` (a `Budget`, with `budget_key=` for per-key budgets) stops it when the budget is exhausted. `ValidationRepairExhausted` carries `attempts`, `tokens`, `reason` (`max_repairs`, `max_tokens` or `budget`) and `last_error`.
+- **Reply text** is read from a string, `.text`, `.content` blocks, `.choices[0].message.content`, `.output_text` or a dict of those; pass `text=` for anything else. A surrounding markdown fence is stripped (`unfence=False` to keep it).
+- Exceptions from the call itself, such as `BudgetExceeded`, propagate untouched. Works for `async def` too. Events: `llm.validation_failed`, `llm.repair_exhausted`.
+
+### Cassettes: record once, replay offline
+
+A `Cassette` works at the HTTP transport, below any provider SDK. Give the client `transport=cassette.transport()` (most SDKs accept an `http_client=httpx.Client(transport=...)`). The first run talks to the real API and writes a JSON file; later runs replay it with no network and no key.
+
+```python
+import json
+import os
+import tempfile
+
+from python_wrap.llm_cassette import Cassette, CassetteMiss, build_response
+
+
+class Request:  # an httpx request has these attributes too
+    method, url = "POST", "https://llm.example/v1/chat"
+    headers = {"authorization": "Bearer sk-example-0123456789abcdef"}
+
+    def __init__(self, prompt: str) -> None:
+        self.content = json.dumps({"prompt": prompt}).encode()
+
+
+class RealNetwork:  # stands in for httpx.HTTPTransport()
+    def handle_request(self, request):
+        body = b'{"text": "hi", "usage": {"input_tokens": 3}}'
+        return build_response(request, 200, [("content-type", "application/json")], [body], asynchronous=False)
+
+
+path = os.path.join(tempfile.mkdtemp(), "chat.json")
+recorded = Cassette(path).transport(RealNetwork()).handle_request(Request("hello"))
+assert recorded.read().startswith(b"{")
+
+replay = Cassette(path, mode="replay").transport()  # no network object at all
+assert replay.handle_request(Request("hello")).status_code == 200
+assert "sk-example" not in open(path).read()  # secrets are never stored
+
+try:
+    replay.handle_request(Request("something new"))
+except CassetteMiss as exc:
+    assert "cannot be served" in str(exc)
+```
+
+Modes: `once` (default; replay if the file exists, otherwise record), `replay` (never touch the network; unrecorded requests raise `CassetteMiss`; use it in CI), `record` (start over), `new` (replay what is recorded, record the rest).
+
+What a cassette guarantees:
+
+- **Secrets are never stored.** Authorization-style headers and cookies, JSON keys such as `api_key`, `password` or `access_token`, query parameters such as `key` or `token`, the literal values in `secrets=[...]` and well-known key shapes (bearer tokens, `sk-...`, cloud keys, JWTs) are replaced by `***` before the file is written, including a secret split across stream chunks. Ordinary LLM fields such as `max_tokens` and `usage.input_tokens` are left alone. Supply `redactor=` to replace the key-based masking and `redact_responses=True` to apply it to JSON responses too. Requests are sent with `accept-encoding: identity` so bodies are readable and maskable. The file is written atomically with owner-only permissions.
+- **Matching is by hash** of the method, the URL (query sorted) and the JSON body (keys sorted), computed from the masked form, so a changed API key still matches. Drop volatile fields with `ignore_body_keys=("user", "metadata.run_id")`, `ignore_query=`, `ignore_host=True`, and add `match_headers=` when a header matters. The same request recorded twice replays in order (a 429 followed by a 200 replays as 429, then 200); `allow_repeat=True` serves the last recording again instead of raising.
+- **Streams keep their chunks.** A streamed body is recorded as it is consumed and replayed with the same chunk boundaries. A stream closed early is flagged incomplete and raises `CassetteError` if a replay reads past that point.
+- **Damage is loud.** A truncated, corrupt or unknown-format file raises `CassetteError`; it is never half-used.
+
+`RecordingTransport` and `ReplayTransport` are duck-typed against the `httpx` transport protocol (sync and async); httpx is only imported lazily to build real `httpx.Response` objects.
+
+#### Pytest fixtures
+
+The plugin is opt-in. Add it to a top-level `conftest.py`:
+
+<!-- skip -->
+```python
+pytest_plugins = ["python_wrap.pytest_plugin"]
+```
+
+It is not registered through the `pytest11` entry point on purpose: installing the library must not change how an unrelated test suite starts.
+
+<!-- skip -->
+```python
+def test_summary(llm_cassette, chaos_llm_http):
+    cassette = llm_cassette()  # cassettes/<test module>/test_summary.json
+    client = make_client(transport=cassette.transport())
+    ...
+```
+
+`llm_cassette(name=None, **options)` builds a `Cassette` named after the test and saves it at teardown. Choose the mode with `--llm-cassette-mode=replay` (or `PYTHON_WRAP_CASSETTE_MODE`) and the folder with `--llm-cassette-dir`. `chaos_llm_http` is a fresh `LLMHTTPFaults` on a private injector.
+
+### HTTP-level chaos
+
+`chaos.llm_http` reuses the `LLMFaults` rules but delivers them as HTTP. Wrap any transport (a real one, `httpx.MockTransport`, a `ReplayTransport`) and the SDK on top sees what a flaky API produces, so its own error mapping and your retries are tested together.
+
+```python
+from python_wrap.chaos import FaultInjector
+from python_wrap.llm_cassette import build_response
+from python_wrap.llm_http_chaos import LLMHTTPFaults
+
+
+class Request:
+    method, url, headers, content = "POST", "https://llm.example/v1", {}, b"{}"
+
+
+class Network:
+    def handle_request(self, request):
+        return build_response(request, 200, [], [b'{"text": "hello world"}'], asynchronous=False)
+
+
+faults = LLMHTTPFaults(FaultInjector())  # chaos.llm_http is the same, on the global injector
+wire = faults.transport(Network())
+
+with faults.rate_limit(times=1, retry_after=3):
+    response = wire.handle_request(Request())
+assert response.status_code == 429 and response.headers["retry-after"] == "3"
+
+with faults.truncate(keep=0.5, times=1):
+    assert len(wire.handle_request(Request()).read()) == 11  # half of 22 bytes
+assert wire.handle_request(Request()).status_code == 200
+```
+
+| Rule | Effect on the wire |
+| --- | --- |
+| `rate_limit(retry_after=)` | a real 429 response with `Retry-After` |
+| `overloaded()` / `server_error(status=)` | a 529 / 5xx response |
+| `timeout(after=)` | `httpx.ReadTimeout` (a `TimeoutError` without httpx), optionally after a delay |
+| `stall(seconds=, after_chunks=)` | hang before the response, or after N stream chunks |
+| `truncate(keep=)` | the real response with its body cut to a fraction |
+
+Rules accept `rate=` and `times=` like every chaos rule, wait through the library clock (so `fake_clock` skips stalls), and nothing is injected unless a rule was added.
+
+---
+
 Source: https://pythonwrap.readthedocs.io/features/ai/observability/
 
 ## AI observability and audit
@@ -3059,6 +3294,8 @@ Every public name: `python_wrap.__all__` first, then names public only in a subm
   An ``async def`` function that runs as a task on the current loop; see `periodic`.
 - `python_wrap.AsyncRedisStore`: `AsyncRedisStore(client: Any, prefix: str, *, dumps: Callable[[Any], bytes] = dumps, loads: Callable[[bytes], Any] = loads, key_format: Callable[[Hashable], str] | None = None, fail_open: bool = True)`
   A namespaced `AsyncCacheStore` for ``redis.asyncio``-compatible clients.
+- `python_wrap.AsyncRedisTokenWindow`: `AsyncRedisTokenWindow(client: Any, name: str = 'tokens', *, prefix: str = 'python-wrap:tokens', fail_open: bool = True)`
+  `RedisTokenWindow` for ``redis.asyncio`` clients: round trips are awaited.
 - `python_wrap.AsyncRedisWindow`: `AsyncRedisWindow(client: Any, key: str, *, calls: int, period: float | str)`
   `RedisWindow` for ``redis.asyncio`` clients: the round trip is awaited, not threaded.
 - `python_wrap.Attempt`: `Attempt(number: int, run: _Run)`
@@ -3101,6 +3338,12 @@ Every public name: `python_wrap.__all__` first, then names public only in a subm
   Live statistics of a function wrapped by `count_calls`.
 - `python_wrap.CancelToken`: `CancelToken(label: str = '', seconds: float = 0.0, parent: CancelToken | None = None)`
   A flag a sync function can poll to learn that its `timeout` has fired.
+- `python_wrap.Cassette`: `Cassette(path: str | os.PathLike[str], *, mode: CassetteMode = 'once', ignore_body_keys: Iterable[str] = (), ignore_query: Iterable[str] = (), ignore_host: bool = False, match_headers: Iterable[str] = (), redactor: Callable[[Any], Any] | None = None, redact_responses: bool = False, secrets: Iterable[str] = (), allow_repeat: bool = False, autosave: bool = True)`
+  A file of recorded HTTP exchanges, used through `transport`.
+- `python_wrap.CassetteError`
+  A cassette file is unreadable, truncated or in an unknown format.
+- `python_wrap.CassetteMiss`: `CassetteMiss(message: str, *, method: str, url: str, key: str)`
+  A request has no (unused) recording, and the cassette is not recording.
 - `python_wrap.CircuitBreaker`: `CircuitBreaker(*, failure_threshold: int = 5, recovery_timeout: float = 30.0, half_open_max_calls: int = 1, success_threshold: int = 1, on: ExceptionTypes = Exception, exclude: ExceptionTypes = (), on_state_change: StateChangeListener | None = None, name: str | None = None, logger: LoggerLike = None, window: float | None = None, backend: Any = None)`
   Stop calling a failing dependency until it has had time to recover.
 - `python_wrap.CircuitOpenError`: `CircuitOpenError(message: str, *, retry_after: float)`
@@ -3191,6 +3434,8 @@ Every public name: `python_wrap.__all__` first, then names public only in a subm
   The call was rejected because its rate limit is used up.
 - `python_wrap.RateLimiter`: `RateLimiter(calls: int | None = None, period: float | None = None, *, limits: Iterable[Limit] | None = None, block: bool = False, name: str | None = None, backend: Any = None)`
   A reusable sliding-window rate limit, shared by everything that uses it.
+- `python_wrap.RecordingTransport`: `RecordingTransport(cassette: Cassette, inner: Any = None)`
+  Forwards requests to a real transport and records each exchange in a `Cassette`.
 - `python_wrap.Redactor`: `Redactor(*, fragments: Iterable[str] | None = None, patterns: Iterable[str | re.Pattern[str]] = (), max_chars: int = 2000, max_items: int = 100, max_depth: int = 12, builtin: bool = True, mask: str = '***')`
   Scrub values before they reach logs, traces or an audit tape.
 - `python_wrap.RedisBreakerState`: `RedisBreakerState(client: Any, prefix: str = 'python-wrap:breaker:')`
@@ -3207,12 +3452,16 @@ Every public name: `python_wrap.__all__` first, then names public only in a subm
   Read a boolean flag from a supplied Redis client; backend errors propagate.
 - `python_wrap.RedisStore`: `RedisStore(client: Any, prefix: str, *, dumps: Callable[[Any], bytes] = dumps, loads: Callable[[bytes], Any] = loads, key_format: Callable[[Hashable], str] | None = None, fail_open: bool = True)`
   A namespaced `CacheStore` with opaque hashed keys and configurable serialization.
+- `python_wrap.RedisTokenWindow`: `RedisTokenWindow(client: Any, name: str = 'tokens', *, prefix: str = 'python-wrap:tokens', fail_open: bool = True)`
+  A `SharedTokenWindow` on Redis, shared by every worker on every host.
 - `python_wrap.RedisWindow`: `RedisWindow(client: Any, key: str, *, calls: int, period: float | str)`
   Atomic sliding-window admission using the Redis server's clock.
 - `python_wrap.ReplayMismatch`
   The code under test made a call that does not match the next recorded one.
 - `python_wrap.ReplayProvider`: `ReplayProvider(records: Sequence[TapeRecord], *, ordered: bool = True, check_inputs: bool = False, redactor: Redactor | None = None, rebuild: Callable[[TapeRecord], Any] | None = None)`
   Fake callables that serve a tape's recorded results; build one with `replay`.
+- `python_wrap.ReplayTransport`: `ReplayTransport(cassette: Cassette, fallback: RecordingTransport | None = None)`
+  Answers requests from a `Cassette` without any network access.
 - `python_wrap.ReplayedError`: `ReplayedError(error_type: str, message: str = '')`
   Raised by a replayed call that failed when recorded.
 - `python_wrap.RetryBudget`: `RetryBudget(ratio: float = 0.1, min_per_second: float = 10, window: float = 10.0)`
@@ -3237,6 +3486,12 @@ Every public name: `python_wrap.__all__` first, then names public only in a subm
   The run is older than ``max_seconds``. Also a `TimeoutExpired` (and ``TimeoutError``).
 - `python_wrap.SQLiteBreakerState`: `SQLiteBreakerState(path: str | os.PathLike[str], *, busy_timeout: float = 5.0)`
   Breaker state in a local SQLite file, shared by every process that opens it.
+- `python_wrap.SQLiteBudgetBackend`: `SQLiteBudgetBackend(path: str | os.PathLike[str], *, timeout: float = 10.0)`
+  A `python_wrap.llm.BudgetBackend` in SQLite: one budget shared by local processes.
+- `python_wrap.SQLiteTokenWindow`: `SQLiteTokenWindow(path: str | os.PathLike[str], name: str = 'tokens', *, timeout: float = 10.0, fail_open: bool = True)`
+  A `SharedTokenWindow` in one SQLite file, shared by processes on one host.
+- `python_wrap.SharedTokenWindow`: `SharedTokenWindow(name: str = 'tokens', *, fail_open: bool = True)`
+  A token bucket held in shared storage; the base of the concrete windows.
 - `python_wrap.ShutdownError`: `ShutdownError(message: str, *, report: ShutdownReport)`
   `drain(strict=True)` finished with at least one failed or timed-out item.
 - `python_wrap.ShutdownManager`: `ShutdownManager()`
@@ -3265,7 +3520,7 @@ Every public name: `python_wrap.__all__` first, then names public only in a subm
   The wrapped call did not finish within its time limit.
 - `python_wrap.TimingRecord`: `TimingRecord(name: str, elapsed: float, success: bool)`
   Result of one timed call, passed to ``timing(callback=...)``.
-- `python_wrap.TokenRateLimiter`: `TokenRateLimiter(tokens_per_minute: int, *, estimate: Callable[..., int] | int | None = None, usage: UsageReader | None = None, block: bool = True, max_wait: float | None = None, name: str = 'tokens')`
+- `python_wrap.TokenRateLimiter`: `TokenRateLimiter(tokens_per_minute: int, *, estimate: Callable[..., int] | int | None = None, usage: UsageReader | None = None, block: bool = True, max_wait: float | None = None, name: str = 'tokens', store: Any = None)`
   A tokens-per-minute limit for LLM calls; build it with `token_rate_limit`.
 - `python_wrap.ToolCall`: `ToolCall(tool: str, arguments: Mapping[str, Any], run_id: str | None, read_only: bool, description: str = '')`
   What an approver (and `DryRun`) is told about a pending tool call.
@@ -3283,6 +3538,8 @@ Every public name: `python_wrap.__all__` first, then names public only in a subm
   Tokens one LLM call used.
 - `python_wrap.ValidationError`: `ValidationError(message: str, *, parameter: str, value: object)`
   An argument failed a validator.
+- `python_wrap.ValidationRepairExhausted`: `ValidationRepairExhausted(function: str, attempts: list[Attempt], reason: str)`
+  The model kept returning output that fails validation.
 - `python_wrap.WebhookAlerter`: `WebhookAlerter(url: str, *, format: str = 'json', on: Iterable[str | CircuitState] = ('open',), cooldown: float = 300.0, timeout: float = 5.0, sender: Sender | None = None, include_recovery: bool = True, context: Mapping[str, Any] | None = None)`
   Post a chat message when a circuit breaker reaches a chosen state.
 - `python_wrap.__version__`
@@ -3421,6 +3678,8 @@ Every public name: `python_wrap.__all__` first, then names public only in a subm
   Deprecated no-op, kept only so v0.1 code keeps importing.
 - `python_wrap.once`: `once(func: Callable[..., Any] | None = None, /) -> Any`
   Run the function a single time; later calls return the first result.
+- `python_wrap.parse_rate_limit_headers`: `parse_rate_limit_headers(headers: Any) -> RateLimitHint`
+  Read token-window hints from provider response headers; never raises.
 - `python_wrap.per_key`: `per_key(limiter_factory: Callable[[Hashable], Any], *, key: Callable[..., Hashable], max_keys: int = 10000) -> Callable[[F], F]`
   Apply a separate limiter to each distinct key of the call.
 - `python_wrap.periodic`: `periodic(interval: float, *, jitter: float = 0.0, initial_delay: float = 0.0, max_runs: int | None = None, on_error: OnError = 'log', name: str | None = None, logger: LoggerLike = None, level: int = 40) -> _Decorator`
@@ -3499,7 +3758,7 @@ Every public name: `python_wrap.__all__` first, then names public only in a subm
   Raise `TimeoutExpired` if a call or block runs longer than ``seconds``.
 - `python_wrap.timing`: `timing(func: Callable[..., Any] | None = None, /, *, logger: LoggerLike = None, level: int = 20, threshold: float | None = None, callback: Callable[[TimingRecord], None] | None = None) -> Any`
   Measure and log how long each call takes.
-- `python_wrap.token_rate_limit`: `token_rate_limit(tokens_per_minute: int, *, estimate: Callable[..., int] | int | None = None, usage: UsageReader | None = None, block: bool = True, max_wait: float | None = None, name: str = 'tokens') -> TokenRateLimiter`
+- `python_wrap.token_rate_limit`: `token_rate_limit(tokens_per_minute: int, *, estimate: Callable[..., int] | int | None = None, usage: UsageReader | None = None, block: bool = True, max_wait: float | None = None, name: str = 'tokens', store: Any = None) -> TokenRateLimiter`
   Limit LLM calls to ``tokens_per_minute``, reserving estimates up front.
 - `python_wrap.tool`: `tool(func: Callable[..., Any] | None = None, /, *, name: str | None = None, description: str | None = None, read_only: bool = False, idempotent_key: bool | Callable[..., object] | None = None, requires_approval: bool = False, timeout: float | str | None = None, retry: Callable[[Any], Any] | None = None, dry_result: Any = MISSING, store: Any = None, ttl: float | str = '1d') -> Any`
   Mark a sync or async function as an agent tool with replay-safe side effects.
@@ -3517,6 +3776,8 @@ Every public name: `python_wrap.__all__` first, then names public only in a subm
   Restore a bind token in the same context where it was created.
 - `python_wrap.validate_args`: `validate_args(**validators: Validator) -> Callable[[F], F]`
   Validate arguments with predicates.
+- `python_wrap.validated`: `validated(parse: Any, *, max_repairs: int = 2, repair: RepairMode = 'error_only', text: Callable[[Any], str] | None = None, usage: Callable[[Any], Any] | None = None, reask: Callable[..., tuple[tuple[Any, ...], dict[str, Any]]] | None = None, max_tokens: int | None = None, budget: Any = None, budget_key: Callable[..., Any] | None = None, max_error_chars: int = 600, unfence: bool = True, name: str | None = None) -> Callable[[Callable[P, Any]], Callable[P, Any]]`
+  Validate a model call's output and repair it with at most ``max_repairs`` re-asks.
 - `python_wrap.wrap_methods`: `wrap_methods(*decorators: Callable[[Any], Any], include: Iterable[str] | Callable[[str], bool] | None = None, exclude: Iterable[str] | Callable[[str], bool] | None = None, include_private: bool = False) -> Callable[[C], C]`
   Class decorator that applies decorators to the methods of a class.
 - `python_wrap.adaptive`
@@ -3719,6 +3980,20 @@ Every public name: `python_wrap.__all__` first, then names public only in a subm
   The outcome for one registered item.
 - `python_wrap.llm`
   Wrappers for LLM calls: classified retries, spend budgets, token rate limits, model fallback chains, streaming timeouts and a response cache.
+- `python_wrap.llm_cassette`
+  Record and replay LLM HTTP traffic so tests run offline, fast and deterministically.
+- `python_wrap.llm_cassette.SECRET_FRAGMENTS`
+  Constant: ('password', 'passwd', 'secret', 'api_key', 'apikey', 'authorization', 'proxy_authorization', 'credential', 'private_key', 'cookie', 'set_cookie', 'access_token', 'refresh_token', 'id_token', 'auth_token', 'bearer', 'x_api_key', 'signature')
+- `python_wrap.llm_http_chaos`
+  HTTP-level fault injection for LLM clients: ``chaos.llm_http``.
+- `python_wrap.llm_http_chaos.ChaosTransport`: `ChaosTransport(inner: Any, injector: FaultInjector, *, point: str = 'llm.http')`
+  A transport that breaks another one on demand; build it with ``chaos.llm_http.transport``.
+- `python_wrap.llm_http_chaos.LLMHTTPFaults`: `LLMHTTPFaults(injector: FaultInjector)`
+  LLM fault rules that act on HTTP exchanges; reach it as ``chaos.llm_http``.
+- `python_wrap.llm_shared`
+  Token limits and budgets shared by several worker processes.
+- `python_wrap.llm_shared.RateLimitHint`: `RateLimitHint(remaining_tokens: float | None = None, reset_seconds: float | None = None, retry_after: float | None = None)`
+  What a provider's rate-limit headers said, in plain numbers.
 - `python_wrap.llm_testing`
   Test doubles for LLM-calling code: a scripted fake provider and LLM-shaped faults.
 - `python_wrap.llm_testing.APIConnectionError`
@@ -3743,6 +4018,10 @@ Every public name: `python_wrap.__all__` first, then names public only in a subm
   HTTP 429, optionally with a ``Retry-After`` hint.
 - `python_wrap.llm_testing.ToolCall`: `ToolCall(name: str, arguments: str, id: str = 'call_1')`
   A model-requested tool call; ``arguments`` is the raw string as sent.
+- `python_wrap.llm_validate`
+  Validate structured LLM output and repair it with a cheap, capped re-ask.
+- `python_wrap.llm_validate.Attempt`: `Attempt(number: int, output: str, error: str | None, usage: Usage | None)`
+  One model call and how its output validated.
 - `python_wrap.local_state`
   Share circuit breaker state between processes on one host, without Redis.
 - `python_wrap.logs`
@@ -3813,6 +4092,14 @@ Every public name: `python_wrap.__all__` first, then names public only in a subm
   A policy for an external vendor API (payment gateway, ERP, SMS/e-mail provider).
 - `python_wrap.processing`
   Per-item batch outcomes and explicit checkpoints for resumable processing.
+- `python_wrap.pytest_plugin`
+  Opt-in pytest fixtures for LLM cassettes and HTTP-level chaos.
+- `python_wrap.pytest_plugin.chaos_llm_http`: `chaos_llm_http() -> LLMHTTPFaults`
+  HTTP-level LLM fault rules on a private injector, cleaned up with the test.
+- `python_wrap.pytest_plugin.llm_cassette`: `llm_cassette(request: pytest.FixtureRequest) -> Iterator[Callable[..., Cassette]]`
+  Factory for `Cassette` objects named after the running test.
+- `python_wrap.pytest_plugin.pytest_addoption`: `pytest_addoption(parser: pytest.Parser) -> None`
+  Register ``--llm-cassette-mode`` and ``--llm-cassette-dir``.
 - `python_wrap.quotas`
   Atomic Redis rate windows and explicit run budgets.
 - `python_wrap.redaction`

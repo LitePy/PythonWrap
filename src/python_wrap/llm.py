@@ -1129,6 +1129,7 @@ class TokenRateLimiter:
         block: bool = True,
         max_wait: float | None = None,
         name: str = "tokens",
+        store: Any = None,
     ) -> None:
         if (
             isinstance(tokens_per_minute, bool)
@@ -1155,6 +1156,8 @@ class TokenRateLimiter:
         self._rate = tokens_per_minute / 60.0
         self._level = self._capacity
         self._stamp: float | None = None
+        self._blocked = 0.0  # monotonic time until which a provider asked us to stop
+        self._store = store
         self._lock = _fork.ForkSafeLock()
         setattr(
             self,
@@ -1165,7 +1168,7 @@ class TokenRateLimiter:
                     "llm": "token_limit",
                     "name": name,
                     "tokens_per_minute": tokens_per_minute,
-                    "shared": False,
+                    "shared": store is not None,
                 },
             ),
         )
@@ -1180,14 +1183,20 @@ class TokenRateLimiter:
     @property
     def available(self) -> float:
         """Tokens that could be reserved right now (negative while in debt)."""
+        if self._store is not None:
+            return float(self._store.level(self._capacity, self._rate))
         with self._lock:
             self._refill()
             return self._level
 
     def try_reserve(self, tokens: int) -> float:
         """Reserve ``tokens`` if possible: 0.0 when reserved, else seconds to wait."""
+        if self._store is not None:
+            return float(self._store.reserve(tokens, self._capacity, self._rate))
         with self._lock:
             self._refill()
+            if self._blocked > _core.monotonic():
+                return self._blocked - _core.monotonic()
             need = min(float(tokens), self._capacity)
             if self._level + 1e-9 >= need:  # waiting exactly retry_after admits
                 self._level -= tokens
@@ -1195,12 +1204,18 @@ class TokenRateLimiter:
             return (need - self._level) / self._rate
 
     def _force(self, tokens: int) -> None:
+        if self._store is not None:
+            self._store.force(tokens, self._capacity, self._rate)
+            return
         with self._lock:
             self._refill()
             self._level -= tokens
 
     def settle(self, reserved: int, actual: int) -> None:
         """Replace a reservation of ``reserved`` tokens by the ``actual`` usage."""
+        if self._store is not None:
+            self._store.settle(reserved, actual, self._capacity, self._rate)
+            return
         with self._lock:
             self._refill()
             self._level = min(self._capacity, self._level + reserved - actual)
@@ -1235,18 +1250,96 @@ class TokenRateLimiter:
         """Async `acquire`: waits with ``asyncio`` instead of blocking the thread."""
         waited = 0.0
         while not _core.overrides.disable_rate_limits:
-            wait = self.try_reserve(tokens)
+            wait = await self._areserve(tokens)
             if wait <= 0:
                 break
             if not self._waits(waited, wait):
                 raise self._refused(wait, label)
             if _core.overrides.no_sleep:
-                self._force(tokens)
+                await self._aforce(tokens)
                 await asyncio.sleep(0)
                 break
             await _core.async_sleep(wait)
             waited += wait
             _core.emit("rate_limit.waited", self.name, seconds=wait)
+
+    async def _areserve(self, tokens: int) -> float:
+        store = self._store
+        if store is None:
+            return self.try_reserve(tokens)
+        if hasattr(store, "areserve"):
+            return float(await store.areserve(tokens, self._capacity, self._rate))
+        return await asyncio.to_thread(self.try_reserve, tokens)
+
+    async def _aforce(self, tokens: int) -> None:
+        store = self._store
+        if store is not None and hasattr(store, "aforce"):
+            await store.aforce(tokens, self._capacity, self._rate)
+        elif store is not None:
+            await asyncio.to_thread(self._force, tokens)
+        else:
+            self._force(tokens)
+
+    async def _asettle(self, reserved: int, actual: int) -> None:
+        store = self._store
+        if store is not None and hasattr(store, "asettle"):
+            await store.asettle(reserved, actual, self._capacity, self._rate)
+        elif store is not None:
+            await asyncio.to_thread(self.settle, reserved, actual)
+        else:
+            self.settle(reserved, actual)
+
+    def observe_headers(self, headers: Any) -> Any:
+        """Update the bucket from a provider's rate-limit headers (sync).
+
+        The provider's ``remaining`` token count lowers the bucket (never raises it), and
+        ``Retry-After`` (or the reset time when nothing remains) blocks further requests
+        until then. With a shared ``store=`` the block applies to every worker. See
+        `python_wrap.llm_shared.parse_rate_limit_headers` for the headers understood.
+
+        Returns:
+            The parsed `python_wrap.llm_shared.RateLimitHint`.
+        """
+        from python_wrap.llm_shared import parse_rate_limit_headers
+
+        if self._store is not None:
+            return self._store.observe_headers(headers, capacity=self._capacity, rate=self._rate)
+        hint = parse_rate_limit_headers(headers)
+        block = hint.block_seconds
+        with self._lock:
+            self._refill()
+            if hint.remaining_tokens is not None:
+                self._level = min(self._level, hint.remaining_tokens)
+            if block is not None and block > 0:
+                self._blocked = max(self._blocked, _core.monotonic() + block)
+        return hint
+
+    async def aobserve_headers(self, headers: Any) -> Any:
+        """Async `observe_headers`; shared stores are updated without blocking the loop."""
+        store = self._store
+        if store is not None and hasattr(store, "aobserve_headers"):
+            return await store.aobserve_headers(headers, capacity=self._capacity, rate=self._rate)
+        return await asyncio.to_thread(self.observe_headers, headers)
+
+    @staticmethod
+    def _error_headers(exc: BaseException) -> Any:
+        headers = _field(exc, "headers")
+        if headers is None:
+            headers = _field(_field(exc, "response"), "headers")
+        return headers
+
+    def _learn(self, exc: BaseException) -> None:
+        """Feed an error's response headers (a 429's, usually) to `observe_headers`."""
+        headers = self._error_headers(exc)
+        if headers is not None:
+            with contextlib.suppress(Exception):  # a broken store must not mask the real error
+                self.observe_headers(headers)
+
+    async def _alearn(self, exc: BaseException) -> None:
+        headers = self._error_headers(exc)
+        if headers is not None:
+            with contextlib.suppress(Exception):
+                await self.aobserve_headers(headers)
 
     def _actual(self, result: Any, reserved: int) -> int:
         usage = _usage_of(result, self.usage)
@@ -1267,10 +1360,11 @@ class TokenRateLimiter:
                 await self.aacquire(cost, label=label)
                 try:
                     result = await afunc(*args, **kwargs)
-                except BaseException:
-                    self.settle(cost, 0)
+                except BaseException as exc:
+                    await self._asettle(cost, 0)
+                    await self._alearn(exc)
                     raise
-                self.settle(cost, self._actual(result, cost))
+                await self._asettle(cost, self._actual(result, cost))
                 return result
 
             setattr(async_wrapper, _LAYER_ATTR, getattr(self, _LAYER_ATTR))
@@ -1284,8 +1378,9 @@ class TokenRateLimiter:
             self.acquire(cost, label=label)
             try:
                 result = func(*args, **kwargs)
-            except BaseException:
+            except BaseException as exc:
                 self.settle(cost, 0)
+                self._learn(exc)
                 raise
             self.settle(cost, self._actual(result, cost))
             return result
@@ -1305,6 +1400,7 @@ def token_rate_limit(
     block: bool = True,
     max_wait: float | None = None,
     name: str = "tokens",
+    store: Any = None,
 ) -> TokenRateLimiter:
     """Limit LLM calls to ``tokens_per_minute``, reserving estimates up front.
 
@@ -1319,6 +1415,11 @@ def token_rate_limit(
             `RateLimitExceeded` (with ``retry_after``) instead.
         max_wait: With ``block=True``, the longest total wait before raising.
         name: Used in events and errors.
+        store: A shared window (`python_wrap.llm_shared.SQLiteTokenWindow`,
+            `RedisTokenWindow`, `AsyncRedisTokenWindow`) so every worker process draws
+            from one bucket and backs off together. Every worker must use the same
+            ``tokens_per_minute``. Errors that carry rate-limit headers update it (see
+            `TokenRateLimiter.observe_headers`).
 
     Returns:
         A `TokenRateLimiter`, usable as a decorator (one instance can guard several
@@ -1350,6 +1451,7 @@ def token_rate_limit(
         block=block,
         max_wait=max_wait,
         name=name,
+        store=store,
     )
 
 

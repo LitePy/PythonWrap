@@ -166,6 +166,7 @@ class FaultInjector:
         self._rng = rng if rng is not None else random.Random(seed)
         self.enabled = True
         self._llm: Any = None
+        self._llm_http: Any = None
 
     @property
     def llm(self) -> Any:
@@ -178,6 +179,19 @@ class FaultInjector:
 
             self._llm = LLMFaults(self)
         return self._llm
+
+    @property
+    def llm_http(self) -> Any:
+        """HTTP-level LLM faults (`python_wrap.llm_http_chaos.LLMHTTPFaults`) on this injector.
+
+        Example: ``transport = chaos.llm_http.transport(inner)`` then
+        ``chaos.llm_http.rate_limit(times=2)``.
+        """
+        if self._llm_http is None:
+            from python_wrap.llm_http_chaos import LLMHTTPFaults
+
+            self._llm_http = LLMHTTPFaults(self)
+        return self._llm_http
 
     def reseed(self, seed: int | None) -> None:
         """Restart the random source from ``seed`` for reproducible runs."""

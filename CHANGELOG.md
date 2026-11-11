@@ -20,6 +20,30 @@ cancellation, per-instance state for `throttle`/`debounce`/`rate_limit`, single-
 
 ### Added
 
+- `token_rate_limit(..., store=)` accepts a shared window so every worker process draws from
+  one tokens-per-minute bucket: `SQLiteTokenWindow` (one host, WAL, `BEGIN IMMEDIATE`; corrupt
+  files are quarantined and rebuilt), `RedisTokenWindow` / `AsyncRedisTokenWindow` (one Lua
+  script on the Redis clock). Storage errors fail open to a local bucket (event
+  `rate_limit.store_error`) unless `fail_open=False`. `SQLiteBudgetBackend` shares a `Budget`
+  the same way.
+- `observe_headers(headers)` on `TokenRateLimiter` and the windows (plus
+  `parse_rate_limit_headers`) turns provider headers (`x-ratelimit-remaining-tokens`,
+  `x-ratelimit-reset-tokens`, `anthropic-ratelimit-*`, `retry-after`, `retry-after-ms`) into a
+  lower level and a fleet-wide block, so a 429 storm backs off together; error headers on a
+  failed call are fed back automatically.
+- `validated(parse, max_repairs=2, repair="error_only" | "full")` validates structured model
+  output (pydantic `model_validate_json` or any callable), re-asks with only the error text, caps
+  calls at `1 + max_repairs` (plus `max_tokens=` and `budget=`), and raises
+  `ValidationRepairExhausted` with every attempt and its token cost. Sync and async; events
+  `llm.validation_failed` and `llm.repair_exhausted`.
+- `Cassette` records and replays LLM HTTP traffic at the transport level
+  (`RecordingTransport` / `ReplayTransport`, duck-typed against httpx): request-hash matching
+  with `ignore_body_keys` / `ignore_query`, secrets never stored (headers, JSON keys, query
+  parameters, literal `secrets=` and key shapes), chunked streaming bodies, strict replay
+  (`CassetteMiss`) and loud failure on a damaged file (`CassetteError`). Opt-in pytest fixtures
+  `llm_cassette` and `chaos_llm_http` via `pytest_plugins = ["python_wrap.pytest_plugin"]`.
+- `chaos.llm_http` (`LLMHTTPFaults`, `ChaosTransport`) injects 429, 529, 5xx, timeouts, stalls
+  (before or mid-stream) and truncated bodies at the HTTP level, reusing the `LLMFaults` rules.
 - `agent_run(budget=...)` / `RunGuard` accept a real `python_wrap.llm.Budget`: entering the run
   opens the budget's per-run scope, so decorated LLM calls draw on it, and the next step raises
   `RunBudgetExceeded` once it is spent (direct calls still raise `BudgetExceeded`).

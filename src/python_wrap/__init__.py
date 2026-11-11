@@ -212,6 +212,21 @@ from .llm import (
     stream_timeout,
     token_rate_limit,
 )
+from .llm_cassette import (
+    Cassette,
+    CassetteError,
+    CassetteMiss,
+    RecordingTransport,
+    ReplayTransport,
+)
+from .llm_shared import (
+    AsyncRedisTokenWindow,
+    RedisTokenWindow,
+    SharedTokenWindow,
+    SQLiteBudgetBackend,
+    SQLiteTokenWindow,
+    parse_rate_limit_headers,
+)
 from .llm_testing import (
     FakeProvider,
     FakeResponse,
@@ -219,6 +234,7 @@ from .llm_testing import (
     LLMFaults,
     fake_llm,
 )
+from .llm_validate import ValidationRepairExhausted, validated
 from .local_state import (
     SQLiteBreakerState,
 )
@@ -359,6 +375,7 @@ __all__ = [
     "AsyncMemoryStore",
     "AsyncPeriodic",
     "AsyncRedisStore",
+    "AsyncRedisTokenWindow",
     "AsyncRedisWindow",
     "Attempt",
     "AttemptRecord",
@@ -379,6 +396,9 @@ __all__ = [
     "CachedProperty",
     "CallStats",
     "CancelToken",
+    "Cassette",
+    "CassetteError",
+    "CassetteMiss",
     "CircuitBreaker",
     "CircuitOpenError",
     "CircuitProtected",
@@ -420,6 +440,7 @@ __all__ = [
     "RaceFailed",
     "RateLimitExceeded",
     "RateLimiter",
+    "RecordingTransport",
     "Redactor",
     "RedisBreakerState",
     "RedisBudgetBackend",
@@ -428,9 +449,11 @@ __all__ = [
     "RedisSemaphore",
     "RedisSource",
     "RedisStore",
+    "RedisTokenWindow",
     "RedisWindow",
     "ReplayMismatch",
     "ReplayProvider",
+    "ReplayTransport",
     "ReplayedError",
     "RetryBudget",
     "RetryBudgetStats",
@@ -440,6 +463,9 @@ __all__ = [
     "RunBudgetExceeded",
     "RunContext",
     "SQLiteBreakerState",
+    "SQLiteBudgetBackend",
+    "SQLiteTokenWindow",
+    "SharedTokenWindow",
     "ShutdownError",
     "ShutdownManager",
     "ShutdownReport",
@@ -456,6 +482,7 @@ __all__ = [
     "Transaction",
     "Usage",
     "ValidationError",
+    "ValidationRepairExhausted",
     "WebhookAlerter",
     "__version__",
     "amap_iter",
@@ -523,6 +550,7 @@ __all__ = [
     "mysql_transient",
     "no_debug",
     "once",
+    "parse_rate_limit_headers",
     "per_key",
     "periodic",
     "policies",
@@ -568,6 +596,7 @@ __all__ = [
     "transactional",
     "unbind",
     "validate_args",
+    "validated",
     "wrap_methods",
 ]
 
