@@ -57,11 +57,14 @@ plots all of these. For chat notifications on breaker opens use
 Attach a `RetryBudget` (shared per dependency) or set one globally with
 `configure(retry={"budget": RetryBudget(...)})`. Run `python -m python_wrap doctor` on your
 policies: PW008 lists retry layers without a budget, PW004 retries without timeouts.
+Add `--multiprocess` when the service runs several worker processes: PW012 lists every
+breaker, bulkhead and limiter that is not backed by shared state.
 
 ### Rate limiter rejects too much / too little
 
 Process-local limiters (`rate_limit`, `RateLimiter`) count per process: N workers allow N
-times the rate. Use `RedisWindow` + `shared_rate_limit` for a global limit.
+times the rate. Use `RedisWindow` + `shared_rate_limit` for a global limit (`AsyncRedisWindow`
+for `async def` code with a `redis.asyncio` client).
 
 ### The event loop stalls
 

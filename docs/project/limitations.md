@@ -86,7 +86,7 @@ If your function has a `tx` parameter, it is passed as the keyword `tx=`. Put `t
 Decorated functions pickle by reference, so the rules are those of plain functions: the function must be reachable by its module and qualified name. Functions defined inside another function, lambdas, and functions defined in `__main__` of an interactive session cannot be sent to a `"spawn"` worker.
 
 With default backends, each worker has its own cache, rate limiter, circuit breaker,
-bulkhead and counters. A pool-wide limit requires an explicitly shared backend. Forked
+bulkhead and counters. A pool-wide limit requires an explicitly shared backend; `python -m python_wrap doctor --multiprocess` (PW012) lists the layers that lack one. Forked
 workers also need the [documented child-reset lifecycle](migration-0.3.md#forked-workers). `CircuitBreaker`, `RateLimiter`, `Bulkhead`, `RetryBudget`, `Transaction`, `Policy` and `testing.FakeClock` raise `TypeError` when pickled or copied. A `cached_property` value is not pickled with its instance and is computed again after unpickling. See [Process pools and pickling](../get-started/async-and-methods.md#process-pools-and-pickling).
 
 ## Optional distributed coordination
@@ -101,12 +101,12 @@ when that gap matters. [Coordination details](../features/concurrency/leases-and
 `max_waiting` on a shared bulkhead is per process; the backend enforces global active
 capacity. Shared bulkhead `active`/`waiting` statistics are local. External cache counts
 can be unknown (`CacheInfo.currsize is None`), and synchronous Redis cache operations
-block an async `memoize` wrapper: use `amemoize` with `AsyncRedisStore` or
+block an async `memoize` wrapper (**addressed with opt-ins**): use `amemoize` with `AsyncRedisStore` or
 `ThreadedStore(RedisStore(...))`, and `AsyncRedisWindow` for async rate limits. An explicit health registry is a structural snapshot, not
 proof that a remote service will accept the next request.
 
-Buffered submissions are in-memory unless the writer has a `journal=`
-(`SQLiteJournal`, `RedisStreamJournal`), which gives at-least-once delivery with replay
+Buffered submissions are in-memory by default. **Addressed with an opt-in:** a writer with a `journal=`
+(`SQLiteJournal`, `RedisStreamJournal`) gives at-least-once delivery with replay
 after a restart. Shutdown has a bounded drain, failed writes are counted, and pending
 parent records are discarded in forked children (a child never replays a journal on its
 own). A journal is not a broker: one journal serves one live writer.
@@ -114,6 +114,6 @@ own). A journal is not a broker: one journal serves one live writer.
 ## Other things to know
 
 - **`debounce`** (sync) runs the function on a daemon timer thread, so it may be abandoned at interpreter exit with a call still pending. Call `.flush()` before shutting down if the last call matters.
-- **`enforce_types`** accepts, rather than rejects, annotations it cannot check (`TypedDict`, non-runtime-checkable protocols, unresolved forward references). It adds per-call cost proportional to container size. See [Validation](../features/correctness/validation.md#supported-annotations).
+- **`enforce_types`** accepts, rather than rejects, annotations it cannot check (non-runtime-checkable protocols, unresolved forward references, `ClassVar`, `Self`). **Addressed with an opt-in:** `strict=True` raises `UnsupportedAnnotationError` for them. `TypedDict` is now checked by default (a [behaviour change](migration-0.3.md#stricter-enforce_types)). It adds per-call cost proportional to container size. See [Validation](../features/correctness/validation.md#supported-annotations).
 - **`retry`** with `max_attempts=None` retries forever. Pair it with `max_delay` and an `on=` that names only transient errors.
 - **Signal timers are process-wide.** `timeout` restores the previous `SIGALRM` handler and any armed timer afterwards, but other code that installs its own `SIGALRM` handler concurrently can conflict. `timeout` emits `SignalTimerConflictWarning` when it finds one and `doctor` reports PW010; see [SIGALRM conflicts](../features/resilience/timeout.md#sigalrm-conflicts).
