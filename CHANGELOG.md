@@ -94,6 +94,13 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
   rate limiter or adaptive limiter without a shared backend, since each worker process
   then enforces its own copy of the limit. Doctor layers now report `shared` for
   bulkheads and rate limiters and recognise `AdaptiveLimiter` layers.
+- Async-friendly Redis backends. `AsyncRedisWindow` is `RedisWindow` for `redis.asyncio`
+  clients (same Lua script and keys): `shared_rate_limit` and `RateLimiter(backend=...)`
+  await it on the event loop instead of spending a worker thread per round trip, and
+  reject it on synchronous functions with `TypeError`. `ThreadedStore(store,
+  executor=None)` turns any synchronous `CacheStore` (such as `RedisStore` with a plain
+  `redis.Redis` client) into an `AsyncCacheStore` for `amemoize`, running each call in a
+  worker thread so it never blocks the loop.
 
 ### Security
 

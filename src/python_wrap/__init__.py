@@ -31,6 +31,7 @@ from .async_cache import (
     AsyncCacheStore,
     AsyncMemoryStore,
     AsyncRedisStore,
+    ThreadedStore,
     amemoize,
 )
 from .batching import (
@@ -202,6 +203,7 @@ from .processing import (
     process_batches,
 )
 from .quotas import (
+    AsyncRedisWindow,
     Quota,
     QuotaExhausted,
     RedisWindow,
@@ -286,6 +288,7 @@ __all__ = [
     "AsyncMemoryStore",
     "AsyncPeriodic",
     "AsyncRedisStore",
+    "AsyncRedisWindow",
     "Attempt",
     "AttemptRecord",
     "AuditRecord",
@@ -355,6 +358,7 @@ __all__ = [
     "ShutdownManager",
     "ShutdownReport",
     "SqlAppLock",
+    "ThreadedStore",
     "Timeout",
     "TimeoutExpired",
     "TimingRecord",
