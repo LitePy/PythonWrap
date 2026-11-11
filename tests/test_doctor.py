@@ -255,3 +255,53 @@ def test_cli_dispatches_migrate(tmp_path, capsys):
     source = tmp_path / "jobs.py"
     source.write_text("def f():\n    return 1\n")
     assert cli(["migrate", str(tmp_path)]) == 0
+
+
+def test_pw011_memoized_method_keyed_on_self_without_bounds():
+    class Repo:
+        @memoize
+        def load(self, x: int) -> int:
+            return x
+
+    assert "PW011" in codes(doctor(Repo.load))
+    report = doctor(Repo().load)
+    assert report.ok  # a warning, not an error
+    assert [f.code for f in report.findings] == ["PW011"]
+
+
+def test_pw011_stays_quiet_when_bounded_or_instance_safe():
+    class Repo:
+        @memoize(maxsize=10)
+        def a(self, x: int) -> int:
+            return x
+
+        @memoize(ttl=5)
+        def b(self, x: int) -> int:
+            return x
+
+        @memoize(per_instance=True)
+        def c(self, x: int) -> int:
+            return x
+
+        @memoize(key=lambda self, x: x)
+        def d(self, x: int) -> int:
+            return x
+
+        @memoize
+        def not_a_method(x: int) -> int:  # type: ignore[misc]
+            return x
+
+    for name in "abcd":
+        assert "PW011" not in codes(doctor(getattr(Repo, name))), name
+    assert "PW011" not in codes(doctor(Repo.not_a_method))
+
+
+def test_pw011_found_under_other_layers():
+    class Repo:
+        @retry(max_attempts=2, on=ConnectionError, budget=RetryBudget())
+        @timeout(1)
+        @memoize
+        def load(self, x: int) -> int:
+            return x
+
+    assert "PW011" in codes(doctor(Repo.load))

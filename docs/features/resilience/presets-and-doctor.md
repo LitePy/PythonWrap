@@ -103,6 +103,7 @@ assert "PW006" in [finding.code for finding in report.findings]  # timeout outsi
 | PW006 | warning | Layers out of the canonical order (`ROLES`), e.g. a retry wrapping a breaker. |
 | PW007 | warning | More than one retry or breaker layer: attempts multiply. |
 | PW008 | warning | Retry without a `RetryBudget`: retries multiply load during an outage. |
+| PW011 | warning | `memoize` on a method with `self` in the key and no `maxsize`, `ttl` or `store`: instances are pinned forever. Use `per_instance=True`. |
 
 Use it in a test so a risky change fails CI:
 

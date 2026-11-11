@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from python_wrap import concurrency, debounce, rate_limit, throttle
+from python_wrap import concurrency, debounce, memoize, rate_limit, throttle
 from python_wrap.concurrency import limiter_of
 from python_wrap.errors import RateLimitExceeded
 
@@ -307,3 +307,215 @@ def test_limiter_of_instance_without_per_instance(fake_clock):
 
 
 _: Any = (time,)  # keep import used by later sections
+
+
+# ---------------------------------------------------------------- memoize(singleflight=)
+
+
+def _race(fn: Any, n: int = 8) -> list[Any]:
+    barrier = threading.Barrier(n)
+    out: list[Any] = [None] * n
+
+    def worker(i: int) -> None:
+        barrier.wait()
+        try:
+            out[i] = fn()
+        except BaseException as exc:
+            out[i] = exc
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return out
+
+
+def test_memoize_default_may_compute_twice_but_singleflight_does_not():
+    calls = []
+
+    @memoize(singleflight=True)
+    def slow(x: int) -> int:
+        calls.append(x)
+        time.sleep(0.1)
+        return x * 2
+
+    assert _race(lambda: slow(4)) == [8] * 8
+    assert calls == [4]
+    info = slow.cache_info()
+    assert info.misses == 1 and info.hits == 7
+    assert slow(4) == 8 and calls == [4]
+    assert slow.cache_parameters()["singleflight"] is True
+
+
+def test_memoize_without_singleflight_computes_concurrently():
+    calls = []
+
+    @memoize
+    def slow(x: int) -> int:
+        calls.append(x)
+        time.sleep(0.1)
+        return x
+
+    _race(lambda: slow(1))
+    assert len(calls) > 1  # the documented default race
+
+
+def test_memoize_singleflight_different_keys_run_in_parallel():
+    calls = []
+
+    @memoize(singleflight=True)
+    def slow(x: int) -> int:
+        calls.append(x)
+        time.sleep(0.05)
+        return x
+
+    idx = iter(range(4))
+    lock = threading.Lock()
+
+    def one() -> int:
+        with lock:
+            i = next(idx)
+        return slow(i)
+
+    assert sorted(_race(one, 4)) == [0, 1, 2, 3]
+    assert sorted(calls) == [0, 1, 2, 3]
+
+
+def test_memoize_singleflight_shares_exception_and_recovers():
+    calls = []
+
+    @memoize(singleflight=True)
+    def boom() -> int:
+        calls.append(1)
+        time.sleep(0.1)
+        if len(calls) == 1:
+            raise ValueError("nope")
+        return 7
+
+    out = _race(boom, 4)
+    assert all(isinstance(o, ValueError) for o in out) and len(calls) == 1
+    assert boom() == 7  # failures are not cached: the next call computes again
+
+
+def test_memoize_singleflight_cached_exception():
+    calls = []
+
+    @memoize(singleflight=True, cache_exceptions=KeyError)
+    def boom() -> int:
+        calls.append(1)
+        time.sleep(0.05)
+        raise KeyError("k")
+
+    assert all(isinstance(o, KeyError) for o in _race(boom, 4))
+    with pytest.raises(KeyError):
+        boom()
+    assert len(calls) == 1
+
+
+def test_memoize_singleflight_reentrant_does_not_deadlock():
+    @memoize(singleflight=True)
+    def fib(n: int) -> int:
+        return n if n < 2 else fib(n - 1) + fib(n - 2)
+
+    assert fib(10) == 55
+
+
+def test_memoize_singleflight_same_key_reentrant_computes_directly():
+    state = {"entered": False}
+
+    @memoize(singleflight=True)
+    def f(n: int) -> int:
+        if not state["entered"]:
+            state["entered"] = True
+            return f(n) + 1  # same key on the computing thread: no self-wait
+        return n
+
+    assert f(5) == 6
+
+
+def test_memoize_singleflight_per_instance_and_copy_result():
+    class Svc:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        @memoize(singleflight=True, per_instance=True, copy_result=True)
+        def load(self) -> list[int]:
+            self.calls += 1
+            time.sleep(0.1)
+            return [1]
+
+    a, b = Svc(), Svc()
+    out = _race(a.load, 4)
+    assert out == [[1]] * 4 and len({id(o) for o in out}) == 4  # private copies
+    assert a.calls == 1
+    assert b.load() == [1] and b.calls == 1  # another instance computes by itself
+
+
+def test_memoize_singleflight_with_store():
+    class DictStore:
+        def __init__(self) -> None:
+            self.d: dict[Any, Any] = {}
+
+        def get(self, key: Any) -> Any:
+            return self.d.get(key)
+
+        def set(self, key: Any, value: Any, ttl: float | None) -> None:
+            self.d[key] = value
+
+        def delete(self, key: Any) -> bool:
+            return self.d.pop(key, None) is not None
+
+        def clear(self) -> None:
+            self.d.clear()
+
+        def __len__(self) -> int:
+            return len(self.d)
+
+    calls = []
+
+    @memoize(singleflight=True, store=DictStore())
+    def slow() -> int:
+        calls.append(1)
+        time.sleep(0.1)
+        return 1
+
+    assert _race(slow, 4) == [1] * 4 and calls == [1]
+
+
+def test_memoize_singleflight_cleared_during_flight():
+    started, release = threading.Event(), threading.Event()
+    calls = []
+
+    @memoize(singleflight=True)
+    def slow() -> int:
+        calls.append(1)
+        started.set()
+        release.wait(2)
+        return 1
+
+    t = threading.Thread(target=slow)
+    t.start()
+    assert started.wait(2)
+    slow.cache_clear()  # drops stats; the stored result is discarded as stale
+    release.set()
+    t.join()
+    assert slow.cache_info().currsize == 0
+
+
+def test_memoize_singleflight_validates():
+    with pytest.raises(TypeError, match="singleflight"):
+        memoize(singleflight=1)  # type: ignore[arg-type]
+
+
+async def test_memoize_singleflight_async_unchanged():
+    calls = []
+
+    @memoize(singleflight=True)
+    async def f(x: int) -> int:
+        calls.append(x)
+        await asyncio.sleep(0.05)
+        return x
+
+    assert await asyncio.gather(*(f(1) for _ in range(5))) == [1] * 5
+    assert calls == [1]

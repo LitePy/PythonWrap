@@ -538,6 +538,7 @@ def memoize(
     exception_ttl: float | datetime.timedelta | None = None,
     store: CacheStore | None = None,
     per_instance: bool = False,
+    singleflight: bool = False,
     copy_result: bool = False,
     logger: _core.LoggerLike = None,
 ) -> Callable[[Callable[P, R]], Memoized[P, R]]: ...
@@ -554,6 +555,7 @@ def memoize(
     exception_ttl: float | datetime.timedelta | None = None,
     store: CacheStore | None = None,
     per_instance: bool = False,
+    singleflight: bool = False,
     copy_result: bool = False,
     logger: _core.LoggerLike = None,
 ) -> Any:
@@ -569,9 +571,10 @@ def memoize(
     keeps growing; raise a fresh exception from a ``except`` clause if that matters).
     The cache is guarded by a lock. For sync functions two threads that miss on the same
     key at the same time may both compute the value (the function itself is never called
-    under the lock); the last result stored wins. For ``async def`` functions the awaited
-    result is cached and concurrent awaits of the same missing key share a single
-    in-flight task per event loop, so it runs once.
+    under the lock); the last result stored wins -- pass ``singleflight=True`` to make the
+    other threads wait for the first one's outcome instead. For ``async def`` functions
+    the awaited result is cached and concurrent awaits of the same missing key share a
+    single in-flight task per event loop, so it runs once.
 
     Stale-while-revalidate: with ``stale_ttl`` an entry older than ``ttl`` is *stale* but
     still served, immediately, for ``stale_ttl`` more seconds; the call that finds it
@@ -588,7 +591,8 @@ def memoize(
     its own cache, found by identity through a weak reference, so instances stay
     collectable (their entries go with them) and need not be hashable. They must be
     weak-referenceable (a ``__slots__`` class must list ``'__weakref__'``), and a cached
-    result that references its instance keeps it alive.
+    result that references its instance keeps it alive. `python_wrap.doctor` flags a
+    method cache keyed on ``self`` with no ``maxsize``, ``ttl`` or ``store`` (PW011).
 
     Mutable results are shared by reference by default. Set ``copy_result=True`` to
     deepcopy a private snapshot on write and return an independent deepcopy to each
@@ -630,6 +634,11 @@ def memoize(
         store: A `CacheStore` to keep entries in instead of the built-in LRU dict.
         per_instance: For methods: one cache per instance, held through a weak
             reference, keyed by the arguments after ``self``.
+        singleflight: Sync functions: concurrent misses on the same key (in different
+            threads) run the function once; the other threads wait and get the same
+            result, or the same exception. A call that shares another thread's computation
+            counts as a hit. A re-entrant call on the computing thread computes directly.
+            ``async def`` functions already behave this way, so it changes nothing there.
         copy_result: Deepcopy successful values on write and on delivery. False keeps
             the existing shared-reference behavior. Does not apply while caching is disabled.
         logger: Logger (or name) for failed background refreshes.
@@ -658,6 +667,8 @@ def memoize(
     """
     if not isinstance(copy_result, bool):
         raise TypeError("copy_result must be bool")
+    if not isinstance(singleflight, bool):
+        raise TypeError("singleflight must be bool")
     copier: Callable[[Any], Any] | None = None
     if copy_result:
         from copy import deepcopy
@@ -726,6 +737,8 @@ def memoize(
             asyncio.AbstractEventLoop, dict[Hashable, asyncio.Future[Any]]
         ] = weakref.WeakKeyDictionary()
         refreshing: set[Hashable] = set()  # sync keys being refreshed in a thread
+        # singleflight, sync: key -> (future of the computing thread's outcome, its thread id)
+        sync_flights: dict[Hashable, tuple[concurrent.futures.Future[Any], int]] = {}
         background: set[asyncio.Future[Any]] = set()  # strong refs to refresh tasks
         lock = _fork.ForkSafeLock()
         guard: Any = lock if builtin else contextlib.nullcontext()
@@ -992,6 +1005,8 @@ def memoize(
                 "exception_ttl": exc_ttl_s,
                 "store": store,
                 "per_instance": per_instance,
+                "key": key,
+                "singleflight": singleflight,
                 "copy_result": copy_result,
             }
 
@@ -1010,6 +1025,68 @@ def memoize(
             if lru:
                 data.move_to_end(k)
             return entry
+
+        def sync_miss(
+            b: Any, k: Hashable, args: tuple[Any, ...], kwargs: dict[str, Any], g: int
+        ) -> Any:
+            # The sync miss path: compute and store; with singleflight=True only one
+            # thread per key computes while the others wait for its outcome.
+            nonlocal hits, misses
+
+            def compute() -> tuple[Any, Any]:
+                try:
+                    result = f(*args, **kwargs)
+                except exc_types as exc:
+                    save(b, k, exc, g, True)
+                    raise
+                return save(b, k, result, g), result
+
+            if not singleflight:
+                snapshot, result = compute()
+                return isolate(snapshot) if copy_result else result
+            rk = (id(b), k) if per_instance else k
+            me = threading.get_ident()
+            with lock:
+                flight = sync_flights.get(rk)
+                if flight is None:
+                    future: concurrent.futures.Future[Any] = concurrent.futures.Future()
+                    sync_flights[rk] = (future, me)
+                else:
+                    shared, owner = flight
+            if flight is not None:
+                if owner == me:
+                    # Re-entrant call on the computing thread: waiting for our own
+                    # result would deadlock, so compute directly.
+                    snapshot, result = compute()
+                    return isolate(snapshot) if copy_result else result
+                snapshot = shared.result()
+                with lock:  # it shared another thread's computation: a hit, not a miss
+                    hits += 1
+                    misses -= 1
+                if _core.listeners:
+                    _core.emit("cache.hit", name)
+                return isolate(snapshot) if copy_result else snapshot
+            try:
+                # Another thread may have finished this key between our lookup and now.
+                with guard:
+                    cached = fetch(b, k)
+                if cached:
+                    if cached[2]:
+                        raise cached[0]
+                    snapshot = result = cached[0]
+                else:
+                    snapshot, result = compute()
+            except BaseException as exc:
+                with lock:
+                    if sync_flights.get(rk, (None,))[0] is future:
+                        del sync_flights[rk]
+                future.set_exception(exc)
+                raise
+            with lock:
+                if sync_flights.get(rk, (None,))[0] is future:
+                    del sync_flights[rk]
+            future.set_result(snapshot)
+            return isolate(snapshot) if copy_result else result
 
         async def amiss(b: Any, k: Hashable, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
             # The async miss path: share one in-flight task per key and event loop.
@@ -1156,13 +1233,7 @@ def memoize(
                     if entry is not None:
                         report_expired()
                     _core.emit("cache.miss", name)
-                try:
-                    result = f(*args, **kwargs)
-                except exc_types as exc:
-                    save(main, k, exc, g, True)
-                    raise
-                snapshot = save(main, k, result, g)
-                return isolate(snapshot) if copy_result else result
+                return sync_miss(main, k, args, kwargs, g)
 
         else:
 
@@ -1193,13 +1264,7 @@ def memoize(
                     if entry is not None:
                         report_expired()
                     _core.emit("cache.miss", name)
-                try:
-                    result = f(*args, **kwargs)
-                except exc_types as exc:
-                    save(b, k, exc, g, True)
-                    raise
-                snapshot = save(b, k, result, g)
-                return isolate(snapshot) if copy_result else result
+                return sync_miss(b, k, args, kwargs, g)
 
         wrapper.cache_clear = cache_clear
         wrapper.cache_info = cache_info
@@ -1214,6 +1279,7 @@ def memoize(
                 instances.clear()
             inflight.clear()
             refreshing.clear()
+            sync_flights.clear()
             background.clear()
             hits = misses = 0
             gen += 1

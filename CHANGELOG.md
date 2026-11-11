@@ -97,6 +97,15 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
   stay collectable and need not be hashable. With either option `debounce`'s `.cancel()` and
   `.flush()` take a call's arguments to pick the slot; `limiter_of(method, instance=obj)`
   returns an instance's limiter. Defaults are unchanged.
+- `memoize(..., singleflight=True)`: concurrent misses on the same key in different threads
+  run the function once; the other threads wait for that outcome (result or exception) and
+  count as hits. A re-entrant call on the computing thread computes directly. Off by default
+  (the previous behavior, where two threads may both compute, is unchanged); `async def`
+  functions already shared one in-flight task per key and loop. `cache_parameters()` gains
+  `singleflight` and `key`.
+- Doctor code PW011: a `memoize`d method keyed on `self` with no `maxsize`, `ttl` or `store`
+  pins every instance it sees. The fix is the existing `memoize(per_instance=True)`, which
+  keeps instances collectable through weak references. No default changed.
 
 ### Security
 
