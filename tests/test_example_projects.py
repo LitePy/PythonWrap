@@ -1,4 +1,4 @@
-"""Each project in ``examples/projects/`` must run its own tests and its ``main.py`` or ``run.py``."""
+"""Each project in ``examples/projects/`` must run its tests and its entry point."""
 
 from __future__ import annotations
 
