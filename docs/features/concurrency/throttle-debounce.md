@@ -152,7 +152,20 @@ assert saved == ["final"]
     Sync debounced functions run on a daemon timer thread, so the function body runs on a different thread from the caller. Async debounce waits with `asyncio.sleep`, so calls must be awaited (or wrapped in tasks) for it to take effect. Both wait in real time.
 
 !!! note "State belongs to the function"
-    Throttle and debounce state belongs to the decorated function. On a **method** it is shared by every instance. See [Limitations](../../project/limitations.md#shared-state-on-methods).
+    Throttle and debounce state belongs to the decorated function. On a **method** it is shared by every instance unless you split it with `per_instance=True` (one window or pending call per instance, held through a weak reference) or `key=` (one per key, a function of the call's arguments). See [Limitations](../../project/limitations.md#shared-state-on-methods).
+
+    ```python
+    from python_wrap import debounce, throttle
+
+    class Sensor:
+        @throttle(60, per_instance=True)
+        def read(self) -> str: ...
+
+    @debounce(0.5, key=lambda doc_id, *_: doc_id)
+    def autosave(doc_id: int, text: str) -> None: ...
+    ```
+
+    With a key or `per_instance`, `autosave.cancel(doc_id, "")` and `autosave.flush(doc_id, "")` take a call's arguments to pick the slot; without arguments they act on all of them.
 
 ## See also
 

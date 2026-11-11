@@ -108,7 +108,7 @@ else:
 ```
 
 !!! tip "Per-instance limits on methods"
-    Use `key=lambda self, *a, **kw: id(self)` (or an identifying attribute) to give each instance its own limit.
+    Use `per_instance=True` to give each instance its own limiter (held through a weak reference, so instances stay collectable; reach one with `limiter_of(obj.method, instance=obj)`), or `key=` with an identifying attribute.
 
 ## Several limits at once
 

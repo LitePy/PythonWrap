@@ -4,7 +4,8 @@
 of an already decorated function through ``__wrapped__``. Both return a `Report` whose
 `findings` flag the combinations that usually cause production incidents: retries
 without a per-attempt timeout, retries of non-idempotent operations, unbounded retries,
-timeouts longer than the whole retry budget, and layers stacked out of the canonical
+timeouts longer than the whole retry budget, memoized methods keyed on ``self`` with no
+bound (PW011), and layers stacked out of the canonical
 order (`python_wrap.policy.ROLES`).
 
 Nothing is called: only configuration attributes are read.
@@ -18,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import inspect
 import itertools
 import sys
 from collections.abc import Callable, Mapping, Sequence
@@ -142,7 +144,7 @@ def _layer(obj: Any, role: str | None = None) -> Layer:
     if isinstance(obj, RateLimiter):
         return Layer(role or "limiter", {"name": obj.name})
     if callable(getattr(obj, "cache_info", None)):
-        return Layer(role or "cache")
+        return Layer(role or "cache", _cache_settings(obj))
     return Layer(role or "unknown", {"decorator": getattr(obj, "__qualname__", type(obj).__name__)})
 
 
@@ -151,6 +153,25 @@ def _preemptive(use_signals: Any) -> bool:
     from python_wrap.concurrency import _signals_usable
 
     return use_signals is not False and _signals_usable()
+
+
+def _cache_settings(obj: Any) -> dict[str, Any]:
+    """What PW011 needs about a `memoize` wrapper: does ``self`` key an unbounded cache?"""
+    read = getattr(obj, "cache_parameters", None)
+    if not callable(read):
+        return {}
+    try:
+        params = read()
+        names = list(inspect.signature(getattr(obj, "__wrapped__", obj)).parameters)
+    except (TypeError, ValueError):
+        return {}
+    bounded = (
+        params.get("maxsize") is not None
+        or params.get("ttl") is not None
+        or params.get("store") is not None
+    )
+    self_in_key = bool(names) and names[0] == "self" and not params.get("per_instance")
+    return {"self_in_key": self_in_key and params.get("key") is None, "bounded": bounded}
 
 
 def _check(layers: Sequence[Layer], idempotent: bool) -> tuple[Finding, ...]:
@@ -276,6 +297,22 @@ def _check(layers: Sequence[Layer], idempotent: bool) -> tuple[Finding, ...]:
                 "(3 x 3 = 9 calls) and failures are counted twice.",
             )
         )
+    for layer in layers:
+        if (
+            layer.role == "cache"
+            and layer.settings.get("self_in_key")
+            and not layer.settings.get("bounded")
+        ):
+            found.append(
+                Finding(
+                    "PW011",
+                    "warning",
+                    "memoize on a method keys the cache on `self` with no maxsize or ttl: "
+                    "every instance it has seen stays alive and its entries are never "
+                    "dropped. Use per_instance=True (weak references), set maxsize= or "
+                    "ttl=, or pass key= without `self`.",
+                )
+            )
     found.sort(key=lambda item: (item.severity != "error", item.code))
     return tuple(found)
 
@@ -356,7 +393,7 @@ def doctor(func: Callable[..., Any], *, idempotent: bool = True) -> Report:
         if hasattr(current, _LAYER_ATTR):
             layers.append(_layer(current))
         elif callable(getattr(current, "cache_info", None)):
-            layers.append(Layer("cache"))
+            layers.append(Layer("cache", _cache_settings(current)))
         current = getattr(current, "__wrapped__", None)
     return Report(name, tuple(layers), _check(layers, idempotent))
 

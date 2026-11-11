@@ -98,6 +98,23 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
 - `ratelimit_headers`, `too_many_requests` and `problem_response` build IETF `RateLimit-*`
   headers and RFC 9457 problem+json responses for rate-limit, open-circuit and bulkhead
   rejections, with optional FastAPI, Flask and Django glue.
+- `throttle(..., key=, per_instance=)` and `debounce(..., key=, per_instance=)`, and
+  `rate_limit(..., per_instance=)`: split the state of decorated methods that every instance
+  used to share. `key=` mirrors `rate_limit`/`singleflight` (a function of the call's
+  arguments, one window or countdown per key; idle keys are dropped); `per_instance=True` keeps
+  one window, pending call or limiter per instance, held through a weak reference so instances
+  stay collectable and need not be hashable. With either option `debounce`'s `.cancel()` and
+  `.flush()` take a call's arguments to pick the slot; `limiter_of(method, instance=obj)`
+  returns an instance's limiter. Defaults are unchanged.
+- `memoize(..., singleflight=True)`: concurrent misses on the same key in different threads
+  run the function once; the other threads wait for that outcome (result or exception) and
+  count as hits. A re-entrant call on the computing thread computes directly. Off by default
+  (the previous behavior, where two threads may both compute, is unchanged); `async def`
+  functions already shared one in-flight task per key and loop. `cache_parameters()` gains
+  `singleflight` and `key`.
+- Doctor code PW011: a `memoize`d method keyed on `self` with no `maxsize`, `ttl` or `store`
+  pins every instance it sees. The fix is the existing `memoize(per_instance=True)`, which
+  keeps instances collectable through weak references. No default changed.
 
 ### Security
 

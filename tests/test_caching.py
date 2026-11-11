@@ -722,6 +722,8 @@ def test_cache_parameters() -> None:
         "stale_ttl": None,
         "store": None,
         "per_instance": False,
+        "key": None,
+        "singleflight": False,
         "copy_result": False,
     }
 
