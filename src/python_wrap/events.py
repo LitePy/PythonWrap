@@ -92,6 +92,15 @@ EVENT_NAMES: Mapping[str, str] = MappingProxyType(
         "lifecycle.drain_finished": (
             "A shutdown drain completed. Fields: ok (bool), seconds (float)."
         ),
+        "llm.fallback_served": (
+            "A fallback_models chain returned an answer. function is the chain name. "
+            "Fields: model (str, the entry that served, or 'cached'), index (int, -1 for "
+            "the cached answer), failed (tuple of str, entries that failed first)."
+        ),
+        "llm.budget_exceeded": (
+            "A Budget refused a call. Fields: budget (str), scope (str), tokens (int), "
+            "usd (float), the spend so far."
+        ),
         "chaos.injected": (
             "A python_wrap.chaos rule injected a fault. function is the fault point name. "
             "Fields: kind (str): 'latency', 'exception' or 'result'; point (str); "

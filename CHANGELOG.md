@@ -147,6 +147,28 @@ cancellation, per-instance state for `throttle`/`debounce`/`rate_limit`, single-
   `runtime_checkable`, unresolvable forward references, `ClassVar`, `Self`...) instead of
   accepting them silently; vetted at decoration, or on the first call when a forward
   reference resolves later.
+- `python_wrap.llm`, wrappers for LLM calls with no provider SDK imported (usage and errors
+  are duck-typed): `llm_transient` and `llm_retry()` retry 408/409/429/529/5xx, overloaded,
+  timeout and connection errors, honouring `Retry-After` and `retry-after-ms`, and never
+  other 4xx or content-policy refusals; `presets.llm_client()` bundles them with a 60 s
+  timeout, a retry budget and a breaker that counts only transient errors.
+- `Budget` / `budget(tokens=, usd=, per=...)`: token and dollar limits per total, per key,
+  per explicit run or per call chain (context variables), priced with
+  `prices={"model": (in_per_mtok, out_per_mtok)}`, optional `period=` windows and a shared
+  `RedisBudgetBackend`; raises `BudgetExceeded`. New event `llm.budget_exceeded`.
+- `token_rate_limit(tokens_per_minute, estimate=...)`: a token bucket that reserves an
+  estimate (`estimate_tokens`) before the call and reconciles it with the real usage.
+- `fallback_models([...])` (or `@fallback_models(backups=[...])`): a model fallback chain
+  with a circuit breaker per entry and an optional last-good cached answer. New event
+  `llm.fallback_served` naming the model that served.
+- `stream_timeout(first_token=, chunk_gap=, total=)` for sync and async streams, raising
+  `StreamTimeout` (a `TimeoutExpired`) with `.limit` naming the limit that tripped.
+- `llm_cache()`: an exact-match response cache keyed on model, messages/prompt and
+  parameters, with TTL, any `CacheStore`/`AsyncCacheStore`, and an optional
+  `similarity=` embedding hook for semantic matches.
+- Doctor checks PW013 (LLM call retried without a spend budget), PW014 (LLM call without a
+  timeout, or a stream timeout without `chunk_gap`) and PW015 (generic retry without
+  `retry_if` around an LLM call).
 
 ### Security
 

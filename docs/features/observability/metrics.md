@@ -123,6 +123,8 @@ unsubscribe()
 | `bulkhead.rejected` | `active`, `waiting` |
 | `periodic.run` | `run` (1-based), `seconds` (how long the run took) |
 | `periodic.failed` | `run`, `exception` |
+| `llm.fallback_served` | `model` (the entry that served, or `cached`), `index` (-1 for the cached answer), `failed` (entries that failed first) |
+| `llm.budget_exceeded` | `budget`, `scope`, `tokens`, `usd` (the spend so far) |
 
 ```python
 from python_wrap.events import EVENT_NAMES

@@ -19,6 +19,7 @@ $ python examples/resilient_http.py
 | [`per_instance_state.py`](per_instance_state.py) | `throttle`/`debounce`/`rate_limit` with `per_instance=` and `key=`, `limiter_of(instance=)`, `memoize(singleflight=True)` with threads | [FastAPI](../docs/cookbook/fastapi.md#per-instance-state-in-service-classes) |
 | [`audit_logging.py`](audit_logging.py) | `log_args` and `audit` with shared redaction, JSON log lines | [Observability](../docs/cookbook/observability.md) |
 | [`durable_buffer.py`](durable_buffer.py) | `Buffered(journal=SQLiteJournal(...))`: records survive a failed destination and a restart, then `replay()` delivers them | [Durable writers](../docs/features/concurrency/buffered-writes.md#durable-writers) |
+| [`llm_client.py`](llm_client.py) | `llm_client` retrying 529 after `Retry-After` but not refusals, per-user dollar `Budget`, `token_rate_limit`, `fallback_models`, `stream_timeout`, `llm_cache` against a fake provider | [LLM calls](../docs/features/ai/llm-calls.md) |
 | [`strict_validation.py`](strict_validation.py) | `enforce_types(strict=True)`, `TypedDict` checking, `UnsupportedAnnotationError`, doctor `multiprocess=True` (PW012) | [Validation](../docs/features/correctness/validation.md#supported-annotations) |
 
 Several scripts use `python_wrap.testing.fake_clock` so that backoff sleeps and cache expiry take no real time. That is a handy trick in your own scripts and tests too; see [Testing code that uses python-wrap](../docs/cookbook/testing-your-code.md).
