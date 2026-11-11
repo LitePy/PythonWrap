@@ -101,6 +101,13 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
   executor=None)` turns any synchronous `CacheStore` (such as `RedisStore` with a plain
   `redis.Redis` client) into an `AsyncCacheStore` for `amemoize`, running each call in a
   worker thread so it never blocks the loop.
+- Durable buffered writers: `buffered(journal=...)`, `Buffered(journal=...)` and
+  `AsyncBuffered(journal=...)` persist each accepted record before `submit` returns and
+  remove it only after its batch is written, giving at-least-once delivery. Records left
+  over (crash, failed batch, disabled or closed writer) are replayed on the next first
+  `submit` or an explicit `replay()`. Journals: `SQLiteJournal` (stdlib, local file),
+  `RedisStreamJournal` (Redis stream), or any `BufferJournal` implementation. Opt-in;
+  without a journal nothing changes.
 
 ### Security
 
