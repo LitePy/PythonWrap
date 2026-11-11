@@ -89,6 +89,11 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
 - `ratelimit_headers`, `too_many_requests` and `problem_response` build IETF `RateLimit-*`
   headers and RFC 9457 problem+json responses for rate-limit, open-circuit and bulkhead
   rejections, with optional FastAPI, Flask and Django glue.
+- Doctor check PW012: `explain(..., multiprocess=True)`, `doctor(..., multiprocess=True)`
+  and `python -m python_wrap doctor --multiprocess` warn about every breaker, bulkhead,
+  rate limiter or adaptive limiter without a shared backend, since each worker process
+  then enforces its own copy of the limit. Doctor layers now report `shared` for
+  bulkheads and rate limiters and recognise `AdaptiveLimiter` layers.
 
 ### Security
 

@@ -255,3 +255,76 @@ def test_cli_dispatches_migrate(tmp_path, capsys):
     source = tmp_path / "jobs.py"
     source.write_text("def f():\n    return 1\n")
     assert cli(["migrate", str(tmp_path)]) == 0
+
+
+def test_pw012_flags_per_process_limits_only_when_multiprocess(tmp_path):
+    from python_wrap import AdaptiveLimiter
+    from python_wrap.local_state import SQLiteBreakerState
+
+    local = policy(
+        name="local",
+        breaker=CircuitBreaker(failure_threshold=3, name="vendor"),
+        bulkhead=Bulkhead(4),
+        limiter=RateLimiter(10, 1, name="vendor"),
+        timeout=timeout(1),
+    )
+    assert "PW012" not in codes(local.explain())
+    report = explain(local, multiprocess=True)
+    flagged = [f for f in report.findings if f.code == "PW012"]
+    assert len(flagged) == 3
+    assert all(f.severity == "warning" for f in flagged)
+    assert report.ok  # warnings only
+    text = str(report)
+    assert "breaker 'vendor'" in text and "limiter 'vendor'" in text and "bulkhead" in text
+
+    state = SQLiteBreakerState(tmp_path / "b.db")
+    try:
+        shared = policy(
+            breaker=CircuitBreaker(failure_threshold=3, name="vendor", backend=state),
+            timeout=timeout(1),
+        )
+        assert "PW012" not in codes(explain(shared, multiprocess=True))
+    finally:
+        state.close()
+
+    adaptive = AdaptiveLimiter(name="pool")
+
+    @adaptive
+    def call() -> int:
+        return 1
+
+    found = doctor(call, multiprocess=True)
+    assert [layer.role for layer in found.layers] == ["adaptive"]
+    assert codes(found) == ["PW012"]
+
+
+def test_pw012_respects_shared_limiter_and_bulkhead_settings():
+    class Window:
+        calls, period = 5, 1.0
+
+        def acquire(self, key=None):
+            return 0.0
+
+    class Backend:
+        def acquire(self, *args, **kwargs):
+            return True
+
+    limiter = RateLimiter(backend=Window(), name="shared")
+    bulkhead = Bulkhead(2, name="pool", backend=Backend())
+    report = explain(policy(limiter=limiter, bulkhead=bulkhead), multiprocess=True)
+    assert "PW012" not in codes(report)
+    assert report.layers[0].settings["shared"] is True
+    assert report.layers[1].settings["shared"] is True
+
+
+def test_cli_doctor_multiprocess(capsys, monkeypatch):
+    module = types.ModuleType("pw_doctor_mp")
+    module.stack = policy(  # type: ignore[attr-defined]
+        breaker=CircuitBreaker(name="x"), timeout=timeout(1)
+    )
+    monkeypatch.setitem(sys.modules, "pw_doctor_mp", module)
+    assert cli(["doctor", "pw_doctor_mp:stack"]) == 0
+    assert "PW012" not in capsys.readouterr().out
+    assert cli(["doctor", "--multiprocess", "pw_doctor_mp:stack"]) == 0
+    assert "WARNING PW012" in capsys.readouterr().out
+    assert cli(["doctor", "--multiprocess", "--strict", "pw_doctor_mp:stack"]) == 1

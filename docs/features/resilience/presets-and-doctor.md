@@ -103,6 +103,25 @@ assert "PW006" in [finding.code for finding in report.findings]  # timeout outsi
 | PW006 | warning | Layers out of the canonical order (`ROLES`), e.g. a retry wrapping a breaker. |
 | PW007 | warning | More than one retry or breaker layer: attempts multiply. |
 | PW008 | warning | Retry without a `RetryBudget`: retries multiply load during an outage. |
+| PW012 | warning | With `multiprocess=True`: a breaker, bulkhead, rate limiter or adaptive limiter without a shared backend, so every worker process enforces its own copy of the limit. |
+
+Breakers, bulkheads and limiters keep their state in the process by default. Under a
+process pool (gunicorn or uvicorn workers, Celery prefork, `ProcessPoolExecutor`) that
+means N workers allow N times the configured limit, and each worker learns about an
+outage separately. Tell the doctor the code runs that way to get PW012:
+
+```python
+from python_wrap import CircuitBreaker, policy, timeout
+from python_wrap.doctor import explain
+
+stack = policy(breaker=CircuitBreaker(name="vendor"), timeout=timeout(2))
+report = explain(stack, multiprocess=True)
+assert [finding.code for finding in report.findings] == ["PW012"]
+```
+
+Give the layer a shared backend (`RedisBreakerState`, `SQLiteBreakerState`, a lease
+backend for bulkheads, a Redis window for limiters) or size the limit per worker on
+purpose.
 
 Use it in a test so a risky change fails CI:
 
@@ -124,6 +143,7 @@ test_resilience_stacks_are_safe()
 python -m python_wrap doctor myapp.clients:users_policy myapp.jobs:sync_orders
 python -m python_wrap doctor --non-idempotent myapp.payments:charge
 python -m python_wrap doctor --strict myapp.clients:users_policy   # warnings fail too
+python -m python_wrap doctor --multiprocess myapp.clients:users_policy  # PW012 checks
 ```
 
 The exit status is 1 when any report has an error (or any finding with `--strict`).
