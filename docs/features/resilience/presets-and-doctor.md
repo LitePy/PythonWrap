@@ -94,7 +94,7 @@ assert "PW006" in [finding.code for finding in report.findings]  # timeout outsi
 
 ### Findings
 
-The doctor reports codes PW001 to PW017 (the table lists them by group, not strictly in numeric order).
+The doctor reports codes PW001 to PW019 (the table lists them by group, not strictly in numeric order).
 
 | Code | Severity | Meaning |
 | --- | --- | --- |
@@ -115,6 +115,8 @@ The doctor reports codes PW001 to PW017 (the table lists them by group, not stri
 | PW013 | warning | An LLM call is retried but has no spend `Budget`. See [LLM calls](../ai/llm-calls.md#doctor-checks). |
 | PW014 | warning | A stack with LLM layers has no timeout, or a `stream_timeout` has no `chunk_gap`. |
 | PW015 | warning | A generic `retry` without `retry_if=` wraps an LLM call: refusals and bad requests are retried. |
+| PW018 | warning | A python-wrap LLM retry wraps an SDK client (`llm_retry(client=...)`) whose own retries are still on: attempts multiply (4 x 3 = 12). See [OpenAI and Anthropic SDK clients](../ai/openai-anthropic.md#doctor-checks). |
+| PW019 | warning | A retry wraps a streamed LLM call (`stream_timeout`) without `resume_safe`: a replay after output started repeats text and half-done tool calls. |
 
 Breakers, bulkheads and limiters keep their state in the process by default. Under a
 process pool (gunicorn or uvicorn workers, Celery prefork, `ProcessPoolExecutor`) that

@@ -52,6 +52,12 @@ Source = "https://github.com/LitePy/PythonWrap"
 Issues = "https://github.com/LitePy/PythonWrap/issues"
 Changelog = "https://github.com/LitePy/PythonWrap/blob/main/CHANGELOG.md"
 
+[project.optional-dependencies]
+# Not needed by python-wrap itself (the adapters read the SDKs by shape); these pin
+# SDK versions the adapters' contract tests run against.
+openai = ["openai>=1.40"]
+anthropic = ["anthropic>=0.40"]
+
 [dependency-groups]
 dev = [
     "pytest>=9.2.0",
@@ -95,7 +101,10 @@ exclude = ["**/__pycache__", "**/*.py[cod]", "**/.DS_Store"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--strict-markers -q"
-markers = ["e2e: release-grade happy-path scenarios that use only the public API"]
+markers = [
+    "e2e: release-grade happy-path scenarios that use only the public API",
+    "sdk: contract tests against the real openai/anthropic packages (skipped when absent)",
+]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 filterwarnings = ["error::pytest.PytestUnraisableExceptionWarning"]

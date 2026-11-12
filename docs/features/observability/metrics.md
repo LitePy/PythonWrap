@@ -125,6 +125,10 @@ unsubscribe()
 | `periodic.failed` | `run`, `exception` |
 | `llm.fallback_served` | `model` (the entry that served, or `cached`), `index` (-1 for the cached answer), `failed` (entries that failed first) |
 | `llm.budget_exceeded` | `budget`, `scope`, `tokens`, `usd` (the spend so far) |
+| `llm.stream_resumed` | `attempt` (the attempt that failed), `exception`, `delay` (seconds before reopening) |
+| `llm.stream_interrupted` | `chars` (partial text length), `tool_calls` (completed tool calls), `exception` |
+| `llm.prompt_cache_cold` | `calls`, `hit_rate`, `reasons` (likely causes) |
+| `llm.prompt_cache_volatile` | `kinds` (what changes per request: `timestamp`, `uuid`, ...) |
 
 ```python
 from python_wrap.events import EVENT_NAMES

@@ -5,7 +5,8 @@ of an already decorated function through ``__wrapped__``. Both return a `Report`
 `findings` flag the combinations that usually cause production incidents: retries
 without a per-attempt timeout, retries of non-idempotent operations, unbounded retries,
 timeouts longer than the whole retry budget, memoized methods keyed on ``self`` with no
-bound (PW011), LLM calls without a spend budget or timeout (PW013-PW015), layers stacked
+bound (PW011), LLM calls without a spend budget or timeout (PW013-PW015), SDK retries
+under a python-wrap retry and retried streams without ``resume_safe`` (PW018-PW019), layers stacked
 out of the canonical order (`python_wrap.policy.ROLES`) and, with ``multiprocess=True``,
 limits that are enforced separately in every worker process.
 
@@ -359,6 +360,9 @@ def _check(
     from python_wrap.llm import doctor_findings as _llm_findings
 
     found += _llm_findings(layers)
+    from python_wrap.adapters._sdk import doctor_findings as _sdk_findings
+
+    found += _sdk_findings(layers)
     found.sort(key=lambda item: (item.severity != "error", item.code))
     return tuple(found)
 

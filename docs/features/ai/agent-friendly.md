@@ -94,7 +94,7 @@ only. Its tools are all read-only:
 | Tool | Arguments | Returns |
 | --- | --- | --- |
 | `explain_policy` | `import_path` | layers outermost first, canonical order, findings |
-| `doctor` | `import_path`, `idempotent=true`, `multiprocess=false` | `ok`, layers, findings (PW001-PW017) |
+| `doctor` | `import_path`, `idempotent=true`, `multiprocess=false` | `ok`, layers, findings (PW001-PW019) |
 | `migrate_preview` | `source`, `filename` | unified diff of the tenacity/backoff codemod, notes; never writes |
 | `search_api` | `query`, `limit=10` | matching names with signatures and summaries |
 | `get_symbol` | `name` | signature, parameters, raises, example |

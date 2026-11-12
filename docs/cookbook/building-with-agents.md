@@ -26,7 +26,7 @@ An AI coding agent that adds retries, caching or rate limits to your code tends 
     python -m python_wrap doctor --multiprocess myapp.clients:users_policy
     ```
 
-    The doctor checks stacking order, unbounded retries, retried non-idempotent calls, missing timeouts and budgets, and unbounded agent runs (codes PW001 to PW017). Exit status is non-zero on errors, so it also works in CI.
+    The doctor checks stacking order, unbounded retries, retried non-idempotent calls, missing timeouts and budgets, and unbounded agent runs (codes PW001 to PW019). Exit status is non-zero on errors, so it also works in CI.
 
 5. **Migrate old code.** `python -m python_wrap migrate src/` previews the rewrite of tenacity/backoff decorators and hand-rolled LLM retry loops; the agent applies `--write` only after you review the diff.
 

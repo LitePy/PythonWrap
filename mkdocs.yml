@@ -205,6 +205,7 @@ nav:
       - Web helpers: features/web-helpers.md
   - AI & agents:
       - LLM calls: features/ai/llm-calls.md
+      - OpenAI and Anthropic SDK clients: features/ai/openai-anthropic.md
       - Testing agents: features/ai/testing-agents.md
       - AI observability and audit: features/ai/observability.md
       - Agent tool safety: features/ai/agent-safety.md
@@ -284,6 +285,7 @@ nav:
       - Switches: api/switches.md
       - AI & agents:
           - Agents: api/agents.md
+          - SDK adapters: api/adapters.md
       - Framework adapters:
           - Flask: api/flask.md
           - FastAPI and ASGI: api/fastapi.md
