@@ -359,6 +359,9 @@ def _check(
     from python_wrap.llm import doctor_findings as _llm_findings
 
     found += _llm_findings(layers)
+    from python_wrap.mcp_guard import doctor_findings as _tool_call_findings
+
+    found += _tool_call_findings(layers)
     found.sort(key=lambda item: (item.severity != "error", item.code))
     return tuple(found)
 

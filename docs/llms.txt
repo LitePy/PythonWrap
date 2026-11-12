@@ -93,6 +93,7 @@ Install with `pip install python-wrap` (Python 3.10+, no runtime dependencies). 
 - [Shared limits and cassettes](https://pythonwrap.readthedocs.io/features/ai/shared-limits-and-cassettes/): Three problems show up once an LLM-backed service runs in more than one process or gets a real test suite:
 - [AI observability and audit](https://pythonwrap.readthedocs.io/features/ai/observability/): Trace LLM and tool calls, keep secrets out of logs, and record an audit tape you can replay in tests.
 - [Agent tool safety](https://pythonwrap.readthedocs.io/features/ai/agent-safety/): When a model drives a tool-calling loop, four things go wrong in practice:
+- [Agent frameworks and MCP](https://pythonwrap.readthedocs.io/features/ai/agent-frameworks/): Agent frameworks run the model loop for you; python-wrap adds what they leave to you:
 - [Agent-friendly tooling](https://pythonwrap.readthedocs.io/features/ai/agent-friendly/): python-wrap ships tools that help AI coding agents (and people) pick the right API and use it correctly: an `llms.txt` index, a machine-readable API index, plain-language recipe...
 
 ## Testing

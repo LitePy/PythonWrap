@@ -115,6 +115,8 @@ The doctor reports codes PW001 to PW017 (the table lists them by group, not stri
 | PW013 | warning | An LLM call is retried but has no spend `Budget`. See [LLM calls](../ai/llm-calls.md#doctor-checks). |
 | PW014 | warning | A stack with LLM layers has no timeout, or a `stream_timeout` has no `chunk_gap`. |
 | PW015 | warning | A generic `retry` without `retry_if=` wraps an LLM call: refusals and bad requests are retried. |
+| PW020 | warning | An `mcp_guard` (or a pydantic-ai / OpenAI Agents SDK tool wrapped by the python-wrap adapters) has no timeout: a hung server or tool holds the agent turn forever. See [Agent frameworks and MCP](../ai/agent-frameworks.md#doctor-checks). |
+| PW021 | warning | An `mcp_guard` retries every tool (`retry=` without `retry_tools=`): a retried MCP write may run twice. |
 
 Breakers, bulkheads and limiters keep their state in the process by default. Under a
 process pool (gunicorn or uvicorn workers, Celery prefork, `ProcessPoolExecutor`) that

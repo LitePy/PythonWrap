@@ -45,6 +45,10 @@ classifiers = [
 # Zero runtime dependencies is a feature: this package should be safe to add to any project.
 dependencies = []
 
+[project.optional-dependencies]
+pydantic-ai = ["pydantic-ai-slim>=2.0"]
+openai-agents = ["openai-agents>=0.24"]
+
 [project.urls]
 Homepage = "https://github.com/LitePy/PythonWrap"
 Documentation = "https://pythonwrap.readthedocs.io"
@@ -95,7 +99,10 @@ exclude = ["**/__pycache__", "**/*.py[cod]", "**/.DS_Store"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--strict-markers -q"
-markers = ["e2e: release-grade happy-path scenarios that use only the public API"]
+markers = [
+    "e2e: release-grade happy-path scenarios that use only the public API",
+    "sdk: contract tests against real agent SDKs (skipped when they are not installed)",
+]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 filterwarnings = ["error::pytest.PytestUnraisableExceptionWarning"]

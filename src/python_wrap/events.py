@@ -162,6 +162,20 @@ EVENT_NAMES: Mapping[str, str] = MappingProxyType(
             "A write tool was skipped in a dry run. function is the tool name. "
             "Fields: run_id (str or None)."
         ),
+        "tool.effect_unknown": (
+            "An EffectLedger found a side effect whose outcome is unknown (a crash, a "
+            "store failure, a timeout or cancellation, or a lost result). function is the "
+            "tool name. Fields: run_id (str or None), reason (str): 'crashed', "
+            "'uncertain' or 'result_lost'."
+        ),
+        "tool.effect_resolved": (
+            "An EffectLedger's on_unknown hook resolved an unknown effect with a result. "
+            "function is the tool name. Fields: run_id (str or None)."
+        ),
+        "mcp.cancelled": (
+            "An in-flight MCP tool call was cancelled because the current CancelToken "
+            "fired. function is 'mcp:<server>'. No extra fields."
+        ),
     }
 )
 
