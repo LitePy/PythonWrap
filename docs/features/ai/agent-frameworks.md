@@ -312,7 +312,7 @@ assert "PW020" in codes and "PW021" in codes
   your business key along) or the decision hook to check it.
 - Counters (`max_tool_calls`, `max_repeats`) and the usage bridge belong to the
   capability / guard object: use one per concurrent run, or a `RunGuard` per run.
-- The adapters are tested against pydantic-ai 1.x and openai-agents 0.x through their
+- The adapters are tested against pydantic-ai 2.x (2.67) and openai-agents 0.24 through their
   public toolset, tool and hook interfaces; a framework change to those interfaces may
   need an adapter update.
 

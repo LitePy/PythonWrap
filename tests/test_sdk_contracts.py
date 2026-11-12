@@ -24,6 +24,9 @@ from python_wrap import (
 
 pytestmark = pytest.mark.sdk
 
+if importlib.util.find_spec("pydantic_ai") is not None:
+    from pydantic_ai import RunContext  # resolvable in tool annotations
+
 HAS_PYDANTIC_AI = importlib.util.find_spec("pydantic_ai") is not None
 HAS_AGENTS = importlib.util.find_spec("agents") is not None
 
@@ -75,13 +78,14 @@ def test_pydantic_ai_toolset_ledger_audit_and_usage() -> None:
     assert [r.name for r in tools] == ["add_note", "add_note"]
     call_ids = {r.input["call_id"] for r in tools}
     assert len(call_ids) == 2 and None not in call_ids
-    usage = result.usage()
+    usage = result.usage
+    usage = usage() if callable(usage) and not hasattr(usage, "input_tokens") else usage
     assert spend.spent().tokens == usage.input_tokens + usage.output_tokens > 0
 
 
 @needs_pydantic_ai
 def test_pydantic_ai_model_retry_is_not_retried_by_python_wrap() -> None:
-    from pydantic_ai import Agent, ModelRetry, RunContext
+    from pydantic_ai import Agent, ModelRetry
 
     from python_wrap.adapters.pydantic_ai import PythonWrapCapability
 
@@ -243,12 +247,20 @@ async def test_openai_agents_loop_detection_ends_the_run() -> None:
     turns = [[_call("search", {"query": "x"}, f"call_{i}")] for i in range(5)]
     agent = Agent(name="looper", model=_agents_model(turns), tools=[search])
     with pytest.raises(LoopDetected):
+        await guard.run(agent, "go")
+    # Runner.run itself wraps it in the SDK's UserError; fatal_cause finds it.
+    from python_wrap.adapters.openai_agents import fatal_cause
+
+    agent = Agent(name="looper", model=_agents_model(turns), tools=[search])
+    guard.reset()
+    with pytest.raises(Exception) as info:
         await Runner.run(agent, "go", hooks=guard.hooks())
+    assert isinstance(fatal_cause(info.value, guard.fatal), LoopDetected)
 
 
 @needs_agents
 async def test_openai_agents_sub_agent_tool_shares_max_tool_calls() -> None:
-    from agents import Agent, Runner
+    from agents import Agent
 
     from python_wrap.adapters.openai_agents import AgentsGuard
 
@@ -268,7 +280,7 @@ async def test_openai_agents_sub_agent_tool_shares_max_tool_calls() -> None:
         tools=[research],
     )
     with pytest.raises(StepLimitExceeded):
-        await Runner.run(top, "go", hooks=guard.hooks())
+        await guard.run(top, "go")
     assert guard.counter.calls == 3  # research + 2 nested lookups, across both runs
 
 

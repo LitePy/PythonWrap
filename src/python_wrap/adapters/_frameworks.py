@@ -69,7 +69,12 @@ def usage_totals(source: Any) -> tuple[int, int] | None:
     usage = source
     found = _field(source, "usage")
     if found is not None:
-        usage = found() if callable(found) else found
+        has_fields = any(
+            _field(found, name) is not None
+            for name in ("input_tokens", "request_tokens", "prompt_tokens")
+        )
+        # pydantic-ai 2 made ``usage`` a property that still accepts a (deprecated) call.
+        usage = found() if callable(found) and not has_fields else found
     names = (
         ("input_tokens", "output_tokens"),
         ("request_tokens", "response_tokens"),

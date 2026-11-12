@@ -23,8 +23,10 @@ shared by every tool that passes through it, at any depth: wrap the sub-agent to
 
 Errors that should end the run (`LoopDetected`, `StepLimitExceeded`, a spent budget, an
 `EffectUnknown`...) are re-raised even though the SDK turns tool exceptions into a
-message for the model; a refused tool (`ToolNotAllowed`) or a tool timeout is reported
-to the model as a tool error.
+message for the model, also through sub-agent runs that would swallow them; a refused
+tool (`ToolNotAllowed`) or a tool timeout is reported to the model as a tool error. The
+SDK wraps a re-raised error in its ``UserError``; `AgentsGuard.run` / `run_sync` unwrap it
+(`fatal_cause` does it for your own ``Runner.run`` calls).
 """
 
 from __future__ import annotations
@@ -59,7 +61,7 @@ from python_wrap.agents import (
     with_call_id,
 )
 
-__all__ = ["AgentsGuard"]
+__all__ = ["AgentsGuard", "fatal_cause"]
 
 F = TypeVar("F", bound=Callable[..., Any])
 FRAMEWORK = "openai-agents"
@@ -69,10 +71,37 @@ _GUARDED_ATTR = "__python_wrap_guarded__"
 class _Box:
     """Collects run-ending errors raised inside the SDK's own error handling."""
 
-    __slots__ = ("error",)
+    __slots__ = ("error", "parent")
 
-    def __init__(self) -> None:
+    def __init__(self, parent: _Box | None = None) -> None:
         self.error: BaseException | None = None
+        self.parent = parent
+
+    def mark(self, error: BaseException) -> None:
+        """Record ``error`` here and in every enclosing guarded tool (sub-agent runs)."""
+        box: _Box | None = self
+        while box is not None:
+            if box.error is None:
+                box.error = error
+            box = box.parent
+
+
+def _mark_fatal(error: BaseException) -> None:
+    box = _BOX.get()
+    if box is not None:
+        box.mark(error)
+
+
+def fatal_cause(error: BaseException, fatal: tuple[type[BaseException], ...]) -> BaseException:
+    """The run-ending python-wrap error inside an SDK wrapper exception, else ``error``."""
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        if isinstance(current, fatal):
+            return current
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return error
 
 
 _BOX: contextvars.ContextVar[_Box | None] = contextvars.ContextVar(
@@ -157,7 +186,7 @@ class AgentsGuard:
                 except fatal as exc:
                     box = box_of()
                     if box is not None:
-                        box.error = exc
+                        box.mark(exc)
                     raise
 
             return async_inner
@@ -169,7 +198,7 @@ class AgentsGuard:
             except fatal as exc:
                 box = box_of()
                 if box is not None:
-                    box.error = exc
+                    box.mark(exc)
                 raise
 
         return inner
@@ -228,6 +257,13 @@ class AgentsGuard:
             limited = compose(call_original, timeout=self.timeout, retry=None)
 
         async def on_invoke_tool(ctx: Any, payload: Any) -> Any:
+            try:
+                return await invoke(ctx, payload)
+            except guard.fatal as exc:
+                _mark_fatal(exc)  # a sub-agent run may swallow it: tell the enclosing tools
+                raise
+
+        async def invoke(ctx: Any, payload: Any) -> Any:
             call_id = getattr(ctx, "tool_call_id", None) or None
             guard.counter.admit(name, payload)
             guard.bridge.check(name)
@@ -236,7 +272,7 @@ class AgentsGuard:
                 if run is not None:
                     run.step("tool", name, {"json": payload})
             started = _core.monotonic()
-            box = _Box()
+            box = _Box(_BOX.get())
             reset = _BOX.set(box)
             try:
                 with with_call_id(call_id):
@@ -358,14 +394,26 @@ class AgentsGuard:
         self.reset()
         sdk = importlib.import_module("agents")
         options.setdefault("hooks", self.hooks())
-        return await sdk.Runner.run(agent, prompt, **options)
+        try:
+            return await sdk.Runner.run(agent, prompt, **options)
+        except Exception as exc:
+            found = fatal_cause(exc, self.fatal)
+            if found is exc:
+                raise
+            raise found from exc
 
     def run_sync(self, agent: Any, prompt: Any, /, **options: Any) -> Any:
         """``Runner.run_sync(agent, prompt, hooks=self.hooks(), **options)`` (SDK needed)."""
         self.reset()
         sdk = importlib.import_module("agents")
         options.setdefault("hooks", self.hooks())
-        return sdk.Runner.run_sync(agent, prompt, **options)
+        try:
+            return sdk.Runner.run_sync(agent, prompt, **options)
+        except Exception as exc:
+            found = fatal_cause(exc, self.fatal)
+            if found is exc:
+                raise
+            raise found from exc
 
 
 class _RunHooksMixin:

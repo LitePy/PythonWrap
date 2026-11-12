@@ -46,8 +46,8 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
-pydantic-ai = ["pydantic-ai-slim>=1.0"]
-openai-agents = ["openai-agents>=0.3"]
+pydantic-ai = ["pydantic-ai-slim>=2.0"]
+openai-agents = ["openai-agents>=0.24"]
 
 [project.urls]
 Homepage = "https://github.com/LitePy/PythonWrap"
