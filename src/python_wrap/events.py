@@ -127,6 +127,24 @@ EVENT_NAMES: Mapping[str, str] = MappingProxyType(
             "bucket (or raised, with fail_open=False). function is the window name. "
             "Fields: error (str, the exception class), op (str)."
         ),
+        "llm.stream_resumed": (
+            "A resume_safe stream failed before any output and is reopened. function is "
+            "the stream name. Fields: attempt (int, the attempt that failed), exception "
+            "(BaseException), delay (float seconds before reopening)."
+        ),
+        "llm.stream_interrupted": (
+            "A resume_safe stream failed after output started; StreamInterrupted is raised "
+            "instead of replaying. Fields: chars (int, partial text length), tool_calls "
+            "(int, completed tool calls), exception (BaseException)."
+        ),
+        "llm.prompt_cache_cold": (
+            "A CacheGuard saw almost no prompt-cache hits across its calls. function is the "
+            "guard name. Fields: calls (int), hit_rate (float), reasons (tuple of str)."
+        ),
+        "llm.prompt_cache_volatile": (
+            "A CacheGuard found a value that changes per request (timestamp, UUID...) in "
+            "the cached prompt prefix. Fields: kinds (tuple of str)."
+        ),
         "chaos.injected": (
             "A python_wrap.chaos rule injected a fault. function is the fault point name. "
             "Fields: kind (str): 'latency', 'exception' or 'result'; point (str); "

@@ -309,6 +309,8 @@ def llm_retry(
     max_time: float | None = None,
     budget: RetryBudget | None = None,
     retry_if: Callable[[BaseException], bool] | None = None,
+    owns_retries: bool = False,
+    client: Any = None,
 ) -> _Decorator[..., Any]:
     """A `retry` configured for LLM APIs.
 
@@ -329,6 +331,14 @@ def llm_retry(
         budget: A shared `RetryBudget`; a new one (ratio 0.2, 5/s) otherwise.
         retry_if: Extra predicate; an error is retried only if it is transient **and**
             this returns True.
+        owns_retries: Make this the only retry loop for the call. Any ``llm_retry``
+            running inside it (in a helper, or in a guarded SDK client from
+            `python_wrap.adapters`) makes a single attempt, and when this decorator
+            itself runs inside another ``llm_retry`` it makes a single attempt, so
+            attempts never multiply across layers (4 x 3 = 12). Turn the SDK's own
+            retries off as well (`python_wrap.adapters.no_sdk_retries`).
+        client: The SDK client the function calls. Only its ``max_retries`` setting is
+            read, so ``doctor`` can warn (PW018) while the SDK still retries underneath.
 
     Returns:
         A decorator for sync or async functions.
@@ -372,15 +382,72 @@ def llm_retry(
         delay_from=llm_retry_after,
         budget=budget if budget is not None else RetryBudget(ratio=0.2, min_per_second=5),
     )
-    settings = {**getattr(inner, _LAYER_ATTR)[1], "llm": "retry"}
+    settings = {**getattr(inner, _LAYER_ATTR)[1], "llm": "retry", "owns_retries": owns_retries}
+    sdk_retries = _sdk_retries(client) if client is not None else None
+    if sdk_retries is not None:
+        settings["sdk_retries"] = sdk_retries
+    mark = "owner" if owns_retries else "loop"
+
+    def single(state: str | None) -> bool:
+        # Inside an owner every llm_retry makes one attempt; so does an owner inside a loop.
+        return state == "owner" or (owns_retries and state is not None)
 
     def decorate(func: Callable[P, R]) -> Callable[P, R]:
-        wrapped = inner(func)
-        setattr(wrapped, _LAYER_ATTR, ("retry", settings))
-        return wrapped
+        looped: Callable[..., Any] = inner(func)
+        wrapper: Any
+        if _core.is_async(func):
+            afunc = cast("Callable[..., Awaitable[Any]]", func)
+
+            @functools.wraps(func)
+            async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+                state = _RETRY_SCOPE.get()
+                if single(state):
+                    return await afunc(*args, **kwargs)
+                token = _RETRY_SCOPE.set(state if state == "owner" else mark)
+                try:
+                    return await looped(*args, **kwargs)
+                finally:
+                    _RETRY_SCOPE.reset(token)
+
+            wrapper = async_wrapper
+        else:
+
+            @functools.wraps(func)
+            def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
+                state = _RETRY_SCOPE.get()
+                if single(state):
+                    return func(*args, **kwargs)
+                token = _RETRY_SCOPE.set(state if state == "owner" else mark)
+                try:
+                    return looped(*args, **kwargs)
+                finally:
+                    _RETRY_SCOPE.reset(token)
+
+            wrapper = sync_wrapper
+        stats = getattr(looped, "__retry_stats__", None)
+        if stats is not None:
+            wrapper.__retry_stats__ = stats
+        setattr(wrapper, _LAYER_ATTR, ("retry", settings))
+        return cast("Callable[P, R]", wrapper)
 
     setattr(decorate, _LAYER_ATTR, ("retry", settings))
     return decorate
+
+
+#: None outside any `llm_retry`, ``"loop"`` inside one, ``"owner"`` inside an
+#: ``owns_retries=True`` one (where nested retries make a single attempt).
+_RETRY_SCOPE: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "python_wrap_llm_retry_scope", default=None
+)
+
+
+def _sdk_retries(client: Any) -> int | None:
+    """The ``max_retries`` an SDK client (or a guard around one) is set to, or None."""
+    for source in (client, getattr(client, "_client", None)):
+        value = _int(getattr(source, "max_retries", None))
+        if value is not None:
+            return max(value, 0)
+    return None
 
 
 # --------------------------------------------------- breakers counting transients only
@@ -1198,7 +1265,7 @@ class TokenRateLimiter:
             if self._blocked > _core.monotonic():
                 return self._blocked - _core.monotonic()
             need = min(float(tokens), self._capacity)
-            if self._level + 1e-9 >= need:  # waiting exactly retry_after admits
+            if self._level + 1e-6 >= need:  # waiting exactly retry_after admits (float slack)
                 self._level -= tokens
                 return 0.0
             return (need - self._level) / self._rate

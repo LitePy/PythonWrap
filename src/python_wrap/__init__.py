@@ -10,6 +10,15 @@ Testing helpers live in ``python_wrap.testing`` and the event catalogue in
 import logging
 from contextlib import AbstractContextManager
 
+from .adapters._sdk import (
+    CacheGuard,
+    ResumableStream,
+    StreamInterrupted,
+    no_sdk_retries,
+    resume_safe,
+)
+from .adapters.anthropic import guard_anthropic
+from .adapters.openai import guard_openai
 from .adaptive import (
     AdaptiveLimiter,
     LoadShed,
@@ -657,6 +666,17 @@ __all__ += [
     "record_step",
     "tool",
     "tool_spec",
+]
+
+# OpenAI / Anthropic SDK adapters (python_wrap.adapters); no SDK is imported.
+__all__ += [
+    "CacheGuard",
+    "ResumableStream",
+    "StreamInterrupted",
+    "guard_anthropic",
+    "guard_openai",
+    "no_sdk_retries",
+    "resume_safe",
 ]
 
 

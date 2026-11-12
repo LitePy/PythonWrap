@@ -152,7 +152,7 @@ class Server:
                 ),
                 _Tool(
                     "doctor",
-                    "Lint a python-wrap Policy or decorated function (codes PW001-PW017). "
+                    "Lint a python-wrap Policy or decorated function (codes PW001-PW019). "
                     "Set idempotent=false for payments, emails and other side effects; "
                     "multiprocess=true when it runs in several worker processes.",
                     {

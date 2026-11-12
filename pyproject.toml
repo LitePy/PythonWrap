@@ -46,6 +46,10 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
+# Not needed by python-wrap itself (the adapters read the SDKs by shape); these pin
+# SDK versions the adapters' contract tests run against.
+openai = ["openai>=1.40"]
+anthropic = ["anthropic>=0.40"]
 pydantic-ai = ["pydantic-ai-slim>=2.0"]
 openai-agents = ["openai-agents>=0.24"]
 
@@ -101,7 +105,7 @@ testpaths = ["tests"]
 addopts = "--strict-markers -q"
 markers = [
     "e2e: release-grade happy-path scenarios that use only the public API",
-    "sdk: contract tests against real agent SDKs (skipped when they are not installed)",
+    "sdk: contract tests against the real SDKs (openai, anthropic, pydantic-ai, openai-agents); skipped when absent",
 ]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
