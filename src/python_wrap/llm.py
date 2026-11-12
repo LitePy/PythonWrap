@@ -1256,7 +1256,7 @@ class TokenRateLimiter:
         with self._lock:
             self._refill()
             need = min(float(tokens), self._capacity)
-            if self._level + 1e-9 >= need:  # waiting exactly retry_after admits
+            if self._level + 1e-6 >= need:  # waiting exactly retry_after admits (float slack)
                 self._level -= tokens
                 return 0.0
             return (need - self._level) / self._rate

@@ -20,6 +20,28 @@ cancellation, per-instance state for `throttle`/`debounce`/`rate_limit`, single-
 
 ### Added
 
+- `python_wrap.adapters`: `guard_openai` / `guard_anthropic` wrap the OpenAI and Anthropic
+  Python SDK clients (sync and async) in a proxy with the same call surface
+  (`chat.completions.create`, `responses.create`, `messages.create`, `messages.stream`,
+  `beta.messages.tool_runner`). Each call runs through one retry loop, a `Budget`, a
+  `TokenRateLimiter` lowered to `x-ratelimit-remaining-tokens` /
+  `anthropic-ratelimit-tokens-remaining` (read via `with_raw_response`; a 429's `retry-after`
+  drains it) and optional `traced_llm`. No SDK is imported; optional `openai` / `anthropic`
+  extras pin tested versions.
+- Retry coordination: `no_sdk_retries(client)` (`with_options(max_retries=0)`),
+  `sdk_max_retries`, and `llm_retry(owns_retries=True, client=...)`: nested `llm_retry`
+  layers make a single attempt, so attempts never multiply (4 x 3 = 12).
+- `resume_safe` / `ResumableStream`: a stream that fails before any output is reopened
+  invisibly; after text or a tool-call delta it raises `StreamInterrupted` with the partial
+  text, completed and pending tool calls (never replayed). Understands OpenAI chat chunks,
+  Responses events and Anthropic message events; stall limits via `stream_timeout`.
+  `stream_transient` classifies in-stream errors.
+- `CacheGuard`: records prompt-cache reads/writes from usage, warns once
+  (`PromptCacheWarning`, `llm.prompt_cache_cold`) when the hit rate stays near zero, and flags
+  volatile prompt prefixes (timestamps, UUIDs, random ids; `llm.prompt_cache_volatile`).
+- Doctor checks PW018 (SDK retries still on under a python-wrap retry) and PW019 (a retry
+  around a streamed call without `resume_safe`). Contract tests marked `sdk` run against the
+  real SDKs over a mock HTTP transport and skip when they are absent.
 - `agent_run(budget=...)` / `RunGuard` accept a real `python_wrap.llm.Budget`: entering the run
   opens the budget's per-run scope, so decorated LLM calls draw on it, and the next step raises
   `RunBudgetExceeded` once it is spent (direct calls still raise `BudgetExceeded`).
@@ -292,6 +314,8 @@ plus a manual review); each has a regression test in `tests/test_security_fixes.
 
 ### Fixed
 
+- `TokenRateLimiter`: a drained bucket could spin forever on sub-nanosecond waits when the
+  clock reading was large (float precision); the admission slack is now 1e-6 tokens.
 - `SQLiteBreakerState`: concurrent first connections (threads or processes opening the same
   database at once) could fail with `sqlite3.OperationalError: database is locked` while
   switching to WAL. Setup now retries until `busy_timeout` has elapsed.

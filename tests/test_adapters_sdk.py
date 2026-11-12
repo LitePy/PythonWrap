@@ -726,7 +726,7 @@ def test_guard_limiter_drains_on_429_retry_after(fake_clock: FakeClock) -> None:
     assert caught.value.retry_after >= 29  # the next reservation must wait out the 429
 
 
-def test_guard_without_raw_responses_or_headers_still_works() -> None:
+def test_guard_without_raw_responses_or_headers_still_works(fake_clock: FakeClock) -> None:
     client = FakeClient([completion()])
     del client.resource.with_raw_response
     limiter = token_rate_limit(1_000, estimate=100)
@@ -1228,7 +1228,7 @@ def test_guarded_stream_reopen_respects_retry_if_option(fake_clock: FakeClock) -
 # ======================================================================= runner
 
 
-def test_tool_runner_steps_are_budgeted_and_rate_limited() -> None:
+def test_tool_runner_steps_are_budgeted_and_rate_limited(fake_clock: FakeClock) -> None:
     client = FakeClient()
     client.runner_messages = [message("calling", inp=30, out=5), message("done", inp=40, out=6)]
     spend = Budget(tokens=1_000)
@@ -1252,7 +1252,9 @@ def test_tool_runner_stops_at_the_budget_between_steps() -> None:
     assert runner.steps == 2
 
 
-def test_tool_runner_uses_the_original_client_and_refunds_failures() -> None:
+def test_tool_runner_uses_the_original_client_and_refunds_failures(
+    fake_clock: FakeClock,
+) -> None:
     class Failing:
         def __iter__(self) -> Iterator[Any]:
             raise InternalServerError(500)
@@ -1470,7 +1472,7 @@ async def test_asyncio_streams_in_parallel_do_not_mix_state() -> None:
     assert await asyncio.gather(*(one() for _ in range(10))) == ["On it."] * 10
 
 
-def test_disable_rate_limits_bypasses_the_limiter() -> None:
+def test_disable_rate_limits_bypasses_the_limiter(fake_clock: FakeClock) -> None:
     limiter = token_rate_limit(1, estimate=1_000, block=False)
     client = FakeClient([(completion(), {"x-ratelimit-remaining-tokens": "0"}), Script([])])
     guarded = guard_openai(client, limiter=limiter)
@@ -1488,3 +1490,35 @@ def test_json_tool_arguments_helpers() -> None:
     assert StreamedToolCall("c", "t", "[1]", 0).input == {}
     assert StreamedToolCall("c", "t", '{"a', 0).input == {}
     assert json.loads(StreamedToolCall(None, None, "", 0).arguments or "{}") == {}
+
+
+def test_limiter_wait_survives_float_precision_at_large_clock_values() -> None:
+    """A drained bucket refilled by tiny sleeps used to spin forever at large clock values."""
+    from python_wrap.testing import fake_clock as install
+
+    with install(FakeClock(start=33_499.0)) as clock:
+        limiter = token_rate_limit(100_000)
+        limiter.acquire(4)
+        limiter.settle(4, 0)
+        seed_limiter(limiter, retry_after=2)
+        clock.sleep(2.0)
+        limiter.acquire(4)  # used to sleep 1e-12 s forever
+
+
+def test_guarded_clients_example_runs() -> None:
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    script = root / "examples" / "sdk_adapters" / "guarded_clients.py"
+    result = subprocess.run(
+        [sys.executable, str(script)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={"PYTHONPATH": str(root / "src")},
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip().endswith("ok")

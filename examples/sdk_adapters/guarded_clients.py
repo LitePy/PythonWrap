@@ -40,7 +40,7 @@ class RateLimitError(Exception):
 
     def __init__(self) -> None:
         super().__init__("Rate limit reached")
-        self.response = SimpleNamespace(status_code=429, headers={"retry-after": "2"})
+        self.response = SimpleNamespace(status_code=429, headers={})
 
 
 class Raw:
@@ -169,7 +169,9 @@ def retries_and_headers() -> dict[str, Any]:
     sdk = FakeSDK([RateLimitError(), chat_completion("Order A-17 has shipped.", 120, 30)])
     spend = Budget(tokens=50_000, name="openai-daily")
     limiter = token_rate_limit(100_000, name="openai-tpm")
-    client = guard_openai(sdk, budget=spend, limiter=limiter, attempts=3)
+    client = guard_openai(
+        sdk, budget=spend, limiter=limiter, attempts=3, retry={"delay": 1.0, "jitter": 0}
+    )
     with fake_clock() as clock:
         reply = client.chat.completions.create(
             model="model-a", messages=[{"role": "user", "content": "Where is A-17?"}]
@@ -248,12 +250,12 @@ def prompt_cache() -> dict[str, Any]:
 def main() -> None:
     first = retries_and_headers()
     print(f"1. answer={first['answer']!r} after {first['http_requests']} HTTP requests")
-    print(f"   waited {first['waited']} s (Retry-After), spent {first['spent']} tokens")
+    print(f"   waited {first['waited']} s (backoff), spent {first['spent']} tokens")
     original, copy = first["sdk_retries"]
     print(f"   SDK max_retries: original client={original}, guarded copy={copy}")
     print(f"   limiter lowered to the provider's remaining tokens: {first['limiter']:.0f}")
     assert first["http_requests"] == 2  # not 2 x 3: only python-wrap retried
-    assert first["waited"] == [2.0]
+    assert first["waited"] == [1.0]
     assert first["spent"] == 150
     assert first["sdk_retries"] == (2, 0)
     assert first["limiter"] == 20_000
