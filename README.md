@@ -93,6 +93,19 @@ circuit breaker, timeout, policies, presets) is now frozen ahead of 1.0.
 | Test agents in milliseconds | `fake_llm`, `chaos.llm` faults, `fake_clock` |
 | Let coding agents use python-wrap correctly | `llms.txt`, `python -m python_wrap api / recipe / guide / mcp` |
 
+### Works with the SDKs you already use
+
+| SDK | What python-wrap adds |
+| --- | --- |
+| OpenAI and Anthropic Python SDKs | `guard_openai`, `guard_anthropic`: coordinated retries (`no_sdk_retries`), budgets, header-seeded rate limits, `resume_safe` streams, `CacheGuard` |
+| OpenAI Agents SDK | `AgentsGuard`: tool timeouts, idempotency, approval, loop detection that also covers sub-agents |
+| pydantic-ai | `PythonWrapCapability`, `guard_tool`: idempotent tools, a usage bridge into `Budget`, audit hooks |
+| Any agent or MCP host | `EffectLedger` (no double-fired side effects after a crash), `mcp_guard`, `validated()` repair cap, `Cassette` record/replay, `SharedTokenWindow` across workers |
+
+Adapters read the SDKs by shape and are optional; install extras such as
+`pip install --pre "python-wrap[openai]"` only to run the contract tests. Runnable projects
+live in `examples/projects/` and `examples/sdk_adapters/`.
+
 No provider SDK is imported: responses and errors are read by duck typing, so it works with
 any client. See [AI and agents](https://pythonwrap.readthedocs.io/en/latest/features/ai/llm-calls/)
 and the `examples/` folder.
