@@ -426,7 +426,7 @@ def test_annotated_newtype() -> None:
     assert "list containing str" in fails(f, 1, 1, ["x"])
 
 
-def test_protocols_and_typeddict_accepted() -> None:
+def test_protocols_accepted_and_typeddict_checked() -> None:
     @runtime_checkable
     class Closer(Protocol):
         def close(self) -> None: ...
@@ -445,8 +445,9 @@ def test_protocols_and_typeddict_accepted() -> None:
         return None
 
     f(Res(), object(), {"a": 1})
-    f(Res(), 1, {"wrong": "shape"})  # unsupported constructs are accepted
+    f(Res(), 1, {"a": 1, "extra": "ok"})  # non-runtime protocols accepted; extra keys too
     assert "expected Closer, got int" in fails(f, 1, 1, {})
+    assert "expected TD, got dict missing key 'a'" in fails(f, Res(), 1, {"wrong": "shape"})
 
 
 def test_user_generic_origin_isinstance_only() -> None:

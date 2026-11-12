@@ -1,0 +1,29 @@
+import time
+
+
+def with_logging(client, prompt):
+    for attempt in range(3):
+        try:
+            return client.responses.create(model="m-1", input=prompt)
+        except Exception as exc:
+            print("retrying", exc)
+            time.sleep(1)
+    raise RuntimeError("gave up")
+
+
+def with_while(client, prompt):
+    tries = 0
+    while True:
+        try:
+            return client.models.generate_content(model="m-1", contents=prompt)
+        except Exception:
+            tries += 1
+            time.sleep(tries)
+
+
+def unrelated(client):
+    for attempt in range(3):
+        try:
+            return client.fetch()
+        except Exception:
+            time.sleep(1)

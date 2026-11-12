@@ -12,7 +12,16 @@ python-wrap tries to do the obvious thing, and where it cannot, to say so. These
 | Unix, main thread | `SIGALRM` timer | Yes (the call is interrupted) |
 | Windows, non-main thread, or `use_signals=False` | Daemon worker thread; the caller stops waiting | **No** |
 
-With the thread fallback the caller gets `TimeoutExpired` at the deadline, but the function keeps running in the background until it returns on its own, and its result is discarded. Side effects (writes, requests) still happen. If you need real cancellation, make the function cooperative (check a flag, use the library's own timeout parameter such as `requests.get(timeout=...)`), or use `async def`.
+With the thread fallback the caller gets `TimeoutExpired` at the deadline, but the function keeps running in the background until it returns on its own, and its result is discarded. Side effects (writes, requests) still happen. If you need real cancellation, make the function cooperative (call `checkpoint()` or poll `cancel_requested()`, see [Cooperative cancellation](../features/resilience/timeout.md#cooperative-cancellation); or check a flag, use the library's own timeout parameter such as `requests.get(timeout=...)`), or use `async def`.
+
+**Windows.** There is no `SIGALRM` on Windows, so *every* synchronous `timeout`, including one on the main thread, uses the thread fallback. Treat the table above as the whole story there: the deadline releases the caller, never the work. The same applies on Unix to any call from a non-main thread, which is the path covered by the test suite (the caller is released at the deadline, the worker keeps running to completion and still sees the caller's `contextvars`). The Windows path itself has not been exercised by our test runs.
+
+What that means in practice:
+
+- The function runs on a pooled `timeout-worker-N` thread, not on the caller's thread. Code that relies on thread-local state, thread-affine handles (some GUI, COM or database connections) or `threading.current_thread()` behaves differently.
+- An abandoned worker keeps its locks, connections and memory until the call returns. Repeated timeouts of a call that never returns accumulate stuck daemon threads; there is no cap on them.
+- Abandoned workers are daemon threads, so they are killed abruptly at interpreter exit, possibly mid-write.
+- `with timeout(...)` blocks are not available (they raise `RuntimeError`), because a block cannot be moved to another thread.
 
 Related details:
 
@@ -22,7 +31,7 @@ Related details:
 
 ## Shared state on methods
 
-`rate_limit`, `throttle` and `debounce` keep their state on the **decorated function**, not on the instance. When you decorate a method, every instance shares one limiter, one throttle window and one pending debounced call.
+`rate_limit`, `throttle` and `debounce` keep their state on the **decorated function**, not on the instance. When you decorate a method, every instance shares one limiter, one throttle window and one pending debounced call by default. **Addressed with an opt-in:** `per_instance=True` and `key=` split the state (see below and [Per key and per instance](../features/concurrency/throttle-debounce.md#per-key-and-per-instance)). Defaults are unchanged, so existing code keeps the shared behavior until you opt in.
 
 ```python
 from python_wrap import throttle
@@ -42,12 +51,13 @@ assert b.read() == "a"   # skipped: shares the window with `a`, returns its resu
 
 What to do:
 
-- `rate_limit` and `singleflight` accept `key=`; use it to split the state, for example `key=lambda self, *a, **kw: id(self)`.
-- For `throttle` and `debounce`, create the decorated callable per instance in `__init__` (`self.read = throttle(60)(self._read)`).
+- Pass `per_instance=True` to `rate_limit`, `throttle` or `debounce` to give each instance its own limiter, window or pending call. Instances are held through a weak reference, so they stay collectable (they must be weak-referenceable).
+- `rate_limit`, `throttle`, `debounce` and `singleflight` accept `key=` to split the state by any value, for example `key=lambda self, *a, **kw: self.tenant`.
+- `debounce` with `key=` or `per_instance=`: `.cancel()` and `.flush()` take a call's arguments to pick the slot, for example `Doc.save.flush(doc)`.
 
 ## `memoize` on methods
 
-`self` is part of the cache key, so results are per instance, but the cache holds a **strong reference** to every instance it has seen. Instances are therefore never garbage collected while their entries are cached.
+`self` is part of the cache key, so results are per instance, but a plain `@memoize` method holds a **strong reference** to every instance it has seen, so instances are never garbage collected while their entries are cached. **Addressed with an opt-in:** `per_instance=True` (below); the default is unchanged, and `python -m python_wrap doctor` flags the unbounded plain case as PW011.
 
 Mitigations:
 
@@ -56,12 +66,12 @@ Mitigations:
 - Use `key=` that ignores `self` (for results that do not depend on the instance), so the instance is not stored.
 - Call `cache_clear()` when a long-lived cache has served its purpose.
 
-Also note that for sync functions two threads that miss on the same key at the same moment may both compute the value (the function is never called while holding the lock); the last stored result wins. Put `singleflight` under `memoize` if the computation must not run twice.
+Also note that for sync functions two threads that miss on the same key at the same moment may both compute the value (the function is never called while holding the lock); the last stored result wins. Pass `singleflight=True` to `memoize` if the computation must not run twice ([details](../features/caching/memoize.md#one-computation-per-key-across-threads)).
 
 ## `measure_memory` and `profile`
 
-- **`measure_memory`** uses `tracemalloc`, which is process-global. While a call runs, allocations made by other threads or asyncio tasks are counted too, and the peak counter is reset at the start of every measured call, so **concurrent measured calls share one tracker** and their numbers are not independent. Only memory allocated through Python's allocator is seen (C extensions that bypass it are invisible), and tracing slows the program.
-- **`profile`** on an `async def` function enables the profiler for the whole awaited coroutine, so work the event loop does for **other tasks** while this one is suspended is included in the results. If another profiler is already active, python-wrap logs a warning once and runs the function unprofiled.
+- **`measure_memory`** uses `tracemalloc`, which is process-global. Measured calls are therefore **serialised**: a measured call that starts while another one runs in a different thread or task waits for it (coroutines wait with `await`, without blocking the loop), so two measurements never share the peak counter. Allocations made by *unmeasured* threads or tasks during a call are still counted. Nested measured calls (and tasks or `asyncio.to_thread` workers started inside one) join the outer measurement instead of waiting. `exclusive=False` turns serialisation off. Only memory allocated through Python's allocator is seen (C extensions that bypass it are invisible), and tracing slows the program.
+- **`profile`** on an `async def` function switches the profiler on only while that coroutine runs and off at every `await`, so work the event loop does for other tasks is not included. cProfile allows one active profiler per thread (per process on Python 3.12+): overlapping profiled calls, including concurrent tasks of one profiled coroutine function, run unprofiled with a warning logged once. Work handed to threads or to tasks the function creates is not profiled.
 
 ## `revert_on_failure`
 
@@ -76,7 +86,7 @@ If your function has a `tx` parameter, it is passed as the keyword `tx=`. Put `t
 Decorated functions pickle by reference, so the rules are those of plain functions: the function must be reachable by its module and qualified name. Functions defined inside another function, lambdas, and functions defined in `__main__` of an interactive session cannot be sent to a `"spawn"` worker.
 
 With default backends, each worker has its own cache, rate limiter, circuit breaker,
-bulkhead and counters. A pool-wide limit requires an explicitly shared backend. Forked
+bulkhead and counters. A pool-wide limit requires an explicitly shared backend; `python -m python_wrap doctor --multiprocess` (PW012) lists the layers that lack one. Forked
 workers also need the [documented child-reset lifecycle](migration-0.3.md#forked-workers). `CircuitBreaker`, `RateLimiter`, `Bulkhead`, `RetryBudget`, `Transaction`, `Policy` and `testing.FakeClock` raise `TypeError` when pickled or copied. A `cached_property` value is not pickled with its instance and is computed again after unpickling. See [Process pools and pickling](../get-started/async-and-methods.md#process-pools-and-pickling).
 
 ## Optional distributed coordination
@@ -91,16 +101,19 @@ when that gap matters. [Coordination details](../features/concurrency/leases-and
 `max_waiting` on a shared bulkhead is per process; the backend enforces global active
 capacity. Shared bulkhead `active`/`waiting` statistics are local. External cache counts
 can be unknown (`CacheInfo.currsize is None`), and synchronous Redis cache operations
-can block an async wrapper. An explicit health registry is a structural snapshot, not
+block an async `memoize` wrapper (**addressed with opt-ins**): use `amemoize` with `AsyncRedisStore` or
+`ThreadedStore(RedisStore(...))`, and `AsyncRedisWindow` for async rate limits. An explicit health registry is a structural snapshot, not
 proof that a remote service will accept the next request.
 
-Buffered submissions are in-memory and not durable. Shutdown has a bounded drain,
-failed writes are counted, and pending parent records are discarded in forked children.
-Use a durable broker when accepted work must survive a process crash.
+Buffered submissions are in-memory by default. **Addressed with an opt-in:** a writer with a `journal=`
+(`SQLiteJournal`, `RedisStreamJournal`) gives at-least-once delivery with replay
+after a restart. Shutdown has a bounded drain, failed writes are counted, and pending
+parent records are discarded in forked children (a child never replays a journal on its
+own). A journal is not a broker: one journal serves one live writer.
 
 ## Other things to know
 
 - **`debounce`** (sync) runs the function on a daemon timer thread, so it may be abandoned at interpreter exit with a call still pending. Call `.flush()` before shutting down if the last call matters.
-- **`enforce_types`** accepts, rather than rejects, annotations it cannot check (`TypedDict`, non-runtime-checkable protocols, unresolved forward references). It adds per-call cost proportional to container size. See [Validation](../features/correctness/validation.md#supported-annotations).
+- **`enforce_types`** accepts, rather than rejects, annotations it cannot check (non-runtime-checkable protocols, unresolved forward references, `ClassVar`, `Self`). **Addressed with an opt-in:** `strict=True` raises `UnsupportedAnnotationError` for them. `TypedDict` is now checked by default (a [behaviour change](migration-0.3.md#stricter-enforce_types)). It adds per-call cost proportional to container size. See [Validation](../features/correctness/validation.md#supported-annotations).
 - **`retry`** with `max_attempts=None` retries forever. Pair it with `max_delay` and an `on=` that names only transient errors.
-- **Signal timers are process-wide.** `timeout` restores the previous `SIGALRM` handler and any armed timer afterwards, but other code that installs its own `SIGALRM` handler concurrently can conflict.
+- **Signal timers are process-wide.** `timeout` restores the previous `SIGALRM` handler and any armed timer afterwards, but other code that installs its own `SIGALRM` handler concurrently can conflict. `timeout` emits `SignalTimerConflictWarning` when it finds one and `doctor` reports PW010; see [SIGALRM conflicts](../features/resilience/timeout.md#sigalrm-conflicts).

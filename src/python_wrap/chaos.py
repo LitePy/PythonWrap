@@ -165,6 +165,33 @@ class FaultInjector:
         self._counts: dict[str, int] = {}
         self._rng = rng if rng is not None else random.Random(seed)
         self.enabled = True
+        self._llm: Any = None
+        self._llm_http: Any = None
+
+    @property
+    def llm(self) -> Any:
+        """LLM-specific fault rules (`python_wrap.llm_testing.LLMFaults`) on this injector.
+
+        Example: ``chaos.llm.rate_limit("llm.*", times=2, retry_after=1)``.
+        """
+        if self._llm is None:
+            from python_wrap.llm_testing import LLMFaults
+
+            self._llm = LLMFaults(self)
+        return self._llm
+
+    @property
+    def llm_http(self) -> Any:
+        """HTTP-level LLM faults (`python_wrap.llm_http_chaos.LLMHTTPFaults`) on this injector.
+
+        Example: ``transport = chaos.llm_http.transport(inner)`` then
+        ``chaos.llm_http.rate_limit(times=2)``.
+        """
+        if self._llm_http is None:
+            from python_wrap.llm_http_chaos import LLMHTTPFaults
+
+            self._llm_http = LLMHTTPFaults(self)
+        return self._llm_http
 
     def reseed(self, seed: int | None) -> None:
         """Restart the random source from ``seed`` for reproducible runs."""
@@ -299,13 +326,17 @@ class FaultInjector:
         to call at startup in every environment. Each rule is an object with ``name``
         and any of ``latency`` (seconds or ``[min, max]``), ``exception`` (a builtin
         name such as ``"ConnectionError"`` or ``"module:Class"``), ``result`` (a JSON
-        value), ``rate`` and ``times``. Rules are validated first; a bad one installs
-        none.
+        value), ``rate`` and ``times``. Instead of those, an LLM-shaped rule names a fault
+        kind in ``llm`` (``"rate_limit"``, ``"overloaded"``, ``"server_error"``,
+        ``"timeout"``, ``"malformed_json"``, ``"slow_first_token"``, ``"stalled_stream"``,
+        ``"invalid_tool_call"``, ``"refusal"``) with that kind's options as extra keys.
+        Rules are validated first; a bad one installs none.
 
         Example value::
 
             [{"name": "payments.*", "latency": 0.5, "rate": 0.1},
-             {"name": "inventory", "exception": "ConnectionError"}]
+             {"name": "inventory", "exception": "ConnectionError"},
+             {"name": "llm.*", "llm": "rate_limit", "retry_after": 1, "times": 2}]
 
         Raises:
             ValueError: On invalid JSON, a non-list, unknown keys, an unknown exception
@@ -321,11 +352,27 @@ class FaultInjector:
         if not isinstance(data, list):
             raise ValueError(f"{var} must be a JSON list of rule objects")
         allowed = {"name", "latency", "exception", "rate", "times", "result"}
+        llm_base = {"name", "llm", "rate", "times"}
         parsed: list[dict[str, Any]] = []
         for i, item in enumerate(data):
             where = f"{var} rule #{i}"
             if not isinstance(item, dict):
                 raise ValueError(f"{where} must be an object")
+            if "llm" in item:
+                from python_wrap.llm_testing import build_rule
+
+                if "name" not in item:
+                    raise ValueError(f"{where} is missing 'name'")
+                options = {k: v for k, v in item.items() if k not in llm_base}
+                if not isinstance(item["llm"], str):
+                    raise ValueError(f"{where}: 'llm' must be a fault kind string")
+                try:
+                    built = build_rule(item["llm"], options)
+                except (ValueError, TypeError) as exc:
+                    raise ValueError(f"{where}: {exc}") from exc
+                shared = {k: item[k] for k in ("rate", "times") if k in item}
+                parsed.append({"name": item["name"], **shared, **built})
+                continue
             unknown = set(item) - allowed
             if unknown:
                 raise ValueError(f"{where} has unknown key(s): {', '.join(sorted(unknown))}")

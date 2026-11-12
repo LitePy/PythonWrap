@@ -40,6 +40,7 @@ PRESET_DEFAULTS = {
     "http_client": {"timeout_seconds": 10.0, "attempts": 3, "idempotent": True},
     "db_call": {"timeout_seconds": 5.0, "attempts": 3, "breaker": False},
     "third_party_api": {"timeout_seconds": 15.0, "attempts": 4, "period": 1.0},
+    "llm_client": {"timeout_seconds": 60.0, "attempts": 4, "max_delay": 60.0},
 }
 
 STABLE_EVENTS = [

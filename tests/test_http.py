@@ -542,3 +542,28 @@ async def test_real_httpx_async_transport(fake_clock: FakeClock) -> None:
     async with httpx.AsyncClient(transport=transport) as client:
         assert (await client.get("https://api.example.com/x")).status_code == 200
     assert attempts == 2
+
+
+def test_retry_after_garbage_and_odd_values_are_ignored() -> None:
+    for bad in ("soon", "", "1_0", "nan", "inf", "Mon, 99 Foo 2020 99:99:99 GMT"):
+        assert retry_delay(Response(503, {"Retry-After": bad}), 1, HttpRetryPolicy(delay=2)) == 2.0
+
+
+def test_retry_after_negative_and_past_date_mean_retry_now() -> None:
+    assert retry_delay(Response(503, {"Retry-After": "-5"}), 1) == 0.0
+    past = "Wed, 21 Oct 2015 07:28:00 GMT"
+    assert retry_delay(Response(503, {"Retry-After": past}), 1) == 0.0
+
+
+def test_retry_after_header_is_case_insensitive_and_json_fallback_survives_garbage() -> None:
+    from python_wrap import retry_after_header
+
+    assert retry_delay(Response(429, {"retry-after": "4"}), 1) == 4.0
+
+    class Body:
+        headers: ClassVar[dict[str, str]] = {"Retry-After": "tomorrow-ish"}
+
+        def json(self) -> dict:
+            return {"retry_after": 7}
+
+    assert retry_after_header(Body(), json_key="retry_after") == 7.0

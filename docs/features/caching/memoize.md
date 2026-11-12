@@ -135,6 +135,7 @@ assert calls == ["a", "b", "c", "c"]
 | `exception_ttl` | Seconds a cached exception stays valid (defaults to `ttl`). |
 | `stale_ttl` | Seconds after `ttl` during which a stale value is still served while it is refreshed in the background. See [Serving stale values](#serving-stale-values-while-refreshing). |
 | `store` | A [`CacheStore`](#custom-stores) to keep entries in instead of the built-in dict. |
+| `singleflight` | Sync functions: concurrent misses on one key run the function once; other threads wait for that outcome. Default `False`. |
 | `per_instance` | For methods: one cache per instance, without keeping instances alive. See [Per-instance method caches](#per-instance-method-caches). |
 | `logger` | Logger (or name) for failed background refreshes. |
 
@@ -383,6 +384,35 @@ assert Account.balance.cache_info().currsize == 1   # its entries went with it
 - A cached result that references its own instance (returning `self`, a bound method, a closure over `self`) keeps that instance alive.
 - `per_instance` uses the built-in store and cannot be combined with `store=`.
 
+## One computation per key across threads
+
+For sync functions, two threads that miss on the same key at the same moment may both compute the value. Pass `singleflight=True` and only one runs: the others wait for its outcome (result or exception) and count as hits. A re-entrant call on the computing thread computes directly instead of deadlocking. It is off by default; `async def` functions already share one in-flight task per key and event loop.
+
+```python
+import threading
+import time
+from python_wrap import memoize
+
+calls = []
+
+@memoize(singleflight=True)
+def load(n: int) -> int:
+    calls.append(n)
+    time.sleep(0.05)
+    return n * 2
+
+results = []
+threads = [threading.Thread(target=lambda: results.append(load(7))) for _ in range(5)]
+for t in threads:
+    t.start()
+for t in threads:
+    t.join()
+assert results == [14] * 5
+assert calls == [7]
+```
+
+`cache_parameters()` reports `singleflight` and `key` along with the other options (`maxsize`, `ttl`, `stale_ttl`, `typed`, `cache_exceptions`, `exception_ttl`, `store`, `per_instance`, `copy_result`).
+
 ## Async and methods
 
 **Async.** Concurrent awaits of a missing key share one in-flight task per event loop, so the function runs once.
@@ -452,10 +482,10 @@ Use `python_wrap.testing.disable_caching()` to bypass every cache in tests: noth
 ## Gotchas
 
 !!! warning "Two threads can compute the same key"
-    The cache is guarded by a lock, but the function is never called while holding it. For sync functions, two threads that miss on the same key at the same moment may both compute the value, and the last result stored wins. If that is not acceptable, stack [`singleflight`](singleflight.md) under `memoize`.
+    The cache is guarded by a lock, but the function is never called while holding it. For sync functions, two threads that miss on the same key at the same moment may both compute the value, and the last result stored wins. If that is not acceptable, pass `singleflight=True`: the other threads wait for the first one's result (or exception) and count as hits. `async def` functions already work this way.
 
 !!! warning "Methods keep instances alive"
-    `self` is part of the key and the cache holds a strong reference to every instance it has seen, which keeps them alive. Use [`per_instance=True`](#per-instance-method-caches) on methods of many short-lived objects (or `maxsize`, `ttl`, or a `key=` that ignores `self`). See [Limitations](../../project/limitations.md).
+    `self` is part of the key and the cache holds a strong reference to every instance it has seen, which keeps them alive. Use [`per_instance=True`](#per-instance-method-caches) on methods of many short-lived objects (or `maxsize`, `ttl`, or a `key=` that ignores `self`). `python -m python_wrap doctor` flags the unbounded case as PW011. See [Limitations](../../project/limitations.md).
 
 !!! warning "Unhashable instances"
     A method of a class whose instances are unhashable (for example an `eq=True` dataclass) fails with a `TypeError` naming `self`. `id(self)` is deliberately not used as a fallback because ids are reused after garbage collection. Use [`per_instance=True`](#per-instance-method-caches) (keyed by identity through a weak reference), pass `key=`, or use [`cached_property`](cached-property.md) instead.

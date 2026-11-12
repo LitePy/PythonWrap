@@ -91,6 +91,16 @@ def test_retry_waits_between_attempts(fake_clock):
 
 No real sleep over 0.05 seconds.
 
+Happy-path scenarios that read like a user's story live in `tests/e2e/` (marked `e2e`, public
+API only, deterministic, a few seconds in total); add one when you add a headline feature.
+
+Before a release, prove the built wheel works with no dev dependencies:
+
+```bash
+python scripts/smoke_wheel.py                  # builds, installs into a temp venv, checks
+PW_SMOKE_WHEEL=1 uv run pytest tests/test_smoke_wheel.py   # the same, from pytest
+```
+
 ## Pull requests
 
 Keep them focused, add a line under `Unreleased` in `CHANGELOG.md`, and explain the

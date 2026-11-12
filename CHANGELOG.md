@@ -10,7 +10,96 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
 
 ## [Unreleased]
 
+## [0.4.0b1] - 2026-11-11
+
+First beta. The public API is feature-complete for 0.4: the remaining work before the
+stable release is feedback, bug fixes and documentation. Highlights: cooperative timeout
+cancellation, per-instance state for `throttle`/`debounce`/`rate_limit`, single-flight
+`memoize`, doctor checks PW009-PW012, `AsyncRedisWindow`, durable buffer journals and
+`enforce_types(strict=True)`. Python 3.10 to 3.14 are tested.
+
 ### Added
+
+- `token_rate_limit(..., store=)` accepts a shared window so every worker process draws from
+  one tokens-per-minute bucket: `SQLiteTokenWindow` (one host, WAL, `BEGIN IMMEDIATE`; corrupt
+  files are quarantined and rebuilt), `RedisTokenWindow` / `AsyncRedisTokenWindow` (one Lua
+  script on the Redis clock). Storage errors fail open to a local bucket (event
+  `rate_limit.store_error`) unless `fail_open=False`. `SQLiteBudgetBackend` shares a `Budget`
+  the same way.
+- `observe_headers(headers)` on `TokenRateLimiter` and the windows (plus
+  `parse_rate_limit_headers`) turns provider headers (`x-ratelimit-remaining-tokens`,
+  `x-ratelimit-reset-tokens`, `anthropic-ratelimit-*`, `retry-after`, `retry-after-ms`) into a
+  lower level and a fleet-wide block, so a 429 storm backs off together; error headers on a
+  failed call are fed back automatically.
+- `validated(parse, max_repairs=2, repair="error_only" | "full")` validates structured model
+  output (pydantic `model_validate_json` or any callable), re-asks with only the error text, caps
+  calls at `1 + max_repairs` (plus `max_tokens=` and `budget=`), and raises
+  `ValidationRepairExhausted` with every attempt and its token cost. Sync and async; events
+  `llm.validation_failed` and `llm.repair_exhausted`.
+- `Cassette` records and replays LLM HTTP traffic at the transport level
+  (`RecordingTransport` / `ReplayTransport`, duck-typed against httpx): request-hash matching
+  with `ignore_body_keys` / `ignore_query`, secrets never stored (headers, JSON keys, query
+  parameters, literal `secrets=` and key shapes), chunked streaming bodies, strict replay
+  (`CassetteMiss`) and loud failure on a damaged file (`CassetteError`). Opt-in pytest fixtures
+  `llm_cassette` and `chaos_llm_http` via `pytest_plugins = ["python_wrap.pytest_plugin"]`.
+- `chaos.llm_http` (`LLMHTTPFaults`, `ChaosTransport`) injects 429, 529, 5xx, timeouts, stalls
+  (before or mid-stream) and truncated bodies at the HTTP level, reusing the `LLMFaults` rules.
+- `python_wrap.adapters`: `guard_openai` / `guard_anthropic` wrap the OpenAI and Anthropic
+  Python SDK clients (sync and async) in a proxy with the same call surface
+  (`chat.completions.create`, `responses.create`, `messages.create`, `messages.stream`,
+  `beta.messages.tool_runner`). Each call runs through one retry loop, a `Budget`, a
+  `TokenRateLimiter` lowered to `x-ratelimit-remaining-tokens` /
+  `anthropic-ratelimit-tokens-remaining` (read via `with_raw_response`; a 429's `retry-after`
+  drains it) and optional `traced_llm`. No SDK is imported; optional `openai` / `anthropic`
+  extras pin tested versions.
+- Retry coordination: `no_sdk_retries(client)` (`with_options(max_retries=0)`),
+  `sdk_max_retries`, and `llm_retry(owns_retries=True, client=...)`: nested `llm_retry`
+  layers make a single attempt, so attempts never multiply (4 x 3 = 12).
+- `resume_safe` / `ResumableStream`: a stream that fails before any output is reopened
+  invisibly; after text or a tool-call delta it raises `StreamInterrupted` with the partial
+  text, completed and pending tool calls (never replayed). Understands OpenAI chat chunks,
+  Responses events and Anthropic message events; stall limits via `stream_timeout`.
+  `stream_transient` classifies in-stream errors.
+- `CacheGuard`: records prompt-cache reads/writes from usage, warns once
+  (`PromptCacheWarning`, `llm.prompt_cache_cold`) when the hit rate stays near zero, and flags
+  volatile prompt prefixes (timestamps, UUIDs, random ids; `llm.prompt_cache_volatile`).
+- Doctor checks PW018 (SDK retries still on under a python-wrap retry) and PW019 (a retry
+  around a streamed call without `resume_safe`). Contract tests marked `sdk` run against the
+  real SDKs over a mock HTTP transport and skip when they are absent.
+- `agent_run(budget=...)` / `RunGuard` accept a real `python_wrap.llm.Budget`: entering the run
+  opens the budget's per-run scope, so decorated LLM calls draw on it, and the next step raises
+  `RunBudgetExceeded` once it is spent (direct calls still raise `BudgetExceeded`).
+- `python -m python_wrap migrate` (and the MCP `migrate_preview` tool) detects hand-rolled
+  retry loops around LLM client calls and rewrites the safe `for ... in range(N)` shape to an
+  `@llm_retry` function; every other loop is reported with line numbers and a suggestion.
+  `Change` gains a `kind` field.
+- LLM and agent recipes in the packaged recipe index, cookbook pages (resilient LLM client,
+  agent tool layer, building with AI coding agents) and two runnable examples. The doctor
+  range is documented as PW001 to PW017 and the threat model covers prompt and audit-tape
+  data handling.
+- LLM test doubles: `fake_llm` / `FakeProvider` (scripted replies, sync/async/streaming with
+  `fake_clock`-driven delays, call recording, Anthropic- and OpenAI-style usage, token and call
+  assertions) and `chaos.llm` fault rules (`rate_limit`, `overloaded`, `server_error`, `timeout`,
+  `malformed_json`, `slow_first_token`, `stalled_stream`, `invalid_tool_call`, `refusal`),
+  also loadable from `PW_CHAOS` via an `"llm"` key. Look-alike errors live in
+  `python_wrap.llm_testing`.
+- `python_wrap.genai`: AI observability and compliance. `traced_llm` / `traced_tool` publish
+  `genai.llm_call` / `genai.tool_call` events with run id, step, tool, model, token usage
+  (SDK-free), cost from an optional price table, latency and inner retry attempts;
+  `instrument()` sets defaults and emits OpenTelemetry GenAI-convention spans when
+  OpenTelemetry is installed. `Redactor` scrubs secrets, emails, card numbers and custom
+  patterns and truncates text; content capture is opt-in. `AuditTape` records calls to
+  memory, JSONL or SQLite; `replay()` returns a `ReplayProvider` serving recorded results
+  with `ReplayMismatch` detection. New `observability.enable_genai` and
+  `genai_span_attributes`.
+- Cooperative cancellation for sync `timeout`: `CancelToken`, `cancel_requested()`,
+  `checkpoint()` and `current_token()`. The token is cancelled when the limit is hit, so a
+  function that cannot be stopped preemptively (worker-thread fallback, Windows) can stop
+  itself by polling.
+- `SignalTimerConflictWarning`: `timeout` warns when it takes over a `SIGALRM` that already
+  has a non-default handler or an armed `ITIMER_REAL` timer (both are still restored).
+- Doctor checks PW009 (sync `timeout` that cannot be enforced preemptively: side effects may
+  continue) and PW010 (existing `SIGALRM` handler or timer that `timeout` would take over).
 
 - `Policy.explain()`, `python_wrap.doctor.doctor(func)` and `python -m python_wrap doctor`
   describe every layer of a resilience stack and flag risky combinations: unbounded
@@ -89,6 +178,130 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
 - `ratelimit_headers`, `too_many_requests` and `problem_response` build IETF `RateLimit-*`
   headers and RFC 9457 problem+json responses for rate-limit, open-circuit and bulkhead
   rejections, with optional FastAPI, Flask and Django glue.
+- `throttle(..., key=, per_instance=)` and `debounce(..., key=, per_instance=)`, and
+  `rate_limit(..., per_instance=)`: split the state of decorated methods that every instance
+  used to share. `key=` mirrors `rate_limit`/`singleflight` (a function of the call's
+  arguments, one window or countdown per key; idle keys are dropped); `per_instance=True` keeps
+  one window, pending call or limiter per instance, held through a weak reference so instances
+  stay collectable and need not be hashable. With either option `debounce`'s `.cancel()` and
+  `.flush()` take a call's arguments to pick the slot; `limiter_of(method, instance=obj)`
+  returns an instance's limiter. Defaults are unchanged.
+- `memoize(..., singleflight=True)`: concurrent misses on the same key in different threads
+  run the function once; the other threads wait for that outcome (result or exception) and
+  count as hits. A re-entrant call on the computing thread computes directly. Off by default
+  (the previous behavior, where two threads may both compute, is unchanged); `async def`
+  functions already shared one in-flight task per key and loop. `cache_parameters()` gains
+  `singleflight` and `key`.
+- Doctor code PW011: a `memoize`d method keyed on `self` with no `maxsize`, `ttl` or `store`
+  pins every instance it sees. The fix is the existing `memoize(per_instance=True)`, which
+  keeps instances collectable through weak references. No default changed.
+- Doctor check PW012: `explain(..., multiprocess=True)`, `doctor(..., multiprocess=True)`
+  and `python -m python_wrap doctor --multiprocess` warn about every breaker, bulkhead,
+  rate limiter or adaptive limiter without a shared backend, since each worker process
+  then enforces its own copy of the limit. Doctor layers now report `shared` for
+  bulkheads and rate limiters and recognise `AdaptiveLimiter` layers.
+- Async-friendly Redis backends. `AsyncRedisWindow` is `RedisWindow` for `redis.asyncio`
+  clients (same Lua script and keys): `shared_rate_limit` and `RateLimiter(backend=...)`
+  await it on the event loop instead of spending a worker thread per round trip, and
+  reject it on synchronous functions with `TypeError`. `ThreadedStore(store,
+  executor=None)` turns any synchronous `CacheStore` (such as `RedisStore` with a plain
+  `redis.Redis` client) into an `AsyncCacheStore` for `amemoize`, running each call in a
+  worker thread so it never blocks the loop.
+- Durable buffered writers: `buffered(journal=...)`, `Buffered(journal=...)` and
+  `AsyncBuffered(journal=...)` persist each accepted record before `submit` returns and
+  remove it only after its batch is written, giving at-least-once delivery. Records left
+  over (crash, failed batch, disabled or closed writer) are replayed on the next first
+  `submit` or an explicit `replay()`. Journals: `SQLiteJournal` (stdlib, local file),
+  `RedisStreamJournal` (Redis stream), or any `BufferJournal` implementation. Opt-in;
+  without a journal nothing changes.
+- `enforce_types(strict=True)` raises `UnsupportedAnnotationError` (a `TypeError`, in
+  `python_wrap.validation`) for annotations it cannot check (protocols that are not
+  `runtime_checkable`, unresolvable forward references, `ClassVar`, `Self`...) instead of
+  accepting them silently; vetted at decoration, or on the first call when a forward
+  reference resolves later.
+- `python_wrap.agents`, safe agent tool use: `@tool(read_only=, idempotent_key=,
+  requires_approval=, timeout=, retry=, dry_result=)` deduplicates side-effect tools by an
+  idempotency key from the tool name, canonical arguments and run id, so a retried or
+  replayed call returns the stored result instead of running twice.
+- `RunGuard` / `agent_run(max_steps=, max_seconds=, max_repeats=, budget=)`: a
+  contextvar-based, nesting, sync and async run guard raising `StepLimitExceeded`,
+  `LoopDetected` (identical repeated calls) and `RunTimeout`; `current_run()` exposes the
+  run id, step count and history, `run_id_var` the run id for tracing, and the run's
+  `CancelToken` makes `checkpoint()` stop long tools cooperatively. `record_step()` counts
+  LLM calls.
+- `ToolPolicy` (allow/deny globs, `allow_write=False`, `dry_run=True` returning a declared
+  `dry_result` or a `DryRun` marker) raising `ToolNotAllowed`; sync/async human approvers
+  with a timeout that deny by default (`ApprovalDenied`, `ApprovalTimeout`);
+  `ToolRegistry` dispatches tool calls by name with JSON arguments.
+- Events `agent.run.start`, `agent.run.step`, `agent.run.end`, `tool.call`, `tool.denied`,
+  `tool.replayed`, `tool.dry_run`.
+- Doctor checks PW016 (retried side-effect tool with deduplication turned off) and PW017
+  (agent run or tool registry without step, time or repeat limits).
+- `python_wrap.llm`, wrappers for LLM calls with no provider SDK imported (usage and errors
+  are duck-typed): `llm_transient` and `llm_retry()` retry 408/409/429/529/5xx, overloaded,
+  timeout and connection errors, honouring `Retry-After` and `retry-after-ms`, and never
+  other 4xx or content-policy refusals; `presets.llm_client()` bundles them with a 60 s
+  timeout, a retry budget and a breaker that counts only transient errors.
+- `Budget` / `budget(tokens=, usd=, per=...)`: token and dollar limits per total, per key,
+  per explicit run or per call chain (context variables), priced with
+  `prices={"model": (in_per_mtok, out_per_mtok)}`, optional `period=` windows and a shared
+  `RedisBudgetBackend`; raises `BudgetExceeded`. New event `llm.budget_exceeded`.
+- `token_rate_limit(tokens_per_minute, estimate=...)`: a token bucket that reserves an
+  estimate (`estimate_tokens`) before the call and reconciles it with the real usage.
+- `fallback_models([...])` (or `@fallback_models(backups=[...])`): a model fallback chain
+  with a circuit breaker per entry and an optional last-good cached answer. New event
+  `llm.fallback_served` naming the model that served.
+- `stream_timeout(first_token=, chunk_gap=, total=)` for sync and async streams, raising
+  `StreamTimeout` (a `TimeoutExpired`) with `.limit` naming the limit that tripped.
+- `llm_cache()`: an exact-match response cache keyed on model, messages/prompt and
+  parameters, with TTL, any `CacheStore`/`AsyncCacheStore`, and an optional
+  `similarity=` embedding hook for semantic matches.
+- Doctor checks PW013 (LLM call retried without a spend budget), PW014 (LLM call without a
+  timeout, or a stream timeout without `chunk_gap`) and PW015 (generic retry without
+  `retry_if` around an LLM call).
+
+- Agent-friendly tooling, generated from `__all__`, docstrings, signatures and the docs so
+  it tracks every release:
+  - `docs/llms.txt` and `docs/llms-full.txt` (llmstxt.org format, served at the site root),
+    generated by `scripts/gen_llms.py` and checked by `tests/test_llms_txt.py`.
+  - `python -m python_wrap api [SYMBOL | search WORDS] [--json]`: a machine-readable API
+    index with signatures, parameters, raised exceptions and examples
+    (`python_wrap.introspect`).
+  - `python -m python_wrap recipe NEED`: plain-language needs ("retry http calls", "stop
+    duplicate emails", "limit llm tokens") mapped to the right API, from an extensible
+    `python_wrap/_data/recipes.json`.
+  - `python -m python_wrap guide`: a concise usage guide for coding agents shipped in the
+    wheel, plus ready-to-copy `AGENTS.md`, project-memory, editor-rule and skill files under
+    `docs/agents/`.
+  - `python -m python_wrap mcp`: a dependency-free, read-only Model Context Protocol
+    server over stdio (`python_wrap.mcp`) with `explain_policy`, `doctor`,
+    `migrate_preview`, `search_api`, `get_symbol`, `recipe` and `guide` tools; `--allow`
+    restricts which modules it may import. Threat model updated.
+- `EffectLedger`: exactly-once bookkeeping for agent tool side effects. `tool(ledger=...)`
+  records each call as started / succeeded / failed, keyed on the provider's tool-call id
+  (`with_call_id`, `tool_call_id`) when there is one, else on the run id and argument
+  digest. Replays return the stored result, concurrent duplicates run once, a call id
+  reused with other arguments raises `EffectConflict`, and a crash or store failure
+  between the side effect and the record (or a timeout/cancellation) is detected and
+  handed to an `on_unknown` hook (`"retry"`, `EffectResolved(value)`, or `EffectUnknown`).
+  Stores: `MemoryEffectStore`, `SQLiteEffectStore`, `RedisEffectStore` (also built from a
+  `RedisStore(fail_open=False)`). `ToolCall` gains `call_id`; agent-framework context
+  parameters (`RunContext`, `ToolContext`, `RunContextWrapper`) are left out of a tool's
+  argument digest.
+- `python_wrap.adapters.pydantic_ai.PythonWrapCapability`: guarded pydantic-ai tools
+  (`tool`, `wrap(toolset)`, `toolset(...)`) with timeout, a retry that never retries
+  `ModelRetry`, approvals, ledger on `tool_call_id`, loop and tool-call limits, a usage
+  bridge into a python-wrap `Budget`, and `AuditTape` records. Optional extra
+  `python-wrap[pydantic-ai]`.
+- `python_wrap.adapters.openai_agents.AgentsGuard`: guarded `function_tool`s, `wrap()` for
+  existing `FunctionTool`s (sub-agents via `as_tool` included, sharing one
+  `max_tool_calls`), and `RunHooks` / `AgentHooks` feeding `Budget`, `AuditTape` and
+  repeat detection; run-ending errors are re-raised through the SDK's tool error handling.
+  Optional extra `python-wrap[openai-agents]`.
+- `mcp_guard`: per-attempt timeout, retries limited to `retry_tools`, a shared per-server
+  `CircuitBreaker` (`mcp_breaker`) and cooperative cancellation around an MCP `call_tool`
+  function or client object (`MCPGuard`). Doctor checks PW020 (MCP or framework tool call
+  without a timeout) and PW021 (MCP guard retrying every tool).
 
 ### Security
 
@@ -117,6 +330,12 @@ plus a manual review); each has a regression test in `tests/test_security_fixes.
 - Workflows: every action is pinned to a commit SHA, `actions/checkout` runs with
   `persist-credentials: false`, the release build no longer uses a cache, and a step
   output is passed through the environment instead of being expanded into a script.
+- MCP server (`python -m python_wrap mcp`) hardening, reviewed against the threat model
+  before release: `import_path` must be `module:attribute` with identifiers only and no
+  dunder attributes, the module must already be importable (optionally under `--allow`
+  prefixes), messages and `migrate_preview` sources are capped at 1 MiB, output printed by
+  imported modules goes to stderr instead of the protocol stream, and no tool writes
+  files, opens sockets or calls the inspected code (tests in `tests/test_mcp.py`).
 
 ### Changed
 
@@ -126,6 +345,51 @@ plus a manual review); each has a regression test in `tests/test_security_fixes.
   predicates, a framework matrix (oldest and newest Flask, FastAPI, Django, Celery,
   httpx, requests), a benchmark comparison and soak job, and a coverage floor
   (`fail_under = 80`).
+- `enforce_types` now checks `TypedDict` annotations (required keys present, each present
+  key's value checked; extra keys allowed) and parameterised `runtime_checkable`
+  protocols such as `SupportsAbs[int]` (`isinstance`), which it used to accept unchecked.
+  A dict missing a required key now raises `ArgumentTypeError`.
+- `measure_memory` serialises measured calls process-wide (`tracemalloc` has one peak
+  counter): a measured call that overlaps another in a different thread or task waits for
+  it (coroutines without blocking the loop), so concurrent measurements no longer share
+  one tracker. Nested measured calls and tasks or `asyncio.to_thread` workers started
+  inside a measured call join it instead of waiting. New `exclusive=False` restores the
+  old, unserialised behaviour.
+- `profile` on an `async def` function now profiles only that coroutine's own steps: the
+  profiler is switched off at every `await` and back on when it resumes, so work the event
+  loop does for other tasks is no longer attributed to it. Overlapping profiled calls run
+  unprofiled with a warning logged once (cProfile allows one active profiler per thread,
+  per process on 3.12+); this is now documented.
+
+### Fixed
+
+- `TokenRateLimiter`: a drained bucket could spin forever on sub-nanosecond waits when the
+  clock reading was large (float precision); the admission slack is now 1e-6 tokens.
+- `SQLiteBreakerState`: concurrent first connections (threads or processes opening the same
+  database at once) could fail with `sqlite3.OperationalError: database is locked` while
+  switching to WAL. Setup now retries until `busy_timeout` has elapsed.
+- `retry_after_header`: an unparseable `Retry-After` value (free text, or a Python-only
+  form such as `1_0`) is now ignored on its own, so the `json_key=` body fallback still
+  applies instead of the whole lookup being abandoned.
+
+### Tests
+
+- `tests/e2e/` holds release-grade happy-path scenarios that use only the public API (resilient
+  HTTP client, cached service, idempotent job worker with journal replay, policy and doctor, LLM
+  client, agent tool run with audit replay, the CLI commands and the MCP server over stdio),
+  marked `e2e` and run in the default suite. `scripts/smoke_wheel.py` builds the wheel,
+  installs it into a fresh venv with no dev dependencies and checks the beta version, zero
+  runtime dependencies, `py.typed`, packaged data, the CLIs and a retry/timeout/LLM happy path;
+  CI runs it on Python 3.10 and 3.14 (`PW_SMOKE_WHEEL=1 pytest tests/test_smoke_wheel.py`).
+- Verified on Python 3.10 to 3.13. Added Prometheus text-format 0.0.4 conformance tests
+  (strict grammar check, histogram invariants, `prometheus_client` parser round trip),
+  `Retry-After` edge cases, real-Redis tests for `RedisSemaphore`, `RedisCheckpoint` and
+  `RedisSource`, and non-main-thread `timeout` fallback behaviour.
+
+### Documentation
+
+- `docs/project/limitations.md`: the `timeout` thread fallback caveats (Windows runs every
+  sync timeout this way, abandoned workers, thread-affine code) are spelled out.
 
 ## [0.3.0] - 2026-10-29
 
@@ -491,7 +755,8 @@ Core:
 
 Initial release.
 
-[Unreleased]: https://github.com/LitePy/PythonWrap/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/LitePy/PythonWrap/compare/v0.4.0b1...HEAD
+[0.4.0b1]: https://github.com/LitePy/PythonWrap/compare/v0.3.0...v0.4.0b1
 [0.3.0]: https://github.com/LitePy/PythonWrap/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/LitePy/PythonWrap/compare/v0.1.0...v0.2.1
 [0.1.0]: https://github.com/LitePy/PythonWrap/releases/tag/v0.1.0

@@ -4,20 +4,24 @@
 of an already decorated function through ``__wrapped__``. Both return a `Report` whose
 `findings` flag the combinations that usually cause production incidents: retries
 without a per-attempt timeout, retries of non-idempotent operations, unbounded retries,
-timeouts longer than the whole retry budget, and layers stacked out of the canonical
-order (`python_wrap.policy.ROLES`).
+timeouts longer than the whole retry budget, memoized methods keyed on ``self`` with no
+bound (PW011), LLM calls without a spend budget or timeout (PW013-PW015), SDK retries
+under a python-wrap retry and retried streams without ``resume_safe`` (PW018-PW019), layers stacked
+out of the canonical order (`python_wrap.policy.ROLES`) and, with ``multiprocess=True``,
+limits that are enforced separately in every worker process.
 
 Nothing is called: only configuration attributes are read.
 
 Command line::
 
-    python -m python_wrap doctor package.module:function [--non-idempotent]
+    python -m python_wrap doctor package.module:function [--non-idempotent] [--multiprocess]
 """
 
 from __future__ import annotations
 
 import argparse
 import importlib
+import inspect
 import itertools
 import sys
 from collections.abc import Callable, Mapping, Sequence
@@ -112,6 +116,7 @@ def _fmt(value: Any) -> str:
 
 def _layer(obj: Any, role: str | None = None) -> Layer:
     """Describe one decorator object or one wrapper function."""
+    from python_wrap.adaptive import AdaptiveLimiter
     from python_wrap.bulkhead import Bulkhead
     from python_wrap.circuit import CircuitBreaker
     from python_wrap.concurrency import RateLimiter, Timeout
@@ -123,7 +128,10 @@ def _layer(obj: Any, role: str | None = None) -> Layer:
             return Layer(role or kind, dict(value))
         obj = value
     if isinstance(obj, Timeout):
-        return Layer(role or "timeout", {"seconds": obj.seconds})
+        settings: dict[str, Any] = {"seconds": obj.seconds}
+        if obj.use_signals is not None:
+            settings["use_signals"] = obj.use_signals
+        return Layer(role or "timeout", settings)
     if isinstance(obj, CircuitBreaker):
         return Layer(
             role or "breaker",
@@ -135,16 +143,82 @@ def _layer(obj: Any, role: str | None = None) -> Layer:
             },
         )
     if isinstance(obj, Bulkhead):
-        return Layer(role or "bulkhead", {"max_concurrent": obj.max_concurrent})
+        return Layer(
+            role or "bulkhead",
+            {"max_concurrent": obj.max_concurrent, "shared": obj._shared is not None},
+        )
     if isinstance(obj, RateLimiter):
-        return Layer(role or "limiter", {"name": obj.name})
+        return Layer(role or "limiter", {"name": obj.name, "shared": obj._backend is not None})
+    if isinstance(obj, AdaptiveLimiter):
+        return Layer(role or "adaptive", {"name": obj.name, "shared": False})
     if callable(getattr(obj, "cache_info", None)):
-        return Layer(role or "cache")
+        return Layer(role or "cache", _cache_settings(obj))
     return Layer(role or "unknown", {"decorator": getattr(obj, "__qualname__", type(obj).__name__)})
 
 
-def _check(layers: Sequence[Layer], idempotent: bool) -> tuple[Finding, ...]:
+def _preemptive(use_signals: Any) -> bool:
+    """True if a sync timeout with this ``use_signals`` setting can stop work here."""
+    from python_wrap.concurrency import _signals_usable
+
+    return use_signals is not False and _signals_usable()
+
+
+def _cache_settings(obj: Any) -> dict[str, Any]:
+    """What PW011 needs about a `memoize` wrapper: does ``self`` key an unbounded cache?"""
+    read = getattr(obj, "cache_parameters", None)
+    if not callable(read):
+        return {}
+    try:
+        params = read()
+        names = list(inspect.signature(getattr(obj, "__wrapped__", obj)).parameters)
+    except (TypeError, ValueError):
+        return {}
+    bounded = (
+        params.get("maxsize") is not None
+        or params.get("ttl") is not None
+        or params.get("store") is not None
+    )
+    self_in_key = bool(names) and names[0] == "self" and not params.get("per_instance")
+    return {"self_in_key": self_in_key and params.get("key") is None, "bounded": bounded}
+
+
+# Layers whose limit is state: without a shared backend each process keeps its own.
+_PER_PROCESS_STATE = {
+    "breaker": "its failure count and open/closed state",
+    "bulkhead": "its concurrency cap",
+    "limiter": "its rate limit",
+    "adaptive": "its adaptive concurrency limit",
+}
+
+
+def _check_processes(layers: Sequence[Layer]) -> list[Finding]:
+    """PW012: limits that every worker process enforces on its own."""
     found: list[Finding] = []
+    for layer in layers:
+        what = _PER_PROCESS_STATE.get(layer.role)
+        if what is None or layer.settings.get("shared"):
+            continue
+        label = layer.settings.get("name")
+        title = f"{layer.role} {label!r}" if label else layer.role
+        found.append(
+            Finding(
+                "PW012",
+                "warning",
+                f"{title} keeps {what} in this process only: under a process pool "
+                "(gunicorn/uvicorn workers, Celery prefork, ProcessPoolExecutor) every "
+                "worker enforces it separately, so N workers allow N times the configured "
+                "limit and each discovers an outage on its own. Give it a shared backend "
+                "(RedisBreakerState/SQLiteBreakerState, a lease backend, a Redis window) "
+                "or size the limit per worker on purpose.",
+            )
+        )
+    return found
+
+
+def _check(
+    layers: Sequence[Layer], idempotent: bool, multiprocess: bool = False
+) -> tuple[Finding, ...]:
+    found: list[Finding] = _check_processes(layers) if multiprocess else []
     roles = [layer.role for layer in layers]
     retries = [layer for layer in layers if layer.role == "retry"]
     timeouts = [layer for layer in layers if layer.role == "timeout"]
@@ -192,6 +266,38 @@ def _check(layers: Sequence[Layer], idempotent: bool) -> tuple[Finding, ...]:
                     "by max_attempts. Pass budget=RetryBudget(...) or configure(retry=...).",
                 )
             )
+    if any(
+        layer.settings.get("sync") and not _preemptive(layer.settings.get("use_signals"))
+        for layer in timeouts
+    ):
+        found.append(
+            Finding(
+                "PW009",
+                "warning",
+                "timeout wraps a sync function but cannot stop it preemptively here (not the "
+                "main thread, no SIGALRM, or use_signals=False): the caller gets "
+                "TimeoutExpired while the function keeps running, so side effects may "
+                "continue. Poll python_wrap.checkpoint() / cancel_requested() inside the "
+                "function, or use async code.",
+            )
+        )
+    if any(
+        layer.settings.get("sync") and _preemptive(layer.settings.get("use_signals"))
+        for layer in timeouts
+    ):
+        from python_wrap.concurrency import foreign_alarm_state
+
+        conflict = foreign_alarm_state()
+        if conflict is not None:
+            found.append(
+                Finding(
+                    "PW010",
+                    "warning",
+                    f"timeout will use SIGALRM but {conflict}: signal timers are "
+                    "process-wide, so the other alarm may be delayed or misrouted. Use "
+                    "use_signals=False, or move the other alarm elsewhere.",
+                )
+            )
     if retries and not timeouts:
         found.append(
             Finding(
@@ -234,11 +340,73 @@ def _check(layers: Sequence[Layer], idempotent: bool) -> tuple[Finding, ...]:
                 "(3 x 3 = 9 calls) and failures are counted twice.",
             )
         )
+    for layer in layers:
+        if (
+            layer.role == "cache"
+            and layer.settings.get("self_in_key")
+            and not layer.settings.get("bounded")
+        ):
+            found.append(
+                Finding(
+                    "PW011",
+                    "warning",
+                    "memoize on a method keys the cache on `self` with no maxsize or ttl: "
+                    "every instance it has seen stays alive and its entries are never "
+                    "dropped. Use per_instance=True (weak references), set maxsize= or "
+                    "ttl=, or pass key= without `self`.",
+                )
+            )
+    found += _check_agents(layers, retries)
+    from python_wrap.llm import doctor_findings as _llm_findings
+
+    found += _llm_findings(layers)
+    from python_wrap.mcp_guard import doctor_findings as _tool_call_findings
+
+    found += _tool_call_findings(layers)
+    from python_wrap.adapters._sdk import doctor_findings as _sdk_findings
+
+    found += _sdk_findings(layers)
     found.sort(key=lambda item: (item.severity != "error", item.code))
     return tuple(found)
 
 
-def explain(target: Any, *, idempotent: bool = True) -> Report:
+def _check_agents(layers: Sequence[Layer], retries: Sequence[Layer]) -> list[Finding]:
+    """PW016 (retried side-effect tool without idempotency) and PW017 (unbounded run)."""
+    found: list[Finding] = []
+    for layer in layers:
+        settings = layer.settings
+        if (
+            layer.role == "tool"
+            and retries
+            and not settings.get("read_only")
+            and not settings.get("idempotent")
+        ):
+            found.append(
+                Finding(
+                    "PW016",
+                    "error",
+                    f"tool {settings.get('name')!r} has side effects and is retried, but "
+                    "deduplication is off (idempotent_key=False): a retried or replayed "
+                    "call runs twice. Drop idempotent_key=False (or pass a key function), "
+                    "or declare read_only=True if the tool has no side effects.",
+                )
+            )
+        if layer.role == "agent_run" and not any(
+            settings.get(name) for name in ("max_steps", "max_seconds", "max_repeats")
+        ):
+            found.append(
+                Finding(
+                    "PW017",
+                    "warning",
+                    "agent run with tools but no RunGuard limits: a model that keeps "
+                    "calling tools loops forever. Set max_steps=, max_seconds= and "
+                    "max_repeats= on the RunGuard / agent_run.",
+                )
+            )
+    return found
+
+
+def explain(target: Any, *, idempotent: bool = True, multiprocess: bool = False) -> Report:
     """Describe a `Policy` (or a decorated function) and lint its configuration.
 
     Args:
@@ -246,6 +414,10 @@ def explain(target: Any, *, idempotent: bool = True) -> Report:
             this is the same as `doctor`).
         idempotent: Whether the protected operation is safe to repeat. Pass False for
             payments, emails, non-idempotent POSTs: any retry layer is then an error.
+        multiprocess: Whether the code runs in several worker processes (prefork web
+            servers, Celery prefork, process pools). Breakers, bulkheads and rate
+            limiters without a shared backend then get a PW012 warning: per-worker
+            state is the default.
 
     Returns:
         A `Report`; ``str(report)`` is a readable summary and ``report.ok`` is False
@@ -262,8 +434,13 @@ def explain(target: Any, *, idempotent: bool = True) -> Report:
         assert [f.code for f in report.findings][:1] == ["PW002"]
         ```
     """
+    from python_wrap.agents import RunGuard, ToolRegistry
+
+    if isinstance(target, (RunGuard, ToolRegistry)):
+        report: Report = target._explain(idempotent=idempotent, multiprocess=multiprocess)
+        return report
     if not isinstance(target, Policy):
-        return doctor(target, idempotent=idempotent)
+        return doctor(target, idempotent=idempotent, multiprocess=multiprocess)
     layers: list[Layer] = [_layer(item, "outer") for item in target._outer]
     for role in ROLES:
         layers += [_layer(item, role) for item in target._roles.get(role, ())]
@@ -274,10 +451,14 @@ def explain(target: Any, *, idempotent: bool = True) -> Report:
         _layer(item, None) if layer.role in {"outer", "inner"} else layer
         for layer, item in zip(layers, target._layers(), strict=True)
     ]
-    return Report(target.name or repr(target), tuple(layers), _check(layers, idempotent))
+    return Report(
+        target.name or repr(target), tuple(layers), _check(layers, idempotent, multiprocess)
+    )
 
 
-def doctor(func: Callable[..., Any], *, idempotent: bool = True) -> Report:
+def doctor(
+    func: Callable[..., Any], *, idempotent: bool = True, multiprocess: bool = False
+) -> Report:
     """Walk a decorated function's ``__wrapped__`` chain and lint the layers found.
 
     Only python-wrap layers are listed (plain ``functools.wraps`` decorators are
@@ -286,6 +467,7 @@ def doctor(func: Callable[..., Any], *, idempotent: bool = True) -> Report:
     Args:
         func: The decorated function (or bound method).
         idempotent: See `explain`.
+        multiprocess: See `explain`.
 
     Returns:
         A `Report`.
@@ -314,9 +496,9 @@ def doctor(func: Callable[..., Any], *, idempotent: bool = True) -> Report:
         if hasattr(current, _LAYER_ATTR):
             layers.append(_layer(current))
         elif callable(getattr(current, "cache_info", None)):
-            layers.append(Layer("cache"))
+            layers.append(Layer("cache", _cache_settings(current)))
         current = getattr(current, "__wrapped__", None)
-    return Report(name, tuple(layers), _check(layers, idempotent))
+    return Report(name, tuple(layers), _check(layers, idempotent, multiprocess))
 
 
 def _resolve(spec: str) -> Any:
@@ -341,13 +523,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="treat the targets as unsafe to repeat (any retry is an error)",
     )
+    parser.add_argument(
+        "--multiprocess",
+        action="store_true",
+        help="the targets run in several worker processes (flag limits kept per process)",
+    )
     parser.add_argument("--strict", action="store_true", help="exit 1 on warnings too")
     args = parser.parse_args(argv)
     if "" not in sys.path:
         sys.path.insert(0, "")
     status = 0
     for spec in args.targets:
-        report = explain(_resolve(spec), idempotent=not args.non_idempotent)
+        report = explain(
+            _resolve(spec), idempotent=not args.non_idempotent, multiprocess=args.multiprocess
+        )
         print(report)
         if not report.ok or (args.strict and report.findings):
             status = 1

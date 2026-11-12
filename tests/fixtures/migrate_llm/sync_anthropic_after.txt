@@ -1,0 +1,17 @@
+"""Summaries."""
+import time
+
+import anthropic
+from python_wrap.llm import llm_retry
+
+client = anthropic.Anthropic()
+
+
+@llm_retry(max_attempts=4, delay=2)
+def summarize(text: str) -> str:
+    """Summarize text."""
+    return client.messages.create(
+        model="m-1",
+        max_tokens=200,
+        messages=[{"role": "user", "content": text}],
+    )

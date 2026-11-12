@@ -160,6 +160,23 @@ async def read_feed(user: str = Depends(enforce_quota)) -> list[str]:
 
 Two details make this work. `memoize` and `singleflight` use `functools.wraps`, so FastAPI still sees the original signature of anything you decorate. And the rate limiter is applied to a small `consume_quota` function rather than to the endpoint, because its job is to count and raise: the HTTP concern (`429`, `Retry-After`) lives in one dependency that every route can reuse.
 
+## Per-instance state in service classes
+
+When the limits live on methods of a service class, every instance shares one limiter, throttle window or pending debounced call by default. Pass `per_instance=True` (or a `key=`) so each instance, for example one client per upstream, has its own state, and use `memoize(singleflight=True)` so threads that miss on the same key run the loader once:
+
+```python
+from python_wrap import memoize, rate_limit
+
+class UpstreamClient:
+    @rate_limit(100, 60.0, per_instance=True)   # one budget per client instance
+    def call(self, path: str) -> str: ...
+
+@memoize(ttl=60, singleflight=True)             # one load per key across threads
+def load_report(report_id: int) -> str: ...
+```
+
+See [`examples/per_instance_state.py`](https://github.com/LitePy/PythonWrap/blob/main/examples/per_instance_state.py) for a runnable version covering `throttle`, `debounce`, `rate_limit` and `limiter_of(..., instance=)`.
+
 ## Pitfalls
 
 !!! warning "Cached values are shared objects"

@@ -144,6 +144,8 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 * `profile` and `measure_memory` have overhead (and `tracemalloc` is process-wide), so use them while investigating, not permanently.
 * `throttle` returns `None` until the first successful call has finished, and a call that raises still uses up its window.
 * `timing` on a generator times only creating it, not iterating it.
+* A sync `timeout` around a long loop cannot stop it everywhere (worker-thread fallback, Windows). Call `checkpoint()` between units of work so the loop ends at the limit; see [Cooperative cancellation](../features/resilience/timeout.md#cooperative-cancellation) and `examples/cooperative_timeout.py`.
+* Output that must survive a crash can go through `buffered(journal=SQLiteJournal(path))`; see [Durable writers](../features/concurrency/buffered-writes.md#durable-writers) and `examples/durable_buffer.py`.
 
 ## Test it
 

@@ -123,6 +123,16 @@ unsubscribe()
 | `bulkhead.rejected` | `active`, `waiting` |
 | `periodic.run` | `run` (1-based), `seconds` (how long the run took) |
 | `periodic.failed` | `run`, `exception` |
+| `llm.fallback_served` | `model` (the entry that served, or `cached`), `index` (-1 for the cached answer), `failed` (entries that failed first) |
+| `llm.budget_exceeded` | `budget`, `scope`, `tokens`, `usd` (the spend so far) |
+| `llm.validation_failed` | `attempt`, `error` |
+| `llm.repair_exhausted` | `attempts`, `reason` |
+| `llm.cassette_recorded` | `status`, `key` |
+| `rate_limit.store_error` | `error`, `op` (a shared token window fell back to a local bucket) |
+| `llm.stream_resumed` | `attempt` (the attempt that failed), `exception`, `delay` (seconds before reopening) |
+| `llm.stream_interrupted` | `chars` (partial text length), `tool_calls` (completed tool calls), `exception` |
+| `llm.prompt_cache_cold` | `calls`, `hit_rate`, `reasons` (likely causes) |
+| `llm.prompt_cache_volatile` | `kinds` (what changes per request: `timestamp`, `uuid`, ...) |
 
 ```python
 from python_wrap.events import EVENT_NAMES

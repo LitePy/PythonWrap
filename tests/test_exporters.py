@@ -380,3 +380,77 @@ def test_statsd_validation() -> None:
         StatsDExporter(sample_rate=0)
     with pytest.raises(ValueError):
         StatsDExporter(tags="bogus")  # type: ignore[arg-type]
+
+
+# ------------------------------------------------- exposition-format conformance
+
+_METRIC = r"[a-zA-Z_:][a-zA-Z0-9_:]*"
+_LABEL_RE = r'[a-zA-Z_][a-zA-Z0-9_]*="(?:[^"\\\n]|\\["\\n])*"'
+_SAMPLE_RE = (
+    rf"^({_METRIC})(\{{{_LABEL_RE}(?:,{_LABEL_RE})*\}})? "
+    r"(NaN|[+-]Inf|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)$"
+)
+
+
+def _check_exposition(text: str) -> dict[str, str]:
+    """A strict line-by-line check of Prometheus text format 0.0.4; returns name -> type."""
+    import re
+
+    assert text.endswith("\n") and not text.endswith("\n\n")
+    types_seen: dict[str, str] = {}
+    helped: set[str] = set()
+    for line in text.splitlines():
+        if line.startswith("# HELP "):
+            name = line.split(" ", 3)[2]
+            assert re.fullmatch(_METRIC, name) and name not in helped
+            helped.add(name)
+        elif line.startswith("# TYPE "):
+            _, _, name, kind = line.split(" ")
+            assert kind in {"counter", "gauge", "histogram", "summary", "untyped"}
+            assert name in helped and name not in types_seen
+            types_seen[name] = kind
+        else:
+            match = re.match(_SAMPLE_RE, line)
+            assert match, f"invalid sample line: {line!r}"
+            sample = match.group(1)
+            base = re.sub(r"_(bucket|sum|count)$", "", sample)
+            assert sample in types_seen or types_seen.get(base) == "histogram", line
+    return types_seen
+
+
+def test_render_conforms_to_text_exposition_format() -> None:
+    with PrometheusExporter(namespace="t", registry=HealthRegistry()) as exporter:
+        feed()
+        _core.emit("cache.hit", 'we"ird\\fn\nname')
+        _core.emit("periodic.run", "job", seconds=0.2)
+        kinds = _check_exposition(exporter.render())
+    assert kinds["t_retry_wait_seconds"] == "histogram"
+    assert kinds["t_circuit_state"] == "gauge"
+
+
+def test_render_histogram_invariants() -> None:
+    import re
+
+    with PrometheusExporter(namespace="t", registry=None) as exporter:
+        for delay in (0.01, 0.4, 3.0, 400.0):
+            _core.emit("retry.attempt_failed", "f", attempt=1, exception=None, next_delay=delay)
+        text = exporter.render()
+    buckets = [
+        (m.group(1), int(m.group(2)))
+        for m in re.finditer(r't_retry_wait_seconds_bucket\{le="([^"]+)"\} (\d+)', text)
+    ]
+    counts = [c for _, c in buckets]
+    assert counts == sorted(counts)  # cumulative
+    assert buckets[-1] == ("+Inf", 4)
+    assert "t_retry_wait_seconds_count 4" in text
+
+
+def test_render_parses_with_prometheus_client() -> None:
+    parser = pytest.importorskip("prometheus_client.parser")
+    with PrometheusExporter(namespace="t", registry=None) as exporter:
+        feed()
+        _core.emit("cache.hit", 'we"ird\\fn\nname')
+        families = {f.name: f for f in parser.text_string_to_metric_families(exporter.render())}
+    assert families["t_retry_wait_seconds"].type == "histogram"
+    labels = [s.labels["function"] for s in families["t_cache_hits"].samples]
+    assert 'we"ird\\fn\nname' in labels

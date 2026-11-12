@@ -10,6 +10,10 @@ circuit breaker, using values that are safe for typical traffic:
   0.1 s, no breaker by default.
 - `third_party_api`: 15 s timeout, 4 attempts, waits 0.5, 1, 2 s (plus up to 0.5 s),
   breaker opens after 5 failures for 60 s; optional rate limit and bulkhead.
+- `llm_client`: 60 s timeout, 4 attempts on transient LLM errors only (429, 529,
+  overloaded, 5xx, timeouts, connection errors), waits 1, 2, 4 s (plus up to 0.5 s) or the
+  provider's ``Retry-After``, breaker counting only those errors opens after 5 for 60 s;
+  optional spend `Budget`.
 
 Every retry layer gets ``max_time`` larger than ``timeout * attempts`` so a slow
 attempt never consumes the whole budget, and a `RetryBudget` (20 % of traffic plus 5
@@ -29,11 +33,12 @@ from python_wrap.bulkhead import Bulkhead
 from python_wrap.circuit import CircuitBreaker
 from python_wrap.concurrency import RateLimiter, timeout
 from python_wrap.errors import CircuitOpenError, TimeoutExpired
+from python_wrap.llm import Budget, TokenRateLimiter, _BreakerLayer, _llm_breaker, llm_retry
 from python_wrap.policy import Policy, policy
 from python_wrap.predicates import db_transient
 from python_wrap.retry import RetryBudget, retry
 
-__all__ = ["TRANSPORT_ERRORS", "db_call", "http_client", "third_party_api"]
+__all__ = ["TRANSPORT_ERRORS", "db_call", "http_client", "llm_client", "third_party_api"]
 
 #: Exceptions every preset treats as transient: lost/refused connections and timeouts
 #: (`TimeoutExpired` is a `TimeoutError`). HTTP libraries' own transport errors subclass
@@ -237,6 +242,84 @@ def third_party_api(
             on=on,
             retry_if=None,
             budget=budget,
+        ),
+        timeout=timeout(timeout_seconds),
+    )
+
+
+def llm_client(
+    name: str,
+    *,
+    timeout_seconds: float = 60.0,
+    attempts: int = 4,
+    idempotent: bool = True,
+    breaker: bool = True,
+    max_delay: float = 60.0,
+    budget: RetryBudget | None = None,
+    spend: Budget | None = None,
+    tokens: TokenRateLimiter | None = None,
+) -> Policy:
+    """A policy for calls to an LLM provider (chat/completions/messages endpoints).
+
+    Retries only what `python_wrap.llm.llm_transient` accepts: 408/409/429/529, every
+    5xx, overloaded bodies, timeouts and connection errors. Bad requests, auth errors and
+    content-policy refusals fail at once. Waits double from 1 s (plus up to 0.5 s jitter)
+    unless the provider sends ``Retry-After`` / ``retry-after-ms``, which is honoured up
+    to ``max_delay``. The breaker counts only those transient errors, so a burst of
+    refused prompts never opens it. The 60 s per-attempt timeout suits non-streamed
+    answers of a few thousand tokens; raise it for long outputs and use
+    `python_wrap.llm.stream_timeout` for streams.
+
+    Args:
+        name: Policy and breaker name.
+        timeout_seconds: Per-attempt time limit.
+        attempts: Total attempts, including the first.
+        idempotent: False leaves the retry layer out.
+        breaker: Include a breaker (5 transient failures, 60 s recovery).
+        max_delay: Longest wait between attempts, also the cap on ``Retry-After``.
+        budget: A shared `RetryBudget`, or None for a new one (20 %, 5/s).
+        spend: A token/dollar `python_wrap.llm.Budget`, placed in the ``limiter`` role
+            (checked once per logical call; usage recorded from the final response).
+        tokens: A `python_wrap.llm.TokenRateLimiter`, also in the ``limiter`` role.
+
+    Returns:
+        A `Policy`.
+
+    Example:
+        ```python
+        from python_wrap.llm import Budget
+        from python_wrap.presets import llm_client
+
+        chat = llm_client("chat", spend=Budget(tokens=100_000))
+
+        @chat
+        def complete(prompt: str) -> dict[str, object]:
+            return {"usage": {"input_tokens": 10, "output_tokens": 5}}
+
+        complete("hi")
+        assert chat.explain().findings == ()
+        ```
+    """
+    limiters = [layer for layer in (spend, tokens) if layer is not None]
+    return policy(
+        name=name,
+        limiter=limiters or None,
+        breaker=(
+            _BreakerLayer(_llm_breaker(failure_threshold=5, recovery_timeout=60.0, name=name))
+            if breaker
+            else None
+        ),
+        retry=(
+            llm_retry(
+                max_attempts=attempts,
+                delay=1.0,
+                max_delay=max_delay,
+                jitter=0.5,
+                max_time=timeout_seconds * attempts + max_delay * (attempts - 1) + 1,
+                budget=_budget(budget),
+            )
+            if idempotent and attempts > 1
+            else None
         ),
         timeout=timeout(timeout_seconds),
     )

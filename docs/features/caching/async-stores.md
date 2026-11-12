@@ -71,6 +71,50 @@ By default errors from Redis are logged and treated as misses (`fail_open=True`)
 `fail_open=False` to raise. `clear()` scans only this store's prefix and deletes in
 batches with `UNLINK`.
 
+## A synchronous store from async code
+
+`memoize(store=RedisStore(...))` on an `async def` function calls the store on the event
+loop, so every Redis round trip blocks it. When only a synchronous client is available,
+wrap the store in `ThreadedStore` and use `amemoize`: each call then runs in a worker
+thread (or in the `executor=` you pass).
+
+```python
+import asyncio
+
+from python_wrap import ThreadedStore, amemoize
+
+
+class DictStore:  # stands in for RedisStore(redis.Redis(...), prefix="price:")
+    def __init__(self) -> None:
+        self.data: dict[object, object] = {}
+
+    def get(self, key):
+        return self.data.get(key)
+
+    def set(self, key, entry, ttl):
+        self.data[key] = entry
+
+    def delete(self, key):
+        return self.data.pop(key, None) is not None
+
+    def clear(self):
+        self.data.clear()
+
+    def __len__(self):
+        return len(self.data)
+
+
+@amemoize(ttl=60, store=ThreadedStore(DictStore()))
+async def price(sku: str) -> int:
+    return len(sku)
+
+
+assert asyncio.run(price("abc")) == 3
+```
+
+Prefer `AsyncRedisStore` with a `redis.asyncio` client when you can: it needs no
+threads.
+
 ## Serialization and trust
 
 Entries are stored as `(value, expires_at)` pairs. The default serializer is pickle,

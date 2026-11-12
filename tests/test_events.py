@@ -95,7 +95,7 @@ def test_event_names_catalogue() -> None:
     src = pathlib.Path(python_wrap.__file__).parent
     emitted = {
         name
-        for path in src.glob("*.py")
-        for name in re.findall(r"""emit\(\s*["']([a-z_]+\.[a-z_]+)["']""", path.read_text())
+        for path in src.rglob("*.py")
+        for name in re.findall(r"""emit\(\s*["']([a-z_]+(?:\.[a-z_]+)+)["']""", path.read_text())
     }
     assert emitted == set(EVENT_NAMES)

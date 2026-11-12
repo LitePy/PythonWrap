@@ -1,0 +1,23 @@
+---
+description: Using python-wrap (retry, timeout, circuit breaker, rate limit, cache, idempotency) correctly
+globs: "**/*.py"
+alwaysApply: false
+---
+
+# python-wrap rules
+
+- Before writing resilience code, run `python -m python_wrap guide`.
+- Look APIs up instead of guessing: `python -m python_wrap recipe "<need>"`,
+  `python -m python_wrap api search <words>`, `python -m python_wrap api <symbol>`.
+- Prefer `python_wrap.presets` (`http_client`, `db_call`, `third_party_api`) or
+  `policy(...)` to hand-stacked decorators.
+- Hand-stacked order, outermost (top) first: observe, validate, fallback, cache, limiter,
+  bulkhead, breaker, retry, timeout. `timeout` inside `retry`, `circuit_breaker` outside.
+- Never retry non-idempotent operations (payments, e-mails, webhooks, POST without an
+  idempotency key). Use `idempotent=False` on presets and `@idempotent(key=...)`.
+- Every `retry` names transient exceptions in `on=` and is bounded by `max_attempts` or
+  `max_time`. Do not retry 4xx responses other than 408, 425 and 429.
+- Limits and breakers are per process unless given a shared backend (Redis, SQLite).
+- Check every stack: `python -m python_wrap doctor package.module:attribute`
+  (`--non-idempotent`, `--multiprocess`, `--strict`); fix all errors.
+- Tests use `python_wrap.testing.fake_clock()`, never real sleeps.

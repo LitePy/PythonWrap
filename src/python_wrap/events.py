@@ -92,10 +92,107 @@ EVENT_NAMES: Mapping[str, str] = MappingProxyType(
         "lifecycle.drain_finished": (
             "A shutdown drain completed. Fields: ok (bool), seconds (float)."
         ),
+        "genai.llm_call": (
+            "A traced_llm call finished. function is the traced function. Fields: kind, "
+            "run_id, step, tool, model, system, input_tokens, output_tokens, cost, latency "
+            "(seconds), started (epoch seconds), status ('ok'/'error'), error_type, attempts "
+            "(failed inner retry attempts or None); input/output/error only with content capture."
+        ),
+        "genai.tool_call": (
+            "A traced_tool call finished. Same fields as genai.llm_call; tool is the tool name."
+        ),
+        "llm.fallback_served": (
+            "A fallback_models chain returned an answer. function is the chain name. "
+            "Fields: model (str, the entry that served, or 'cached'), index (int, -1 for "
+            "the cached answer), failed (tuple of str, entries that failed first)."
+        ),
+        "llm.budget_exceeded": (
+            "A Budget refused a call. Fields: budget (str), scope (str), tokens (int), "
+            "usd (float), the spend so far."
+        ),
+        "llm.validation_failed": (
+            "A validated() call's output failed validation. function is the wrapped function. "
+            "Fields: attempt (int, 1-based), error (str, truncated)."
+        ),
+        "llm.repair_exhausted": (
+            "A validated() call gave up. Fields: attempts (int), reason (str: 'max_repairs', "
+            "'max_tokens' or 'budget')."
+        ),
+        "llm.cassette_recorded": (
+            "A Cassette recorded one HTTP exchange. function is 'cassette'. "
+            "Fields: status (int), key (str, the first 12 characters of the request key)."
+        ),
+        "rate_limit.store_error": (
+            "A shared token window could not reach its storage and fell back to a local "
+            "bucket (or raised, with fail_open=False). function is the window name. "
+            "Fields: error (str, the exception class), op (str)."
+        ),
+        "llm.stream_resumed": (
+            "A resume_safe stream failed before any output and is reopened. function is "
+            "the stream name. Fields: attempt (int, the attempt that failed), exception "
+            "(BaseException), delay (float seconds before reopening)."
+        ),
+        "llm.stream_interrupted": (
+            "A resume_safe stream failed after output started; StreamInterrupted is raised "
+            "instead of replaying. Fields: chars (int, partial text length), tool_calls "
+            "(int, completed tool calls), exception (BaseException)."
+        ),
+        "llm.prompt_cache_cold": (
+            "A CacheGuard saw almost no prompt-cache hits across its calls. function is the "
+            "guard name. Fields: calls (int), hit_rate (float), reasons (tuple of str)."
+        ),
+        "llm.prompt_cache_volatile": (
+            "A CacheGuard found a value that changes per request (timestamp, UUID...) in "
+            "the cached prompt prefix. Fields: kinds (tuple of str)."
+        ),
         "chaos.injected": (
             "A python_wrap.chaos rule injected a fault. function is the fault point name. "
             "Fields: kind (str): 'latency', 'exception' or 'result'; point (str); "
             "pattern (str, the matching rule)."
+        ),
+        "agent.run.start": (
+            "An agent run (RunGuard / agent_run) began. function is the guard name. "
+            "Fields: run_id (str), parent_id (str, or None for a top-level run)."
+        ),
+        "agent.run.step": (
+            "A step was admitted into an agent run. function is the guard name. "
+            "Fields: run_id (str), step (int, 1-based), kind (str: 'tool', 'llm', ...), "
+            "tool (str, the tool or step name)."
+        ),
+        "agent.run.end": (
+            "An agent run finished. function is the guard name. Fields: run_id (str), "
+            "steps (int), seconds (float), error (str exception class name, or None)."
+        ),
+        "tool.call": (
+            "An agent tool is about to run (not a replay or dry run). function is the tool "
+            "name. Fields: run_id (str or None)."
+        ),
+        "tool.denied": (
+            "A tool call was refused. function is the tool name. Fields: run_id (str or "
+            "None), reason (str): 'unknown', 'denied', 'read_only', 'approval_denied' or "
+            "'approval_timeout'."
+        ),
+        "tool.replayed": (
+            "A tool call matched a stored idempotency key; the stored result was returned "
+            "without running. function is the tool name. Fields: run_id (str or None)."
+        ),
+        "tool.dry_run": (
+            "A write tool was skipped in a dry run. function is the tool name. "
+            "Fields: run_id (str or None)."
+        ),
+        "tool.effect_unknown": (
+            "An EffectLedger found a side effect whose outcome is unknown (a crash, a "
+            "store failure, a timeout or cancellation, or a lost result). function is the "
+            "tool name. Fields: run_id (str or None), reason (str): 'crashed', "
+            "'uncertain' or 'result_lost'."
+        ),
+        "tool.effect_resolved": (
+            "An EffectLedger's on_unknown hook resolved an unknown effect with a result. "
+            "function is the tool name. Fields: run_id (str or None)."
+        ),
+        "mcp.cancelled": (
+            "An in-flight MCP tool call was cancelled because the current CancelToken "
+            "fired. function is 'mcp:<server>'. No extra fields."
         ),
     }
 )

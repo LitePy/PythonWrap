@@ -26,6 +26,11 @@ def main() -> None:
     assert metadata["Requires-Python"] == ">=3.10"
     assert metadata["License-Expression"] == "MIT"
     assert (Path(python_wrap.__file__).parent / "py.typed").is_file()
+    for data_file in ("agent_guide.md", "recipes.json"):
+        assert (Path(python_wrap.__file__).parent / "_data" / data_file).is_file(), data_file
+    from python_wrap.introspect import find_recipes, guide_text
+
+    assert "What never to retry" in guide_text() and find_recipes("retry http calls")
     for module in pkgutil.iter_modules(python_wrap.__path__):
         importlib.import_module(f"python_wrap.{module.name}")
     for name in python_wrap.__all__:

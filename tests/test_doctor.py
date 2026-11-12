@@ -255,3 +255,171 @@ def test_cli_dispatches_migrate(tmp_path, capsys):
     source = tmp_path / "jobs.py"
     source.write_text("def f():\n    return 1\n")
     assert cli(["migrate", str(tmp_path)]) == 0
+
+
+def test_pw009_sync_timeout_without_signals():
+    @timeout(1, use_signals=False)
+    def work() -> None: ...
+
+    assert "PW009" in codes(doctor(work))
+
+
+def test_pw009_not_for_async_or_policy_timeouts():
+    @timeout(1)
+    async def work() -> None: ...
+
+    assert "PW009" not in codes(doctor(work))
+    assert "PW009" not in codes(explain(policy(timeout=timeout(1, use_signals=False))))
+
+
+def test_pw009_off_main_thread():
+    import threading
+
+    @timeout(1)
+    def work() -> None: ...
+
+    result: list[list[str]] = []
+    thread = threading.Thread(target=lambda: result.append(codes(doctor(work))))
+    thread.start()
+    thread.join()
+    assert "PW009" in result[0]
+
+
+def test_pw010_existing_sigalrm_handler():
+    import signal
+
+    if not hasattr(signal, "setitimer"):
+        pytest.skip("needs SIGALRM")
+
+    @timeout(1)
+    def work() -> None: ...
+
+    assert "PW010" not in codes(doctor(work))
+    old = signal.signal(signal.SIGALRM, lambda s, f: None)
+    try:
+        assert "PW010" in codes(doctor(work))
+    finally:
+        signal.signal(signal.SIGALRM, old)
+
+
+def test_pw011_memoized_method_keyed_on_self_without_bounds():
+    class Repo:
+        @memoize
+        def load(self, x: int) -> int:
+            return x
+
+    assert "PW011" in codes(doctor(Repo.load))
+    report = doctor(Repo().load)
+    assert report.ok  # a warning, not an error
+    assert [f.code for f in report.findings] == ["PW011"]
+
+
+def test_pw011_stays_quiet_when_bounded_or_instance_safe():
+    class Repo:
+        @memoize(maxsize=10)
+        def a(self, x: int) -> int:
+            return x
+
+        @memoize(ttl=5)
+        def b(self, x: int) -> int:
+            return x
+
+        @memoize(per_instance=True)
+        def c(self, x: int) -> int:
+            return x
+
+        @memoize(key=lambda self, x: x)
+        def d(self, x: int) -> int:
+            return x
+
+        @memoize
+        def not_a_method(x: int) -> int:  # type: ignore[misc]
+            return x
+
+    for name in "abcd":
+        assert "PW011" not in codes(doctor(getattr(Repo, name))), name
+    assert "PW011" not in codes(doctor(Repo.not_a_method))
+
+
+def test_pw011_found_under_other_layers():
+    class Repo:
+        @retry(max_attempts=2, on=ConnectionError, budget=RetryBudget())
+        @timeout(1)
+        @memoize
+        def load(self, x: int) -> int:
+            return x
+
+    assert "PW011" in codes(doctor(Repo.load))
+
+
+def test_pw012_flags_per_process_limits_only_when_multiprocess(tmp_path):
+    from python_wrap import AdaptiveLimiter
+    from python_wrap.local_state import SQLiteBreakerState
+
+    local = policy(
+        name="local",
+        breaker=CircuitBreaker(failure_threshold=3, name="vendor"),
+        bulkhead=Bulkhead(4),
+        limiter=RateLimiter(10, 1, name="vendor"),
+        timeout=timeout(1),
+    )
+    assert "PW012" not in codes(local.explain())
+    report = explain(local, multiprocess=True)
+    flagged = [f for f in report.findings if f.code == "PW012"]
+    assert len(flagged) == 3
+    assert all(f.severity == "warning" for f in flagged)
+    assert report.ok  # warnings only
+    text = str(report)
+    assert "breaker 'vendor'" in text and "limiter 'vendor'" in text and "bulkhead" in text
+
+    state = SQLiteBreakerState(tmp_path / "b.db")
+    try:
+        shared = policy(
+            breaker=CircuitBreaker(failure_threshold=3, name="vendor", backend=state),
+            timeout=timeout(1),
+        )
+        assert "PW012" not in codes(explain(shared, multiprocess=True))
+    finally:
+        state.close()
+
+    adaptive = AdaptiveLimiter(name="pool")
+
+    @adaptive
+    def call() -> int:
+        return 1
+
+    found = doctor(call, multiprocess=True)
+    assert [layer.role for layer in found.layers] == ["adaptive"]
+    assert codes(found) == ["PW012"]
+
+
+def test_pw012_respects_shared_limiter_and_bulkhead_settings():
+    class Window:
+        calls, period = 5, 1.0
+
+        def acquire(self, key=None):
+            return 0.0
+
+    class Backend:
+        def acquire(self, *args, **kwargs):
+            return True
+
+    limiter = RateLimiter(backend=Window(), name="shared")
+    bulkhead = Bulkhead(2, name="pool", backend=Backend())
+    report = explain(policy(limiter=limiter, bulkhead=bulkhead), multiprocess=True)
+    assert "PW012" not in codes(report)
+    assert report.layers[0].settings["shared"] is True
+    assert report.layers[1].settings["shared"] is True
+
+
+def test_cli_doctor_multiprocess(capsys, monkeypatch):
+    module = types.ModuleType("pw_doctor_mp")
+    module.stack = policy(  # type: ignore[attr-defined]
+        breaker=CircuitBreaker(name="x"), timeout=timeout(1)
+    )
+    monkeypatch.setitem(sys.modules, "pw_doctor_mp", module)
+    assert cli(["doctor", "pw_doctor_mp:stack"]) == 0
+    assert "PW012" not in capsys.readouterr().out
+    assert cli(["doctor", "--multiprocess", "pw_doctor_mp:stack"]) == 0
+    assert "WARNING PW012" in capsys.readouterr().out
+    assert cli(["doctor", "--multiprocess", "--strict", "pw_doctor_mp:stack"]) == 1

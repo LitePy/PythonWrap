@@ -68,6 +68,51 @@ Unreleased on `main`; see the [CHANGELOG](https://github.com/LitePy/PythonWrap/b
 The [stable core](https://pythonwrap.readthedocs.io/en/latest/project/stability/) (retry,
 circuit breaker, timeout, policies, presets) is now frozen ahead of 1.0.
 
+## New in 0.4 (beta)
+
+| Need | API |
+| --- | --- |
+| Stop sync work cooperatively when `timeout` fires | `checkpoint()`, `cancel_requested()`, `CancelToken` |
+| State per instance or per key on methods | `throttle`/`debounce`/`rate_limit` with `key=`, `per_instance=` |
+| One computation per cache miss across threads | `memoize(..., singleflight=True)` |
+| Catch risky stacks before production | `doctor` checks PW009 to PW012, `doctor --multiprocess` |
+| Redis windows from async code | `AsyncRedisWindow`, `ThreadedStore` |
+| Buffered writes that survive a crash | `buffered(..., journal=SQLiteJournal(...))`, `replay()` |
+| Reject annotations that cannot be checked | `enforce_types(strict=True)`, TypedDict and Protocol checks |
+
+### Built for AI agents and LLM apps
+
+| Need | API |
+| --- | --- |
+| Retry LLM calls the right way (429/529, Retry-After, never 4xx) | `llm_retry`, `presets.llm_client()` |
+| Cap tokens and dollars per call, user or run | `Budget`, `@budget`, `token_rate_limit` |
+| Fall back across models, cache answers, time out streams | `fallback_models`, `llm_cache`, `stream_timeout` |
+| Make agent tools safe to retry and replay | `@tool`, `ToolPolicy`, approval hook, dry-run |
+| Stop runaway loops | `agent_run(max_steps=, max_seconds=, max_repeats=)` |
+| Trace, redact and replay LLM and tool calls | `traced_llm`, `traced_tool`, `Redactor`, `AuditTape`, `replay` |
+| Test agents in milliseconds | `fake_llm`, `chaos.llm` faults, `fake_clock` |
+| Let coding agents use python-wrap correctly | `llms.txt`, `python -m python_wrap api / recipe / guide / mcp` |
+
+### Works with the SDKs you already use
+
+| SDK | What python-wrap adds |
+| --- | --- |
+| OpenAI and Anthropic Python SDKs | `guard_openai`, `guard_anthropic`: coordinated retries (`no_sdk_retries`), budgets, header-seeded rate limits, `resume_safe` streams, `CacheGuard` |
+| OpenAI Agents SDK | `AgentsGuard`: tool timeouts, idempotency, approval, loop detection that also covers sub-agents |
+| pydantic-ai | `PythonWrapCapability`, `guard_tool`: idempotent tools, a usage bridge into `Budget`, audit hooks |
+| Any agent or MCP host | `EffectLedger` (no double-fired side effects after a crash), `mcp_guard`, `validated()` repair cap, `Cassette` record/replay, `SharedTokenWindow` across workers |
+
+Adapters read the SDKs by shape and are optional; install extras such as
+`pip install --pre "python-wrap[openai]"` only to run the contract tests. Runnable projects
+live in `examples/projects/` and `examples/sdk_adapters/`.
+
+No provider SDK is imported: responses and errors are read by duck typing, so it works with
+any client. See [AI and agents](https://pythonwrap.readthedocs.io/en/latest/features/ai/llm-calls/)
+and the `examples/` folder.
+
+Install the beta with `pip install --pre python-wrap`. See the
+[changelog](https://pythonwrap.readthedocs.io/en/latest/project/changelog/) for details.
+
 ## New in 0.3
 
 The toolkit now includes production integration helpers alongside the existing decorators:

@@ -310,3 +310,30 @@ def test_redis_cache_store_infers_shared_idempotency_lock(redis_client):
     a = idempotent(key="auto", store=RedisStore(redis_client, "auto-idem:", fail_open=False))(body)
     b = idempotent(key="auto", store=RedisStore(redis_client, "auto-idem:", fail_open=False))(body)
     assert a() == b() == 11 and calls == [1]
+
+
+def test_redis_semaphore_enforces_capacity(redis_client):
+    from python_wrap import RedisSemaphore
+
+    backend = RedisSemaphore(redis_client, "sem-cap:")
+    assert backend.acquire("pool", "a", 5, 2)
+    assert backend.acquire("pool", "b", 5, 2)
+    assert not backend.acquire("pool", "c", 5, 2)
+    assert backend.release("pool", "a")
+    assert backend.acquire("pool", "c", 5, 2)
+
+
+def test_redis_checkpoint_and_switch_source_roundtrip(redis_client):
+    from python_wrap import RedisCheckpoint, RedisSource
+
+    checkpoint = RedisCheckpoint(redis_client, "ckpt:job")
+    assert checkpoint.load() == 0
+    checkpoint.save(41)
+    assert RedisCheckpoint(redis_client, "ckpt:job").load() == 41
+
+    source = RedisSource(redis_client, "sw:", default=True)
+    assert source("feature") is True  # missing key falls back to the default
+    redis_client.set("sw:feature", "off")
+    assert source("feature") is False
+    redis_client.set("sw:feature", "on")
+    assert source("feature") is True

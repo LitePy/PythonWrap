@@ -8,6 +8,9 @@ edit_uri: edit/main/docs/
 copyright: Copyright &copy; 2026 Mahmoud Ahmed &middot; MIT licence
 
 strict: true
+# Copy-paste rule files for coding agents: served as files, not part of the nav.
+not_in_nav: |
+  /agents/
 validation:
   links:
     anchors: warn
@@ -200,6 +203,15 @@ nav:
       - Configuration: features/configuration.md
       - Dynamic switches: features/switches.md
       - Web helpers: features/web-helpers.md
+  - AI & agents:
+      - LLM calls: features/ai/llm-calls.md
+      - OpenAI and Anthropic SDK clients: features/ai/openai-anthropic.md
+      - Testing agents: features/ai/testing-agents.md
+      - Shared limits and cassettes: features/ai/shared-limits-and-cassettes.md
+      - AI observability and audit: features/ai/observability.md
+      - Agent tool safety: features/ai/agent-safety.md
+      - Agent frameworks and MCP: features/ai/agent-frameworks.md
+      - Agent-friendly tooling: features/ai/agent-friendly.md
   - Testing:
       - testing/index.md
       - Chaos and fault injection: testing/chaos.md
@@ -215,6 +227,11 @@ nav:
       - Observability: cookbook/observability.md
       - Framework integrations: cookbook/framework-integrations.md
       - Existing FastAPI application: cookbook/existing-fastapi-app.md
+      - Resilient LLM client: cookbook/resilient-llm-client.md
+      - Agent tool layer: cookbook/agent-tool-layer.md
+      - Around the real SDKs: cookbook/sdk-adapters.md
+      - Building with AI coding agents: cookbook/building-with-agents.md
+      - Example projects: cookbook/example-projects.md
   - API reference:
       - api/index.md
       - Resilience:
@@ -224,6 +241,7 @@ nav:
           - Hedging: api/hedging.md
           - Policies: api/policy.md
           - Named registry: api/policies.md
+          - LLM calls: api/llm.md
           - Presets: api/presets.md
           - Doctor: api/doctor.md
           - Predicates: api/predicates.md
@@ -267,6 +285,9 @@ nav:
       - Configuration: api/config.md
       - Developer tools: api/devtools.md
       - Switches: api/switches.md
+      - AI & agents:
+          - Agents: api/agents.md
+          - SDK adapters: api/adapters.md
       - Framework adapters:
           - Flask: api/flask.md
           - FastAPI and ASGI: api/fastapi.md
@@ -275,7 +296,14 @@ nav:
           - Web helpers: api/web.md
       - Testing helpers: api/testing.md
       - Chaos: api/chaos.md
+      - LLM testing: api/llm_testing.md
+      - LLM shared limits: api/llm_shared.md
+      - LLM validated output: api/llm_validate.md
+      - LLM cassettes: api/llm_cassette.md
+      - LLM HTTP chaos: api/llm_http_chaos.md
       - Migration tool: api/migrate.md
+      - API index and recipes: api/introspect.md
+      - MCP server: api/mcp.md
       - Errors: api/errors.md
   - Project:
       - Performance: project/performance.md

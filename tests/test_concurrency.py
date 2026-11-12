@@ -2026,3 +2026,179 @@ def test_cleanup_grace_decorator_outer_cancel_during_grace_consumes_child() -> N
     asyncio.run(main())
     gc.collect()
     assert unhandled == []
+
+
+# -- cooperative cancellation and SIGALRM conflicts ----------------------------------------
+
+import signal as _signal  # noqa: E402
+import threading as _threading  # noqa: E402
+import warnings as _warnings  # noqa: E402
+
+from python_wrap import (  # noqa: E402
+    CancelToken,
+    SignalTimerConflictWarning,
+    cancel_requested,
+    checkpoint,
+    current_token,
+)
+
+
+def test_cancel_helpers_outside_timeout_are_inert():
+    assert current_token() is None
+    assert cancel_requested() is False
+    checkpoint()
+
+
+def test_token_is_set_inside_timeout_and_cleared_after():
+    seen: list[CancelToken | None] = []
+
+    @timeout(5)
+    def work() -> None:
+        seen.append(current_token())
+        assert not cancel_requested()
+        checkpoint()
+
+    work()
+    assert isinstance(seen[0], CancelToken)
+    assert current_token() is None
+
+
+def test_thread_fallback_worker_sees_cancel_and_stops_at_checkpoint():
+    stopped = _threading.Event()
+    started = _threading.Event()
+
+    @timeout(0.05, use_signals=False)
+    def work() -> None:
+        started.set()
+        try:
+            while True:
+                checkpoint()
+                time.sleep(0.005)
+        except TimeoutExpired:
+            stopped.set()
+            raise
+
+    with pytest.raises(TimeoutExpired):
+        work()
+    assert stopped.wait(2), "the abandoned worker should stop itself at checkpoint()"
+
+
+def test_signal_timeout_cancels_token_even_if_exception_swallowed():
+    if not hasattr(_signal, "setitimer"):
+        pytest.skip("needs SIGALRM")
+    flags: list[bool] = []
+
+    @timeout(0.05, use_signals=True)
+    def work() -> None:
+        try:
+            time.sleep(1)
+        except TimeoutExpired:
+            flags.append(cancel_requested())
+
+    work()
+    assert flags == [True]
+
+
+def test_nested_token_reports_outer_cancel():
+    outer = CancelToken("outer", 1.0)
+    inner = CancelToken("inner", 1.0, outer)
+    assert not inner.cancelled
+    outer.cancel()
+    assert inner.cancelled
+    with pytest.raises(TimeoutExpired):
+        inner.raise_if_cancelled()
+    assert CancelToken().wait(0) is False
+
+
+def test_block_timeout_sets_token():
+    if not hasattr(_signal, "setitimer"):
+        pytest.skip("needs SIGALRM")
+    with timeout(5):
+        assert current_token() is not None
+    assert current_token() is None
+
+
+def test_existing_sigalrm_handler_warns_and_is_restored():
+    if not hasattr(_signal, "setitimer"):
+        pytest.skip("needs SIGALRM")
+
+    def other(signum, frame):  # pragma: no cover - never fires
+        pass
+
+    old = _signal.signal(_signal.SIGALRM, other)
+    try:
+        with pytest.warns(SignalTimerConflictWarning, match="already installed"):
+            timeout(5)(lambda: None)()
+        assert _signal.getsignal(_signal.SIGALRM) is other
+    finally:
+        _signal.signal(_signal.SIGALRM, old)
+
+
+def test_active_itimer_warns():
+    if not hasattr(_signal, "setitimer"):
+        pytest.skip("needs SIGALRM")
+    old = _signal.signal(_signal.SIGALRM, _signal.SIG_DFL)
+    _signal.setitimer(_signal.ITIMER_REAL, 30)
+    try:
+        with pytest.warns(SignalTimerConflictWarning, match="already armed"):
+            timeout(5)(lambda: None)()
+    finally:
+        _signal.setitimer(_signal.ITIMER_REAL, 0)
+        _signal.signal(_signal.SIGALRM, old)
+
+
+def test_nested_timeouts_do_not_warn():
+    if not hasattr(_signal, "setitimer"):
+        pytest.skip("needs SIGALRM")
+
+    @timeout(5)
+    def inner() -> int:
+        return 1
+
+    with _warnings.catch_warnings():
+        _warnings.simplefilter("error", SignalTimerConflictWarning)
+        with timeout(10):
+            assert inner() == 1
+
+
+def test_timeout_non_main_thread_deadline_is_prompt_and_work_continues():
+    """The documented non-main-thread path: caller released at the deadline, work goes on."""
+    import contextvars
+
+    var: contextvars.ContextVar[str] = contextvars.ContextVar("pw_var", default="unset")
+    release = threading.Event()
+    seen: list[str] = []
+    ran_in: list[str] = []
+
+    @timeout(0.05)
+    def slow():
+        ran_in.append(threading.current_thread().name)
+        release.wait(2)
+        seen.append(var.get())
+
+    def caller():
+        var.set("caller-value")
+        start = time.monotonic()
+        try:
+            slow()
+        except TimeoutExpired:
+            return time.monotonic() - start
+        raise AssertionError("expected TimeoutExpired")
+
+    elapsed = run_in_thread(caller)().result(timeout=2)
+    assert 0.04 <= elapsed < 1.0
+    assert seen == []  # still running when the caller was released
+    release.set()
+    deadline = time.monotonic() + 2
+    while not seen and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert seen == ["caller-value"]  # it finished later, with the caller's contextvars
+    assert ran_in[0].startswith("timeout-worker-")
+
+
+def test_timeout_block_form_refused_off_main_thread():
+    def use_block():
+        with timeout(1):
+            pass
+
+    assert isinstance(run_in_thread(use_block)().exception(timeout=2), RuntimeError)

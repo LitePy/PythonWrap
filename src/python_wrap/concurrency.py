@@ -27,6 +27,7 @@ import signal
 import sys
 import threading
 import time
+import warnings
 import weakref
 from collections import deque
 from collections.abc import Awaitable, Callable, Coroutine, Hashable, Iterable
@@ -51,10 +52,15 @@ from python_wrap.errors import RateLimitExceeded, TimeoutExpired
 
 __all__ = [
     "AsyncDebounced",
+    "CancelToken",
     "Debounced",
     "Limit",
     "RateLimiter",
+    "SignalTimerConflictWarning",
     "Timeout",
+    "cancel_requested",
+    "checkpoint",
+    "current_token",
     "debounce",
     "limiter_of",
     "rate_limit",
@@ -67,6 +73,146 @@ __all__ = [
 T = TypeVar("T")
 R_co = TypeVar("R_co", covariant=True)
 P2 = ParamSpec("P2")
+S = TypeVar("S")
+
+_SWEEP_BUCKETS_EVERY = 1024
+
+
+class _Buckets(Generic[S]):
+    """Decorator state split by ``key(*args, **kwargs)`` and/or by the instance (``args[0]``).
+
+    With neither ``key`` nor ``per_instance`` there is a single state, so the decorator
+    behaves as it always did. With ``per_instance`` each instance gets its own states,
+    found by identity through a weak reference: instances need not be hashable, are not
+    kept alive, and their state goes with them. Keyed states for which ``idle(state)`` is
+    true are dropped every ``_SWEEP_BUCKETS_EVERY`` lookups, so the keys cannot pile up.
+    """
+
+    def __init__(
+        self,
+        factory: Callable[[], S],
+        *,
+        key: Callable[..., Hashable] | None = None,
+        per_instance: bool = False,
+        idle: Callable[[S], bool] | None = None,
+        what: str = "decorator",
+    ) -> None:
+        self._factory = factory
+        self._key = key
+        self._per_instance = per_instance
+        self._idle = idle
+        self._what = what
+        self._lock = _fork.ForkSafeLock()
+        self._plain: dict[Hashable, S] = {}
+        # per_instance: id(instance) -> (weak reference, that instance's keyed states)
+        self._instances: dict[int, tuple[weakref.ref[Any], dict[Hashable, S]]] = {}
+        self._lookups = 0
+        _fork.register(self)
+
+    def _reset_after_fork(self) -> None:
+        self._plain.clear()
+        self._instances.clear()
+        self._lookups = 0
+
+    def _scope(self, args: tuple[Any, ...]) -> dict[Hashable, S]:
+        if not self._per_instance:
+            return self._plain
+        if not args:
+            raise TypeError(
+                f"{self._what}(per_instance=True): call the function with the instance "
+                "as its first positional argument"
+            )
+        obj = args[0]
+        i = id(obj)
+        slot = self._instances.get(i)
+        if slot is not None and slot[0]() is obj:
+            return slot[1]
+
+        def forget(ref: weakref.ref[Any], i: int = i) -> None:
+            # Runs while the instance is destroyed, maybe in a thread holding the lock:
+            # no locking here (dict operations are atomic). The id cannot be reused
+            # before this callback has run.
+            current = self._instances.get(i)
+            if current is not None and current[0] is ref:
+                self._instances.pop(i, None)
+
+        try:
+            ref = weakref.ref(obj, forget)
+        except TypeError:
+            raise TypeError(
+                f"{self._what}(per_instance=True) needs weak-referenceable instances, but "
+                f"{type(obj).__name__!r} is not (a __slots__ class must also list "
+                "'__weakref__')"
+            ) from None
+        with self._lock:
+            slot = self._instances.get(i)
+            if slot is not None and slot[0]() is obj:
+                return slot[1]
+            states: dict[Hashable, S] = {}
+            self._instances[i] = (ref, states)
+        return states
+
+    def get(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> S:
+        """The state for this call, created on first use."""
+        k = None if self._key is None else self._key(*args, **kwargs)
+        scope = self._scope(args)
+        with self._lock:
+            state = scope.get(k)
+            if state is None:
+                state = scope[k] = self._factory()
+            if self._key is not None and self._idle is not None:
+                self._lookups += 1
+                if self._lookups >= _SWEEP_BUCKETS_EVERY:
+                    self._sweep()
+            return state
+
+    def _sweep(self) -> None:
+        # Caller holds the lock.
+        self._lookups = 0
+        idle = self._idle
+        assert idle is not None
+        scopes = (
+            [self._plain] if not self._per_instance else [s for _, s in self._instances.values()]
+        )
+        for scope in scopes:
+            for k in [k for k, state in scope.items() if idle(state)]:
+                del scope[k]
+
+    def states(self) -> list[S]:
+        """Every live state (a snapshot)."""
+        with self._lock:
+            scopes = (
+                [self._plain]
+                if not self._per_instance
+                else [s for ref, s in self._instances.values() if ref() is not None]
+            )
+            return [state for scope in scopes for state in scope.values()]
+
+    def find(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> S | None:
+        """The existing state for these call arguments, or ``None`` (never creates one)."""
+        k = None if self._key is None else self._key(*args, **kwargs)
+        if self._per_instance:
+            if not args:
+                return None
+            slot = self._instances.get(id(args[0]))
+            if slot is None or slot[0]() is not args[0]:
+                return None
+            scope = slot[1]
+        else:
+            scope = self._plain
+        with self._lock:
+            return scope.get(k)
+
+    @property
+    def selective(self) -> bool:
+        """True when ``cancel``/``flush`` need the call's arguments to pick a state."""
+        return self._key is not None or self._per_instance
+
+    def clear(self) -> None:
+        with self._lock:
+            self._plain.clear()
+            self._instances.clear()
+
 
 # ---------------------------------------------------------------------------------------
 # timeout
@@ -90,6 +236,148 @@ def _expired(label: str, seconds: float) -> TimeoutExpired:
     return TimeoutExpired(_timeout_message(label, seconds), seconds=seconds)
 
 
+class SignalTimerConflictWarning(RuntimeWarning):
+    """`timeout` is about to take over ``SIGALRM`` that something else already uses.
+
+    Signal timers are process-wide: a non-default ``SIGALRM`` handler or an armed
+    ``ITIMER_REAL`` timer belongs to other code (a profiler, a watchdog, another
+    library). `timeout` restores both afterwards, but while it runs the other code's
+    alarm may be delayed or fire into the timeout's handler. Pass ``use_signals=False`` to
+    use the worker-thread fallback, or silence it with `warnings.filterwarnings`.
+    """
+
+
+class CancelToken:
+    """A flag a sync function can poll to learn that its `timeout` has fired.
+
+    `timeout` cannot stop a sync function off the main thread (or where ``SIGALRM`` is
+    missing): the caller gets `TimeoutExpired` but the function keeps running. Inside a
+    `timeout`-wrapped sync function the current token is cancelled when the limit is hit,
+    so the function can stop itself at safe points with `checkpoint` or `cancel_requested`.
+    A token also reports cancelled when the token of an enclosing `timeout` is.
+
+    Attributes:
+        cancelled: True once `cancel` was called (on this token or an enclosing one).
+
+    Example:
+        ```python
+        from python_wrap import checkpoint, timeout
+
+        @timeout(5)
+        def import_rows(rows: list[int]) -> int:
+            done = 0
+            for _ in rows:
+                checkpoint()  # raises TimeoutExpired once the 5 s are over
+                done += 1
+            return done
+        ```
+    """
+
+    __slots__ = ("_event", "_parent", "label", "seconds")
+
+    def __init__(
+        self, label: str = "", seconds: float = 0.0, parent: CancelToken | None = None
+    ) -> None:
+        self.label = label
+        self.seconds = seconds
+        self._parent = parent
+        self._event = threading.Event()
+
+    def cancel(self) -> None:
+        """Mark the token cancelled (what `timeout` does when its limit is hit)."""
+        self._event.set()
+
+    @property
+    def cancelled(self) -> bool:
+        token: CancelToken | None = self
+        while token is not None:
+            if token._event.is_set():
+                return True
+            token = token._parent
+        return False
+
+    def wait(self, timeout: float | None = None) -> bool:
+        """Sleep up to ``timeout`` seconds, waking early when cancelled; True if cancelled.
+
+        Only this token's own cancellation wakes the sleep early; an enclosing token's
+        cancellation is seen after the sleep.
+        """
+        self._event.wait(timeout)
+        return self.cancelled
+
+    def raise_if_cancelled(self) -> None:
+        """Raise `TimeoutExpired` if the token is cancelled."""
+        token: CancelToken | None = self
+        while token is not None:
+            if token._event.is_set():
+                raise TimeoutExpired(
+                    _timeout_message(token.label or _BLOCK, token.seconds), seconds=token.seconds
+                )
+            token = token._parent
+
+    def __repr__(self) -> str:
+        return f"CancelToken(cancelled={self.cancelled!r})"
+
+
+_current_token: contextvars.ContextVar[CancelToken | None] = contextvars.ContextVar(
+    "python_wrap_cancel_token", default=None
+)
+
+
+def current_token() -> CancelToken | None:
+    """The `CancelToken` of the innermost sync `timeout` running here, or None."""
+    return _current_token.get()
+
+
+def cancel_requested() -> bool:
+    """True if the enclosing sync `timeout` has fired (False outside any `timeout`).
+
+    Poll it in long loops of a sync function to stop work that `timeout` cannot
+    interrupt (worker-thread fallback, Windows). The worker-thread fallback copies the
+    caller's context, so the token is visible there.
+    """
+    token = _current_token.get()
+    return token is not None and token.cancelled
+
+
+def checkpoint() -> None:
+    """Raise `TimeoutExpired` if the enclosing sync `timeout` has fired; else do nothing.
+
+    A cooperative stop point: call it between units of work so the function ends soon
+    after the limit instead of running on in the background.
+    """
+    token = _current_token.get()
+    if token is not None:
+        token.raise_if_cancelled()
+
+
+def _foreign_alarm(previous_handler: Any, previous_delay: float) -> str | None:
+    """Describe a ``SIGALRM`` user other than python-wrap, or None if there is none."""
+    if getattr(previous_handler, "__python_wrap_alarm__", False):
+        return None
+    if previous_handler not in (signal.SIG_DFL, None):
+        return f"a SIGALRM handler is already installed ({previous_handler!r})"
+    if previous_delay:
+        return f"an ITIMER_REAL timer is already armed ({previous_delay:g}s left)"
+    return None
+
+
+def foreign_alarm_state() -> str | None:
+    """Describe an existing non-default ``SIGALRM`` handler or armed timer, if any.
+
+    Used by `doctor` (PW010) and by `timeout` before it installs its own handler.
+    Returns None where signals are unavailable or nothing foreign is in place.
+    """
+    if not _HAS_SETITIMER:
+        return None
+    try:
+        handler = signal.getsignal(signal.SIGALRM)
+        delay = signal.getitimer(signal.ITIMER_REAL)[0]
+    except (ValueError, OSError):  # pragma: no cover - platform quirk
+        return None
+    return _foreign_alarm(handler, delay)
+
+
 class _Alarm:
     """One SIGALRM/``setitimer`` deadline, cooperating with enclosing ones.
 
@@ -103,6 +391,8 @@ class _Alarm:
         self.label = label
         self.seconds = seconds
         self.error: TimeoutExpired | None = None  # built only when the alarm fires
+        self.token = CancelToken(label, seconds, _current_token.get())
+        self._token_reset: contextvars.Token[CancelToken | None] | None = None
         self._outer_fired = False
         # The enclosing timer's delay; None until known (our timer is not armed yet).
         self._previous_delay: float | None = None
@@ -120,6 +410,7 @@ class _Alarm:
             if previous_delay is not None and (
                 not previous_delay or time.monotonic() >= deadline - 1e-3
             ):
+                self.token.cancel()
                 self.error = TimeoutExpired(
                     _timeout_message(self.label, self.seconds), seconds=self.seconds
                 )
@@ -131,8 +422,19 @@ class _Alarm:
             if callable(previous_handler):
                 previous_handler(signum, frame)
 
+        handler.__python_wrap_alarm__ = True  # type: ignore[attr-defined]
         signal.signal(signal.SIGALRM, handler)
         previous_delay, self._previous_interval = signal.setitimer(signal.ITIMER_REAL, self.seconds)
+        self._token_reset = _current_token.set(self.token)
+        foreign = _foreign_alarm(previous_handler, previous_delay)
+        if foreign is not None:
+            warnings.warn(
+                f"timeout({self.seconds:g}s) for {self.label} takes over SIGALRM but {foreign}; "
+                "signal timers are process-wide, so the other alarm may be delayed or "
+                "misrouted while this runs (use_signals=False avoids signals)",
+                SignalTimerConflictWarning,
+                stacklevel=3,
+            )
         if previous_delay and previous_delay < self.seconds:
             # An enclosing timer is due first: keep its deadline.
             signal.setitimer(signal.ITIMER_REAL, previous_delay)
@@ -145,6 +447,9 @@ class _Alarm:
         tb: TracebackType | None,
     ) -> None:
         signal.setitimer(signal.ITIMER_REAL, 0)
+        if self._token_reset is not None:
+            _current_token.reset(self._token_reset)
+            self._token_reset = None
         if not self._outer_fired:
             signal.signal(signal.SIGALRM, self._previous_handler)
             if self._previous_delay:
@@ -262,13 +567,19 @@ def _call_in_worker(
     func: Callable[P, R], label: str, seconds: float, *args: P.args, **kwargs: P.kwargs
 ) -> R:
     """Run ``func`` in a pooled daemon thread and stop waiting for it after ``seconds``."""
-    job = _Job(func, args, kwargs)
+    token = CancelToken(label, seconds, _current_token.get())
+    reset = _current_token.set(token)
+    try:
+        job = _Job(func, args, kwargs)  # copies the context, token included
+    finally:
+        _current_token.reset(reset)
     # Real time, like the wait itself: a fake clock advanced by sleeps inside the call
     # (e.g. a retry) must not turn a quick call into a late one.
     start = time.monotonic()
     _workers.submit(job)
     if not job.done.acquire(timeout=seconds):
         _workers.abandon(job)
+        token.cancel()
         raise _expired(label, seconds) from None
     if job.finished - start > seconds:
         # The wait overslept (seen with free-threaded builds) and the call finished
@@ -550,7 +861,10 @@ class Timeout:
                     return func(*args, **kwargs)
             return _call_in_worker(func, label, seconds, *args, **kwargs)
 
-        wrapper.__python_wrap_layer__ = ("timeout", self)  # type: ignore[attr-defined]
+        wrapper.__python_wrap_layer__ = (  # type: ignore[attr-defined]
+            "timeout",
+            {"seconds": self.seconds, "use_signals": self.use_signals, "sync": True},
+        )
         return cast(F, wrapper)
 
     # -- sync context manager -----------------------------------------------------------
@@ -648,10 +962,19 @@ def timeout(
       ``use_signals=False``): the call runs in a daemon worker thread and the caller stops
       waiting at the deadline. **This fallback cannot stop the work** — the function keeps
       running in the background until it returns on its own, and its result is discarded.
+      Side effects may therefore continue after `TimeoutExpired`. To make the function
+      stop itself, poll `cancel_requested()` or call `checkpoint()` (which raises
+      `TimeoutExpired`) in long loops: the call's `CancelToken` is cancelled when the
+      limit is hit (with signals too, if the code swallowed the exception).
       Workers are pooled daemon threads: an idle one is reused for the next call (at most
       8 are kept idle, each exits after about 5 s without work), a worker whose call timed
       out is abandoned and never reused, and the caller's ``contextvars`` are copied into
       the worker on every call.
+
+    Signals are process-wide. If a non-default ``SIGALRM`` handler or an armed
+    ``ITIMER_REAL`` timer already exists when the signal strategy starts, a
+    `SignalTimerConflictWarning` is emitted (both are restored afterwards); `doctor`
+    reports it as PW010.
 
     Inside a `python_wrap.deadline.deadline` block the limit is clamped to the time the
     deadline has left; if the deadline has already passed, the call (or block) is not
@@ -867,6 +1190,9 @@ class RateLimiter:
         block: What the decorator and ``with`` do when over the limit: ``False``
             (default) raises `RateLimitExceeded`, ``True`` waits for a slot.
         name: Label for error messages and events.
+        backend: A shared window such as `python_wrap.quotas.RedisWindow` (called in a
+            worker thread from async code) or `python_wrap.quotas.AsyncRedisWindow`
+            (awaited on the event loop; such a limiter only works in ``async def`` code).
 
     Raises:
         TypeError: If no limit is given, or only one of ``calls`` and ``period``.
@@ -910,6 +1236,8 @@ class RateLimiter:
         if backend is not None and calls is None and limits is None:
             calls, period = backend.calls, backend.period
         self._backend = backend
+        # A backend whose acquire() is a coroutine (redis.asyncio) is awaited directly.
+        self._async_backend = backend is not None and _core.is_async(backend.acquire)
         self.limits = _limits(calls, period, limits)
         if backend is not None and self.limits != ((backend.calls, backend.period),):
             raise ValueError("limiter limits must match its backend's calls and period")
@@ -943,6 +1271,11 @@ class RateLimiter:
         """Take a slot in a thread. ``strict`` raises on rejection instead of returning False."""
         if _core.overrides.disable_rate_limits:
             return True
+        if self._async_backend:
+            raise TypeError(
+                f"{label}: this limiter has an async backend; use it from async def code "
+                "(acquire_async, async with, or an async decorated function)"
+            )
         wait = self._window.acquire(key)
         if wait <= 0:
             return True
@@ -968,17 +1301,20 @@ class RateLimiter:
         _core.emit("rate_limit.waited", label, seconds=_core.monotonic() - start)
         return True
 
+    async def _aacquire(self, key: Hashable) -> float:
+        if self._async_backend:
+            return float(await self._window.acquire(key))
+        if self._backend is not None:
+            return float(await asyncio.to_thread(self._window.acquire, key))
+        return float(self._window.acquire(key))
+
     async def _atake(
         self, key: Hashable, label: str, *, block: bool, timeout: float | None, strict: bool
     ) -> bool:
         """`_take` for coroutines: waits with ``await``."""
         if _core.overrides.disable_rate_limits:
             return True
-        wait = (
-            await asyncio.to_thread(self._window.acquire, key)
-            if self._backend is not None
-            else self._window.acquire(key)
-        )
+        wait = await self._aacquire(key)
         if wait <= 0:
             return True
         if not block:
@@ -994,13 +1330,9 @@ class RateLimiter:
             await _core.async_sleep(wait)
             if _core.overrides.disable_rate_limits:
                 break
-            wait = (
-                await asyncio.to_thread(self._window.acquire, key)
-                if self._backend is not None
-                else self._window.acquire(key)
-            )
+            wait = await self._aacquire(key)
             if wait > 0 and _core.overrides.no_sleep:
-                if self._backend is not None:
+                if self._backend is not None and not self._async_backend:
                     await asyncio.to_thread(self._window.admit, key)
                 else:
                     self._window.admit(key)
@@ -1018,8 +1350,11 @@ class RateLimiter:
 
         Meant for tests: share one `RateLimiter` (or reach a `rate_limit` limiter with
         `limiter_of`) and reset it between tests. Thread-safe; calls waiting for a slot
-        re-check and may then go through.
+        re-check and may then go through. With an async backend, ``await
+        backend.clear()`` instead.
         """
+        if self._async_backend:
+            raise TypeError("this limiter has an async backend; await backend.clear() instead")
         self._window.clear()
 
     def try_acquire(self) -> bool:
@@ -1088,34 +1423,55 @@ class RateLimiter:
         """Count every call of ``func`` against this limiter (sync or ``async def``)."""
         return self._wrap(func, None)
 
-    def _wrap(self, func: F, key: Callable[..., Hashable] | None) -> F:
+    def _wrap(
+        self,
+        func: F,
+        key: Callable[..., Hashable] | None,
+        instances: _Buckets[RateLimiter] | None = None,
+    ) -> F:
         label = self.name or _core.qualname(func)
         block = self.block
+
+        def pick(args: tuple[Any, ...], kwargs: dict[str, Any]) -> RateLimiter:
+            return self if instances is None else instances.get(args, kwargs)
+
+        def for_instance(instance: object) -> RateLimiter | None:
+            if instances is None:
+                return self
+            return instances.find((instance,), {})
 
         if _core.is_async(func):
 
             @functools.wraps(func)
             async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
                 k = None if key is None else key(*args, **kwargs)
-                await self._atake(k, label, block=block, timeout=None, strict=True)
+                await pick(args, kwargs)._atake(k, label, block=block, timeout=None, strict=True)
                 return await func(*args, **kwargs)
 
             async_wrapper.__rate_limiter__ = self  # type: ignore[attr-defined]
+            async_wrapper.__rate_limiter_for__ = for_instance  # type: ignore[attr-defined]
             async_wrapper.__python_wrap_layer__ = ("limiter", self)  # type: ignore[attr-defined]
             return cast(F, async_wrapper)
+
+        if self._async_backend:
+            raise TypeError(
+                f"{label} is synchronous but this limiter has an async backend; "
+                "use RedisWindow for synchronous code"
+            )
 
         @functools.wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
             k = None if key is None else key(*args, **kwargs)
-            self._take(k, label, block=block, timeout=None, strict=True)
+            pick(args, kwargs)._take(k, label, block=block, timeout=None, strict=True)
             return func(*args, **kwargs)
 
         wrapper.__rate_limiter__ = self  # type: ignore[attr-defined]
+        wrapper.__rate_limiter_for__ = for_instance  # type: ignore[attr-defined]
         wrapper.__python_wrap_layer__ = ("limiter", self)  # type: ignore[attr-defined]
         return cast(F, wrapper)
 
 
-def limiter_of(func: Callable[..., Any], /) -> RateLimiter | None:
+def limiter_of(func: Callable[..., Any], /, instance: object = None) -> RateLimiter | None:
     """The `RateLimiter` behind a function decorated with `rate_limit` (or a limiter).
 
     `rate_limit` keeps the decorated function's exact type, so its limiter is reached
@@ -1124,9 +1480,14 @@ def limiter_of(func: Callable[..., Any], /) -> RateLimiter | None:
 
     Args:
         func: A function decorated with `rate_limit` or with a `RateLimiter`.
+        instance: For a method decorated with ``rate_limit(..., per_instance=True)``, the
+            instance whose limiter to return (there is one per instance; without
+            ``instance`` the result is the shared template, which is never used for
+            calls). Ignored otherwise.
 
     Returns:
-        Its limiter (the outermost one, if several), or `None` if it has none.
+        Its limiter (the outermost one, if several), or `None` if it has none (or, with
+        ``instance``, if that instance has not called the method yet).
 
     Example:
         ```python
@@ -1144,7 +1505,14 @@ def limiter_of(func: Callable[..., Any], /) -> RateLimiter | None:
         ```
     """
     limiter = getattr(func, "__rate_limiter__", None)
-    return limiter if isinstance(limiter, RateLimiter) else None
+    if not isinstance(limiter, RateLimiter):
+        return None
+    if instance is not None:
+        for_instance = getattr(func, "__rate_limiter_for__", None)
+        if callable(for_instance):
+            found = for_instance(instance)
+            return found if isinstance(found, RateLimiter) else None
+    return limiter
 
 
 def rate_limit(
@@ -1154,6 +1522,7 @@ def rate_limit(
     block: bool = False,
     key: Callable[..., Hashable] | None = None,
     limits: Iterable[Limit] | None = None,
+    per_instance: bool = False,
 ) -> Callable[[F], F]:
     """Allow at most ``calls`` calls per ``period`` seconds.
 
@@ -1161,7 +1530,8 @@ def rate_limit(
     in the last ``period`` seconds. Unlike a fixed window, this never lets a burst of
     ``2 * calls`` through at a window boundary. Rejected (or waiting) calls are not
     counted. The limiter is thread-safe and is shared by every caller of the decorated
-    function — including every instance, for methods — unless ``key`` splits it.
+    function — including every instance, for methods — unless ``key`` or ``per_instance``
+    splits it.
 
     Each decorated function gets its own `RateLimiter`, reachable with
     ``limiter_of(func)`` (e.g. to ``.reset()`` it between tests). To share one budget
@@ -1181,12 +1551,17 @@ def rate_limit(
             methods) that returns a hashable bucket key, e.g. a user id. Each key gets
             its own limit.
         limits: Further ``(calls, period)`` pairs, alone or on top of ``calls``/``period``.
+        per_instance: For methods: give every instance its own limiter (found by identity
+            through a weak reference, so instances stay collectable and need not be
+            hashable). Reach one with ``limiter_of(obj.method, instance=obj)``. Instances
+            must be weak-referenceable (a ``__slots__`` class must list ``'__weakref__'``).
 
     Returns:
         A decorator that preserves the wrapped function's signature.
 
     Raises:
-        TypeError: If no limit is given, or only one of ``calls`` and ``period``.
+        TypeError: If no limit is given, or only one of ``calls`` and ``period``. At call
+            time with ``per_instance``, an instance that cannot be weakly referenced.
         ValueError: If ``calls < 1`` or ``period <= 0`` (for any limit).
         RateLimitExceeded: From the wrapped call when over the limit and ``block`` is
             false. Its ``retry_after`` attribute says how many seconds until a slot frees.
@@ -1200,7 +1575,15 @@ def rate_limit(
     all_limits = _limits(calls, period, limits)
 
     def decorate(func: F) -> F:
-        return RateLimiter(limits=all_limits, block=block)._wrap(func, key)
+        limiter = RateLimiter(limits=all_limits, block=block)
+        if not per_instance:
+            return limiter._wrap(func, key)
+        instances = _Buckets(
+            lambda: RateLimiter(limits=all_limits, block=block),
+            per_instance=True,
+            what="rate_limit",
+        )
+        return limiter._wrap(func, key, instances)
 
     return decorate
 
@@ -1308,7 +1691,22 @@ class _ThrottleDecorator(Protocol):
     def __call__(self, func: Callable[P, T], /) -> Callable[P, T | None]: ...
 
 
-def throttle(interval: float) -> _ThrottleDecorator:
+class _ThrottleState:
+    """One throttle window: when the last run started and what the last run returned."""
+
+    __slots__ = ("last_result", "last_start")
+
+    def __init__(self) -> None:
+        self.last_start: float | None = None
+        self.last_result: Any = None
+
+
+def throttle(
+    interval: float,
+    *,
+    key: Callable[..., Hashable] | None = None,
+    per_instance: bool = False,
+) -> _ThrottleDecorator:
     """Run the function at most once per ``interval`` seconds.
 
     The first call runs and opens a window of ``interval`` seconds (measured from when
@@ -1320,66 +1718,86 @@ def throttle(interval: float) -> _ThrottleDecorator:
     itself runs outside the lock, so a slow call does not block skipped callers.
     ``async def`` functions get the same semantics with an ``async`` wrapper.
 
+    The window belongs to the decorated function, so on a method every instance shares
+    it. ``key`` gives each key its own window and ``per_instance`` gives each instance
+    its own; they combine (a window per instance and key).
+
     Args:
         interval: Minimum seconds between runs; must be positive.
+        key: Optional function called with the call's arguments (including ``self`` for
+            methods) that returns a hashable key, e.g. a user id; each key has its own
+            window, like ``key=`` on `rate_limit`. Windows that have run out are dropped
+            now and then, so keys do not pile up.
+        per_instance: For methods: one window per instance, found by identity through a
+            weak reference, so instances stay collectable and need not be hashable. They
+            must be weak-referenceable (a ``__slots__`` class must list ``'__weakref__'``).
 
     Returns:
         A decorator; the wrapped function returns ``R | None``.
 
     Raises:
         ValueError: If ``interval`` is not positive.
+        TypeError: At call time with ``per_instance``, for an instance that cannot be
+            weakly referenced.
 
     Example:
         >>> @throttle(1.0)
         ... def refresh() -> str:
         ...     return "fresh"
+        >>> class Sensor:
+        ...     @throttle(1.0, per_instance=True)
+        ...     def read(self) -> str: ...
     """
     if interval <= 0:
         raise ValueError(f"throttle interval must be positive, got {interval!r}")
 
     def decorate(func: Callable[..., Any]) -> Callable[..., Any]:
         lock = _fork.ForkSafeLock()
-        last_start: float | None = None
-        last_result: Any = None
+        buckets = _Buckets(
+            _ThrottleState,
+            key=key,
+            per_instance=per_instance,
+            idle=lambda st: st.last_start is None or _core.monotonic() - st.last_start >= interval,
+            what="throttle",
+        )
 
         name = _core.qualname(func)
 
-        def should_run() -> tuple[bool, Any]:
-            nonlocal last_start
+        def should_run(args: tuple[Any, ...], kwargs: dict[str, Any]) -> tuple[Any, bool, Any]:
+            state = buckets.get(args, kwargs)
             if _core.overrides.disable_rate_limits:
-                return True, None
+                return state, True, None
             now = _core.monotonic()
             with lock:
-                if last_start is None or now - last_start >= interval:
-                    last_start = now
-                    return True, None
-                previous = last_result
+                if state.last_start is None or now - state.last_start >= interval:
+                    state.last_start = now
+                    return state, True, None
+                previous = state.last_result
             _core.emit("throttle.skipped", name)
-            return False, previous
+            return state, False, previous
 
-        def store(result: Any) -> Any:
-            nonlocal last_result
+        def store(state: _ThrottleState, result: Any) -> Any:
             with lock:
-                last_result = result
+                state.last_result = result
             return result
 
         if _core.is_async(func):
 
             @functools.wraps(func)
             async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
-                run, previous = should_run()
+                state, run, previous = should_run(args, kwargs)
                 if not run:
                     return previous
-                return store(await func(*args, **kwargs))
+                return store(state, await func(*args, **kwargs))
 
             return async_wrapper
 
         @functools.wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
-            run, previous = should_run()
+            state, run, previous = should_run(args, kwargs)
             if not run:
                 return previous
-            return store(func(*args, **kwargs))
+            return store(state, func(*args, **kwargs))
 
         return wrapper
 
@@ -1411,10 +1829,10 @@ class Debounced(Protocol[P, R_co]):
         self: Debounced[Concatenate[Any, P2], R_co], instance: object, owner: type | None = None
     ) -> Debounced[P2, R_co]: ...
 
-    def cancel(self) -> None:
-        """Drop the pending call, if any."""
+    def cancel(self, *args: Any, **kwargs: Any) -> None:
+        """Drop the pending call, if any (``key``/``per_instance``: pass a call's arguments)."""
 
-    def flush(self) -> R_co | None:
+    def flush(self, *args: Any, **kwargs: Any) -> R_co | None:
         """Run the pending call now and return its result (``None`` if nothing pending)."""
 
 
@@ -1454,10 +1872,10 @@ class AsyncDebounced(Protocol[P, R_co]):
         owner: type | None = None,
     ) -> AsyncDebounced[P2, R_co]: ...
 
-    def cancel(self) -> None:
+    def cancel(self, *args: Any, **kwargs: Any) -> None:
         """Drop the pending call; callers awaiting it get ``CancelledError``."""
 
-    def flush(self) -> Coroutine[Any, Any, R_co | None]:
+    def flush(self, *args: Any, **kwargs: Any) -> Coroutine[Any, Any, R_co | None]:
         """Run the pending call now; awaiting returns its result (``None`` if none)."""
 
 
@@ -1487,53 +1905,75 @@ class _DebounceDecorator(Protocol):
 _Pending = tuple[tuple[Any, ...], dict[str, Any]]
 
 
-def _debounce_sync(func: Callable[..., Any], wait: float) -> Callable[..., None]:
-    lock = _fork.ForkSafeLock()
-    timer: threading.Timer | None = None
-    pending: _Pending | None = None
+class _SyncDebState:
+    """One sync debounce slot: the running timer and the call waiting for it."""
 
-    def take() -> _Pending | None:
-        nonlocal timer, pending
-        if timer is not None:
-            timer.cancel()
-        call, timer, pending = pending, None, None
+    __slots__ = ("pending", "timer")
+
+    def __init__(self) -> None:
+        self.timer: threading.Timer | None = None
+        self.pending: _Pending | None = None
+
+
+def _debounce_sync(
+    func: Callable[..., Any],
+    wait: float,
+    key: Callable[..., Hashable] | None,
+    per_instance: bool,
+) -> Callable[..., None]:
+    lock = _fork.ForkSafeLock()
+    buckets = _Buckets(
+        _SyncDebState,
+        key=key,
+        per_instance=per_instance,
+        idle=lambda st: st.timer is None and st.pending is None,
+        what="debounce",
+    )
+
+    def take(st: _SyncDebState) -> _Pending | None:
+        if st.timer is not None:
+            st.timer.cancel()
+        call, st.timer, st.pending = st.pending, None, None
         return call
 
-    def fire(me: list[threading.Timer]) -> None:
+    def fire(st: _SyncDebState, me: list[threading.Timer]) -> None:
         with lock:
-            if timer is not me[0]:  # superseded or cancelled meanwhile
+            if st.timer is not me[0]:  # superseded or cancelled meanwhile
                 return
-            call = take()
+            call = take(st)
         if call is not None:
             func(*call[0], **call[1])
 
     @functools.wraps(func)
     def wrapper(*args: Any, **kwargs: Any) -> None:
-        nonlocal timer, pending
+        st = buckets.get(args, kwargs)
         with lock:
-            take()
+            take(st)
             me: list[threading.Timer] = []
-            timer = threading.Timer(wait, fire, args=(me,))
+            timer = st.timer = threading.Timer(wait, fire, args=(st, me))
             me.append(timer)
             timer.daemon = True
-            pending = (args, kwargs)
+            st.pending = (args, kwargs)
             timer.start()
 
-    def cancel() -> None:
+    def selected(args: tuple[Any, ...], kwargs: dict[str, Any]) -> list[_SyncDebState] | None:
+        """The states to act on, or None if the arguments name a state that does not exist."""
+        if buckets.selective and (args or kwargs):
+            found = buckets.find(args, kwargs)
+            return None if found is None else [found]
+        return buckets.states()
+
+    def cancel(*args: Any, **kwargs: Any) -> None:
         with lock:
-            take()
+            for st in selected(args, kwargs) or ():
+                take(st)
 
-    def flush() -> Any:
+    def flush(*args: Any, **kwargs: Any) -> Any:
         with lock:
-            call = take()
-        return None if call is None else func(*call[0], **call[1])
+            calls = [take(st) for st in selected(args, kwargs) or ()]
+        results = [func(*call[0], **call[1]) for call in calls if call is not None]
+        return results[0] if len(results) == 1 else None
 
-    def reset_after_fork() -> None:
-        nonlocal timer, pending
-        timer = None
-        pending = None
-
-    wrapper.__dict__["_fork_reset"] = _fork.register_reset(reset_after_fork)
     wrapper.cancel = cancel  # type: ignore[attr-defined]
     wrapper.flush = flush  # type: ignore[attr-defined]
     return wrapper
@@ -1542,25 +1982,46 @@ def _debounce_sync(func: Callable[..., Any], wait: float) -> Callable[..., None]
 class _AsyncBurst:
     """One burst of async debounced calls: the latest arguments and a shared outcome."""
 
-    def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+    def __init__(self, loop: asyncio.AbstractEventLoop, state: _AsyncDebState) -> None:
         self.outcome: asyncio.Future[Any] = loop.create_future()
         self.timer: asyncio.Task[None] | None = None
         self.call: _Pending | None = None
+        self.state = state
 
 
-def _debounce_async(func: Callable[..., Awaitable[Any]], wait: float) -> Callable[..., Any]:
-    bursts: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, _AsyncBurst] = (
-        weakref.WeakKeyDictionary()
-    )
-    # Several loops (in several threads) share `bursts`; each burst itself is only ever
-    # touched from its own loop's thread.
+class _AsyncDebState:
+    """One async debounce slot: its pending burst per event loop."""
+
+    __slots__ = ("bursts",)
+
+    def __init__(self) -> None:
+        self.bursts: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, _AsyncBurst] = (
+            weakref.WeakKeyDictionary()
+        )
+
+
+def _debounce_async(
+    func: Callable[..., Awaitable[Any]],
+    wait: float,
+    key: Callable[..., Hashable] | None,
+    per_instance: bool,
+) -> Callable[..., Any]:
+    # Several loops (in several threads) share each state's `bursts`; each burst itself
+    # is only ever touched from its own loop's thread.
     bursts_lock = _fork.ForkSafeLock()
+    buckets = _Buckets(
+        _AsyncDebState,
+        key=key,
+        per_instance=per_instance,
+        idle=lambda st: not st.bursts,
+        what="debounce",
+    )
 
     async def run(burst: _AsyncBurst) -> Any:
         loop = asyncio.get_running_loop()
         with bursts_lock:
-            if bursts.get(loop) is burst:
-                del bursts[loop]
+            if burst.state.bursts.get(loop) is burst:
+                del burst.state.bursts[loop]
         call = burst.call
         if call is None or burst.outcome.done():
             return None
@@ -1587,10 +2048,11 @@ def _debounce_async(func: Callable[..., Awaitable[Any]], wait: float) -> Callabl
     @functools.wraps(func)
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
         loop = asyncio.get_running_loop()
+        st = buckets.get(args, kwargs)
         with bursts_lock:
-            burst = bursts.get(loop)
+            burst = st.bursts.get(loop)
             if burst is None:
-                burst = bursts[loop] = _AsyncBurst(loop)
+                burst = st.bursts[loop] = _AsyncBurst(loop, st)
         if burst.timer is not None:
             burst.timer.cancel()
         burst.call = (args, kwargs)
@@ -1602,16 +2064,25 @@ def _debounce_async(func: Callable[..., Awaitable[Any]], wait: float) -> Callabl
             burst.timer.cancel()
         burst.outcome.cancel()
 
-    def cancel() -> None:
+    def selected(args: tuple[Any, ...], kwargs: dict[str, Any]) -> list[_AsyncDebState]:
+        if buckets.selective and (args or kwargs):
+            found = buckets.find(args, kwargs)
+            return [] if found is None else [found]
+        return buckets.states()
+
+    def cancel(*args: Any, **kwargs: Any) -> None:
         try:
             running: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
         except RuntimeError:
             running = None
+        taken: list[tuple[asyncio.AbstractEventLoop, _AsyncBurst | None]] = []
+        states = selected(args, kwargs)
         with bursts_lock:
-            if running is not None:
-                taken = [(running, bursts.pop(running, None))]
-            else:
-                taken = [(lp, bursts.pop(lp)) for lp in list(bursts)]
+            for st in states:
+                if running is not None:
+                    taken.append((running, st.bursts.pop(running, None)))
+                else:
+                    taken.extend((lp, st.bursts.pop(lp)) for lp in list(st.bursts))
         for lp, burst in taken:
             if burst is None:
                 continue
@@ -1625,23 +2096,30 @@ def _debounce_async(func: Callable[..., Awaitable[Any]], wait: float) -> Callabl
                 with contextlib.suppress(RuntimeError):  # closed meanwhile
                     lp.call_soon_threadsafe(cancel_burst, burst)
 
-    async def flush() -> Any:
+    async def flush(*args: Any, **kwargs: Any) -> Any:
+        loop = asyncio.get_running_loop()
+        states = selected(args, kwargs)
         with bursts_lock:
-            burst = bursts.get(asyncio.get_running_loop())
-        if burst is None:
-            return None
-        if burst.timer is not None:
-            burst.timer.cancel()
-            burst.timer = None
-        return await run(burst)
+            found = [b for b in (st.bursts.get(loop) for st in states) if b is not None]
+        results = []
+        for burst in found:
+            if burst.timer is not None:
+                burst.timer.cancel()
+                burst.timer = None
+            results.append(await run(burst))
+        return results[0] if len(results) == 1 else None
 
-    wrapper.__dict__["_fork_reset"] = _fork.register_reset(bursts.clear)
     wrapper.cancel = cancel  # type: ignore[attr-defined]
     wrapper.flush = flush  # type: ignore[attr-defined]
     return wrapper
 
 
-def debounce(wait: float) -> _DebounceDecorator:
+def debounce(
+    wait: float,
+    *,
+    key: Callable[..., Hashable] | None = None,
+    per_instance: bool = False,
+) -> _DebounceDecorator:
     """Postpone running until ``wait`` seconds have passed since the last call.
 
     Each call restarts the countdown and replaces the pending arguments, so only the last
@@ -1666,29 +2144,45 @@ def debounce(wait: float) -> _DebounceDecorator:
       if nothing is pending. For ``async def`` functions it is a coroutine to ``await``.
 
     State belongs to the decorated function, so on a method it is shared by all
-    instances: calls on different instances debounce each other.
+    instances: calls on different instances debounce each other. ``key`` gives each key
+    its own countdown and pending call, and ``per_instance`` gives each instance its own.
+    Then ``.cancel()`` and ``.flush()`` take the arguments of a call to say which one
+    (``obj.save.cancel(obj)``, since the attribute of a bound method is the function's);
+    without arguments they act on every pending call, and ``.flush()`` returns the result
+    only when exactly one call was flushed.
 
     Args:
         wait: Quiet period in seconds; must be non-negative.
+        key: Optional function called with the call's arguments (including ``self`` for
+            methods) that returns a hashable key; calls with different keys do not
+            debounce each other. Idle keys are dropped now and then.
+        per_instance: For methods: one debounce slot per instance, found by identity
+            through a weak reference, so instances stay collectable and need not be
+            hashable. They must be weak-referenceable (a ``__slots__`` class must list
+            ``'__weakref__'``). A pending call keeps its instance alive until it runs.
 
     Returns:
         A decorator producing a `Debounced` or `AsyncDebounced` wrapper.
 
     Raises:
         ValueError: If ``wait`` is negative.
+        TypeError: At call time with ``per_instance``, for an instance that cannot be
+            weakly referenced.
 
     Example:
         >>> @debounce(0.3)
         ... def save(text: str) -> None: ...
         >>> save("a"); save("ab"); save.flush()  # runs once, with "ab"
+        >>> @debounce(0.3, key=lambda doc_id, *_: doc_id)
+        ... def autosave(doc_id: int, text: str) -> None: ...
     """
     if wait < 0:
         raise ValueError(f"debounce wait must be non-negative, got {wait!r}")
 
     def decorate(func: Callable[..., Any]) -> Callable[..., Any]:
         if _core.is_async(func):
-            return _debounce_async(func, wait)
-        return _debounce_sync(func, wait)
+            return _debounce_async(func, wait, key, per_instance)
+        return _debounce_sync(func, wait, key, per_instance)
 
     return cast(_DebounceDecorator, decorate)
 

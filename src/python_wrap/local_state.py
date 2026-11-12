@@ -18,6 +18,7 @@ import math
 import os
 import sqlite3
 import threading
+import time
 import uuid
 from typing import Any
 
@@ -119,6 +120,26 @@ class SQLiteBreakerState:
         self._pid = os.getpid()
 
     # -- connections -------------------------------------------------------------------
+    def _setup(self, conn: sqlite3.Connection) -> None:
+        """Switch to WAL and create the schema.
+
+        Changing the journal mode takes a lock that SQLite does not always wait for with
+        the busy handler, so concurrent first connections (threads or processes) can see
+        "database is locked" immediately. Retry until ``busy_timeout`` has elapsed.
+        """
+        deadline = time.monotonic() + self.busy_timeout
+        while True:
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA synchronous=NORMAL")
+                for statement in _SCHEMA:
+                    conn.execute(statement)
+                return
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc) or time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.005)
+
     def _connection(self) -> sqlite3.Connection:
         if self._pid != os.getpid():  # fork without the at-fork hook (non-POSIX paths)
             self._reset_after_fork()
@@ -133,10 +154,7 @@ class SQLiteBreakerState:
         )
         try:
             conn.execute(f"PRAGMA busy_timeout={int(self.busy_timeout * 1000)}")
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=NORMAL")
-            for statement in _SCHEMA:
-                conn.execute(statement)
+            self._setup(conn)
         except BaseException:
             conn.close()
             raise
