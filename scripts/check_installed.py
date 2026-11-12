@@ -22,7 +22,10 @@ def main() -> None:
     expected = sys.argv[1]
     metadata = importlib.metadata.metadata("python-wrap")
     assert metadata["Version"] == python_wrap.__version__ == expected
-    assert not metadata.get_all("Requires-Dist"), "Unexpected runtime dependencies"
+    # Optional extras appear as ``Requires-Dist: pkg; extra == "name"``; only an
+    # unconditional requirement would be a real runtime dependency.
+    runtime = [r for r in (metadata.get_all("Requires-Dist") or []) if "extra ==" not in r]
+    assert not runtime, f"Unexpected runtime dependencies: {runtime}"
     assert metadata["Requires-Python"] == ">=3.10"
     assert metadata["License-Expression"] == "MIT"
     assert (Path(python_wrap.__file__).parent / "py.typed").is_file()
@@ -32,6 +35,8 @@ def main() -> None:
 
     assert "What never to retry" in guide_text() and find_recipes("retry http calls")
     for module in pkgutil.iter_modules(python_wrap.__path__):
+        if module.name == "pytest_plugin":  # a pytest plugin: needs pytest, by design
+            continue
         importlib.import_module(f"python_wrap.{module.name}")
     for name in python_wrap.__all__:
         assert hasattr(python_wrap, name), name
