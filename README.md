@@ -12,7 +12,7 @@ Retry (with `Retry-After`), circuit breaker, timeout, cache, rate limit, bulkhea
 
 [![CI](https://github.com/LitePy/PythonWrap/actions/workflows/ci.yml/badge.svg)](https://github.com/LitePy/PythonWrap/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/python-wrap?logo=pypi&logoColor=white)](https://pypi.org/project/python-wrap/)
-[![PyPI Downloads](https://static.pepy.tech/personalized-badge/python-wrap?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/python-wrap)
+[![Downloads](https://api.pepy.tech/personalized-badge/python-wrap?period=TOTAL&units=NONE&left_text=Downloads&right_color=BLUE)](https://pepy.tech/projects/python-wrap)
 [![Python](https://img.shields.io/pypi/pyversions/python-wrap?logo=python&logoColor=white)](https://pypi.org/project/python-wrap/)
 [![License: MIT](https://img.shields.io/pypi/l/python-wrap)](https://github.com/LitePy/PythonWrap/blob/main/LICENSE)
 [![Docs](https://readthedocs.org/projects/pythonwrap/badge/?version=latest)](https://pythonwrap.readthedocs.io)
