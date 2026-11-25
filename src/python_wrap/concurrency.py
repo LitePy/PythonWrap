@@ -1271,6 +1271,7 @@ class RateLimiter:
         """Take a slot in a thread. ``strict`` raises on rejection instead of returning False."""
         if _core.overrides.disable_rate_limits:
             return True
+        block = block and not _core.no_block.get()
         if self._async_backend:
             raise TypeError(
                 f"{label}: this limiter has an async backend; use it from async def code "
@@ -1314,6 +1315,7 @@ class RateLimiter:
         """`_take` for coroutines: waits with ``await``."""
         if _core.overrides.disable_rate_limits:
             return True
+        block = block and not _core.no_block.get()
         wait = await self._aacquire(key)
         if wait <= 0:
             return True

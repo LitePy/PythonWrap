@@ -48,6 +48,7 @@ time**, not at decoration time, so a test can flip it after import:
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import functools
 import inspect
 import logging
@@ -158,6 +159,10 @@ def is_async(func: Callable[..., Any]) -> bool:
 def qualname(func: Callable[..., Any]) -> str:
     """A readable name for log messages."""
     return getattr(func, "__qualname__", None) or getattr(func, "__name__", None) or repr(func)
+
+
+#: Set (by `python_wrap.celery.resilient_task`) so limiters raise instead of sleeping.
+no_block: contextvars.ContextVar[bool] = contextvars.ContextVar("pw_no_block", default=False)
 
 
 def refuse_pickle(obj: object, advice: str | None = None) -> NoReturn:

@@ -286,7 +286,7 @@ def shared_rate_limit(
                     wait = await acquire()
                     if wait <= 0:
                         break
-                    if not block:
+                    if not block or _core.no_block.get():
                         raise RateLimitExceeded("shared rate limit exceeded", retry_after=wait)
                     await asyncio.sleep(wait)
                 return await func(*args, **kw)
@@ -308,7 +308,7 @@ def shared_rate_limit(
                 wait = sync_backend.acquire()
                 if wait <= 0:
                     break
-                if not block:
+                if not block or _core.no_block.get():
                     raise RateLimitExceeded("shared rate limit exceeded", retry_after=wait)
                 time.sleep(wait)
             return func(*args, **kw)

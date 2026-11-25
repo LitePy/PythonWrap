@@ -21,6 +21,12 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
 
 ### Added
 
+- Celery: `resilient_task` (re-queue on open breaker, used-up limit or full bulkhead, with the
+  error's `retry_after`; blocking limiters raise instead of sleeping), `idempotent_task` (one
+  run per task name and arguments across redeliveries, re-queue while running),
+  `check_visibility` (doctor code PW023) and `install(hard_margin=5.0)`: a task with only a
+  hard time limit now gets a cooperative deadline of hard limit minus the margin.
+
 - `HttpPolicy` with `PolicyTransport`, `AsyncPolicyTransport` and `mount_policy`: retries plus
   a circuit breaker, rate limiter and bulkhead (optionally one set per host), default
   connect/read timeouts shortened to the surrounding deadline, 429 `Retry-After` pauses and

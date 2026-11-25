@@ -145,10 +145,18 @@ def _layer(obj: Any, role: str | None = None) -> Layer:
     if isinstance(obj, Bulkhead):
         return Layer(
             role or "bulkhead",
-            {"max_concurrent": obj.max_concurrent, "shared": obj._shared is not None},
+            {
+                "max_concurrent": obj.max_concurrent,
+                "shared": obj._shared is not None,
+                "timeout": obj.timeout,
+                "max_waiting": obj.max_waiting,
+            },
         )
     if isinstance(obj, RateLimiter):
-        return Layer(role or "limiter", {"name": obj.name, "shared": obj._backend is not None})
+        return Layer(
+            role or "limiter",
+            {"name": obj.name, "shared": obj._backend is not None, "block": obj.block},
+        )
     if isinstance(obj, AdaptiveLimiter):
         return Layer(role or "adaptive", {"name": obj.name, "shared": False})
     if callable(getattr(obj, "cache_info", None)):

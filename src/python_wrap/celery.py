@@ -21,19 +21,31 @@ from typing import Any, NoReturn
 from python_wrap import _fork
 from python_wrap._integration import scope
 
-__all__ = ["TaskContext", "install", "retry_countdown", "retry_task", "shared_breaker"]
+__all__ = [
+    "TaskContext",
+    "check_visibility",
+    "idempotent_task",
+    "install",
+    "resilient_task",
+    "retry_countdown",
+    "retry_task",
+    "shared_breaker",
+]
 
 
 class TaskContext:
     """Signal subscription handle; close disconnects only this app's handlers."""
 
-    def __init__(self, app: Any, *, use_soft_deadline: bool = True) -> None:
+    def __init__(
+        self, app: Any, *, use_soft_deadline: bool = True, hard_margin: float = 5.0
+    ) -> None:
         import importlib
 
         signals = importlib.import_module("celery.signals")
         task_postrun, task_prerun = signals.task_postrun, signals.task_prerun
 
         self.app, self.use_soft_deadline = app, use_soft_deadline
+        self.hard_margin = hard_margin
         self.closed = False
         self._active = 0
         self._lock = _fork.ForkSafeLock()
@@ -62,6 +74,11 @@ class TaskContext:
         limits = getattr(getattr(task, "request", None), "timelimit", None)
         if self.use_soft_deadline and limits and len(limits) > 1 and limits[1] is not None:
             budget = limits[1]
+        if self.use_soft_deadline and budget is None:
+            # Only a hard limit: stop cooperatively a little before the worker kills the task.
+            hard = limits[0] if limits and limits[0] is not None else getattr(task, "time_limit", None)
+            if hard:
+                budget = max(hard - self.hard_margin, hard * 0.5)
         try:
             stack = scope({"task_id": task_id, "task_name": getattr(task, "name", None)}, budget)
         except BaseException:
@@ -110,8 +127,14 @@ class TaskContext:
             self._disconnect_after()
 
 
-def install(app: Any, *, use_soft_deadline: bool = True) -> TaskContext:
-    """Bind task_id/name and an optional soft-time-limit deadline around task execution.
+def install(
+    app: Any, *, use_soft_deadline: bool = True, hard_margin: float = 5.0
+) -> TaskContext:
+    """Bind task_id/name and a deadline from the task's time limit around task execution.
+
+    The deadline is the soft time limit; with only a hard limit it is the hard limit minus
+    ``hard_margin`` seconds (at least half of it), so cooperative code stops before the
+    worker kills the task.
 
     Fork-safe python-wrap components reset through their POSIX hooks automatically;
     this adapter never starts background loops or opens backend connections at import.
@@ -119,7 +142,7 @@ def install(app: Any, *, use_soft_deadline: bool = True) -> TaskContext:
     existing = getattr(app, "_python_wrap_context", None)
     if existing is not None and not existing.closed:
         return existing  # type: ignore[no-any-return]
-    handle = TaskContext(app, use_soft_deadline=use_soft_deadline)
+    handle = TaskContext(app, use_soft_deadline=use_soft_deadline, hard_margin=hard_margin)
     app._python_wrap_context = handle
     return handle
 
@@ -287,3 +310,169 @@ def shared_breaker(name: str, backend: Any, **options: Any) -> Any:
         raise ValueError("shared breakers need a stable, nonempty name")
     state = backend if hasattr(backend, "operate") else RedisBreakerState(backend)
     return CircuitBreaker(name=name, backend=state, **options)
+
+
+def _bound(args: tuple[Any, ...], what: str) -> Any:
+    if not args or not hasattr(args[0], "request"):
+        raise TypeError(f"{what} needs a bound task: use @app.task(bind=True) above it")
+    return args[0]
+
+
+def resilient_task(
+    policy: Any = None,
+    *,
+    requeue_on: tuple[type[BaseException], ...] | None = None,
+    delays: Sequence[float] | None = None,
+    max_retries: int | None = None,
+    requeue_when_limited: bool = True,
+    **schedule: Any,
+) -> Any:
+    """Run a bound task body through ``policy`` and re-queue it when the dependency is busy.
+
+    Place it under ``@app.task(bind=True)``. An open breaker (`CircuitOpenError`), a used-up
+    rate limit (`RateLimitExceeded`) or a full bulkhead (`BulkheadFull`) calls `retry_task`
+    with the error's own ``retry_after`` as the countdown, so the task waits in the queue
+    instead of holding a worker slot. With ``requeue_when_limited`` a limiter that would
+    sleep raises instead, so a long wait never keeps a prefork child busy (or outlives the
+    broker's visibility timeout).
+
+    Args:
+        policy: A `python_wrap.policy.Policy` (or any decorator) applied to the body.
+        requeue_on: Exceptions that re-queue; default the three above.
+        delays: Fallback countdown schedule when the error carries no ``retry_after``.
+        max_retries: Overrides the task's ``max_retries``.
+        requeue_when_limited: Make blocking limiters raise instead of sleeping.
+        **schedule: Other `retry_countdown` options (``delay``, ``backoff``, ``max_delay``...).
+
+    Example:
+        ```python
+        from python_wrap.celery import resilient_task
+
+        # @app.task(bind=True, max_retries=8, acks_late=True)
+        # @resilient_task(vendor_policy, delays=[30, 120, 600])
+        # def sync_orders(self, account_id): ...
+        assert callable(resilient_task())
+        ```
+    """
+    from python_wrap import _core
+    from python_wrap.errors import BulkheadFull, CircuitOpenError, RateLimitExceeded
+
+    caught = requeue_on or (CircuitOpenError, RateLimitExceeded, BulkheadFull)
+
+    def decorate(func: Any) -> Any:
+        body = policy(func) if policy is not None else func
+
+        import functools
+
+        @functools.wraps(func)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            task = _bound(args, "resilient_task")
+            token = _core.no_block.set(True) if requeue_when_limited else None
+            try:
+                return body(*args, **kwargs)
+            except caught as exc:
+                retry_task(task, exc, max_retries=max_retries, delays=delays, **schedule)
+            finally:
+                if token is not None:
+                    _core.no_block.reset(token)
+
+        return wrapper
+
+    return decorate
+
+
+def idempotent_task(
+    *,
+    key: Any = None,
+    store: Any = None,
+    ttl: float | str = "1d",
+    backend: Any = None,
+    lease_ttl: float | str = 600,
+    requeue_delay: float = 30.0,
+    max_retries: int | None = None,
+) -> Any:
+    """Run a bound task once per name and arguments, even when the broker delivers it twice.
+
+    With late acknowledgement a task is delivered again after a worker dies, and a task that
+    outlives the visibility timeout is delivered while it still runs. The result is stored
+    under the task name plus its arguments (override with ``key=``): a repeat delivery returns
+    the stored result without running the body, and a delivery that arrives while the first
+    still runs is re-queued after ``requeue_delay`` seconds instead of run.
+
+    Use a shared ``store`` (``RedisStore(client, prefix, fail_open=False)``) so every worker
+    sees the same results; the default is per process. Same crash gap as `idempotent`: an
+    external effect and its recorded result are not one atomic step.
+
+    Args:
+        key: ``str`` or ``callable(task, *args, **kwargs)``; default task name + arguments.
+        store: Result store (see `python_wrap.idempotency.idempotent`).
+        ttl: How long a result is kept.
+        backend: Shared lease backend (derived from a `RedisStore`).
+        lease_ttl: Lease held while the body runs (renewed automatically).
+        requeue_delay: Countdown for a delivery that finds the task running.
+        max_retries: Overrides the task's ``max_retries`` for that re-queue.
+    """
+    import functools
+
+    from python_wrap._runtime import stable_digest
+    from python_wrap.coordination import AlreadyRunning
+    from python_wrap.idempotency import idempotent
+
+    def derive(task: Any, *args: Any, **kwargs: Any) -> str:
+        if isinstance(key, str):
+            return key
+        if key is not None:
+            return str(key(task, *args, **kwargs))
+        return f"celery:{task.name}:{stable_digest((args, sorted(kwargs.items())))}"
+
+    def decorate(func: Any) -> Any:
+        once = idempotent(
+            key=derive, ttl=ttl, store=store, backend=backend, lease_ttl=lease_ttl
+        )(func)
+
+        @functools.wraps(func)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            task = _bound(args, "idempotent_task")
+            try:
+                return once(*args, **kwargs)
+            except AlreadyRunning as exc:
+                retry_task(task, exc, delays=[requeue_delay], max_retries=max_retries)
+
+        return wrapper
+
+    return decorate
+
+
+def check_visibility(target: Any, visibility_timeout: float) -> tuple[Any, ...]:
+    """PW023: blocking waits that can outlive the broker's ``visibility_timeout``.
+
+    A task that waits in a blocking limiter or a bulkhead queue holds a worker slot; if it
+    runs longer than the visibility timeout (Redis/SQS brokers) the broker delivers it again
+    while it still runs. Pass a decorated function or policy and the timeout in seconds.
+
+    Returns:
+        A tuple of `python_wrap.doctor.Finding`.
+    """
+    from python_wrap.doctor import Finding, explain
+
+    found: list[Finding] = []
+    for layer in explain(target).layers:
+        s = layer.settings
+        reason = None
+        if layer.role == "limiter" and s.get("block"):
+            reason = "a blocking rate limiter can wait without a bound"
+        elif layer.role == "bulkhead" and s.get("timeout") is None and s.get("max_waiting") is None:
+            reason = "a bulkhead queue with no timeout can wait without a bound"
+        elif layer.role == "retry" and (s.get("max_time") or 0) > visibility_timeout:
+            reason = f"retry max_time {s['max_time']:g}s exceeds the visibility timeout"
+        if reason:
+            found.append(
+                Finding(
+                    "PW023",
+                    "warning",
+                    f"{reason}; the broker redelivers a task that runs longer than "
+                    f"{visibility_timeout:g}s. Use resilient_task(requeue_when_limited=True), "
+                    "set a bulkhead timeout or lower max_time.",
+                )
+            )
+    return tuple(found)
