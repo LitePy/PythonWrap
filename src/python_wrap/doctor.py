@@ -163,6 +163,26 @@ def _preemptive(use_signals: Any) -> bool:
     return use_signals is not False and _signals_usable()
 
 
+def _loose_parameters(func: Any) -> list[str]:
+    """Parameters whose values may be dicts or sets, or that have no annotation."""
+    import typing
+
+    try:
+        hints = typing.get_type_hints(func)
+        params = inspect.signature(func).parameters
+    except (NameError, TypeError, ValueError):
+        return []
+    loose = []
+    for name, param in params.items():
+        if name in {"self", "cls"} or param.kind in (param.VAR_POSITIONAL, param.VAR_KEYWORD):
+            continue
+        hint = hints.get(name)
+        text = "" if hint is None else repr(hint)
+        if hint is None or any(t in text for t in ("dict", "Dict", "set", "Set", "Mapping")):
+            loose.append(name)
+    return loose
+
+
 def _cache_settings(obj: Any) -> dict[str, Any]:
     """What PW011 needs about a `memoize` wrapper: does ``self`` key an unbounded cache?"""
     read = getattr(obj, "cache_parameters", None)
@@ -179,7 +199,13 @@ def _cache_settings(obj: Any) -> dict[str, Any]:
         or params.get("store") is not None
     )
     self_in_key = bool(names) and names[0] == "self" and not params.get("per_instance")
-    return {"self_in_key": self_in_key and params.get("key") is None, "bounded": bounded}
+    return {
+        "self_in_key": self_in_key and params.get("key") is None,
+        "bounded": bounded,
+        "unstable_key": params.get("store") is not None
+        and params.get("key") is None
+        and _loose_parameters(getattr(obj, "__wrapped__", obj)),
+    }
 
 
 # Layers whose limit is state: without a shared backend each process keeps its own.
@@ -354,6 +380,19 @@ def _check(
                     "every instance it has seen stays alive and its entries are never "
                     "dropped. Use per_instance=True (weak references), set maxsize= or "
                     "ttl=, or pass key= without `self`.",
+                )
+            )
+    for layer in layers:
+        loose = layer.settings.get("unstable_key")
+        if layer.role == "cache" and loose:
+            found.append(
+                Finding(
+                    "PW022",
+                    "warning",
+                    f"memoize with a shared store builds its key from {', '.join(loose)}, "
+                    "which are unannotated or may be dicts or sets. Equal values are keyed "
+                    "the same in every process, but an object without a stable form raises "
+                    "TypeError at call time: pass key= if an argument is not plain data.",
                 )
             )
     found += _check_agents(layers, retries)

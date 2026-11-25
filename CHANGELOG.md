@@ -10,6 +10,15 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
 
 ## [Unreleased]
 
+### Fixed
+
+- Shared cache keys (`RedisStore`, `AsyncRedisStore`) and `idempotent`/`single_instance` call
+  keys no longer depend on the per-process hash seed or dict insertion order: dict and set
+  arguments are encoded canonically. Values with no stable form raise `TypeError` naming the
+  argument (pass `key=`). Redis cache keys gain a `k2:` marker, so existing entries expire
+  instead of being misread; idempotency records written by 0.4.0b1 for the same call are not
+  recognised once, during the upgrade. New doctor check PW022.
+
 ### Added
 
 - `on_backend_error="raise" | "local" | "allow"` on shared breakers, windows, quotas,

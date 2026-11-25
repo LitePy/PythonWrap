@@ -143,6 +143,7 @@ The doctor reports codes PW001 to PW019 (the table lists them by group, not stri
 | PW015 | warning | A generic `retry` without `retry_if=` wraps an LLM call: refusals and bad requests are retried. |
 | PW020 | warning | An `mcp_guard` (or a pydantic-ai / OpenAI Agents SDK tool wrapped by the python-wrap adapters) has no timeout: a hung server or tool holds the agent turn forever. See [Agent frameworks and MCP](../ai/agent-frameworks.md#doctor-checks). |
 | PW021 | warning | An `mcp_guard` retries every tool (`retry=` without `retry_tools=`): a retried MCP write may run twice. |
+| PW022 | warning | `memoize` with a shared store and no `key=` on a function with dict, set or unannotated parameters: equal arguments are keyed alike in every process, but an unsupported object raises `TypeError`. |
 | PW018 | warning | A python-wrap LLM retry wraps an SDK client (`llm_retry(client=...)`) whose own retries are still on: attempts multiply (4 x 3 = 12). See [OpenAI and Anthropic SDK clients](../ai/openai-anthropic.md#doctor-checks). |
 | PW019 | warning | A retry wraps a streamed LLM call (`stream_timeout`) without `resume_safe`: a replay after output started repeats text and half-done tool calls. |
 

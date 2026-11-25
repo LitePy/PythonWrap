@@ -9,7 +9,9 @@ from collections.abc import Callable, Hashable
 from typing import Any
 
 from python_wrap._backend import BackendMonitor
-from python_wrap._runtime import digest
+from python_wrap._runtime import stable_digest
+
+KEY_FORMAT = "k2:"  # key encoding version: entries written by 0.4.0b1 expire unread
 
 __all__ = ["RedisStore"]
 
@@ -55,7 +57,9 @@ class RedisStore:
         )
 
     def _key(self, key: Hashable) -> str:
-        return self.prefix + (self.key_format(key) if self.key_format else digest(key))
+        if self.key_format:
+            return self.prefix + self.key_format(key)
+        return self.prefix + KEY_FORMAT + stable_digest(key)
 
     def _run(self, action: Callable[[], Any], default: Any = None) -> Any:
         return self._monitor.call("cache", action, lambda: default)

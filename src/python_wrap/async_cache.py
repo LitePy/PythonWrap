@@ -29,7 +29,8 @@ from typing import Any, Protocol, TypeVar, runtime_checkable
 
 from python_wrap import _core, _fork
 from python_wrap._backend import BackendMonitor
-from python_wrap._runtime import digest
+from python_wrap._runtime import stable_digest
+from python_wrap.stores import KEY_FORMAT
 from python_wrap.caching import CacheInfo, _await_shared, _make_key_builder, _shared_future
 
 __all__ = [
@@ -215,7 +216,9 @@ class AsyncRedisStore:
         )
 
     def _key(self, key: Hashable) -> str:
-        return self.prefix + (self.key_format(key) if self.key_format else digest(key))
+        if self.key_format:
+            return self.prefix + self.key_format(key)
+        return self.prefix + KEY_FORMAT + stable_digest(key)
 
     async def _run(self, action: Callable[[], Awaitable[Any]], default: Any = None) -> Any:
         return await self._monitor.acall("cache", action, lambda: default)
