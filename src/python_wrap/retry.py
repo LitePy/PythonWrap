@@ -251,6 +251,9 @@ class RetryBudget:
         ratio: Retries allowed per request in the window (`0.1` = 10 %). `>= 0`.
         min_per_second: Retries per second always allowed regardless of traffic. `>= 0`.
         window: Length of the sliding window in seconds. `> 0`.
+        backend: A shared counter store with ``deposit(budget)``, ``try_withdraw(budget)``
+            and ``totals(budget)`` such as `python_wrap.shared.RedisRetryBudget`, so the
+            cap holds across every worker process instead of per process.
 
     Raises:
         ValueError: If an argument is out of range.
@@ -274,7 +277,12 @@ class RetryBudget:
         _core.refuse_pickle(self)
 
     def __init__(
-        self, ratio: float = 0.1, min_per_second: float = 10, window: float = 10.0
+        self,
+        ratio: float = 0.1,
+        min_per_second: float = 10,
+        window: float = 10.0,
+        *,
+        backend: Any = None,
     ) -> None:
         if not ratio >= 0 or math.isinf(ratio):
             raise ValueError(f"ratio must be a finite number >= 0, got {ratio!r}")
@@ -285,6 +293,7 @@ class RetryBudget:
         self.ratio = float(ratio)
         self.min_per_second = float(min_per_second)
         self.window = float(window)
+        self.backend = backend
         self._reserve = self.min_per_second * self.window
         self._width = self.window / _BUDGET_SLOTS
         self._lock = _fork.ForkSafeLock()
@@ -324,6 +333,12 @@ class RetryBudget:
 
     def deposit(self) -> None:
         """Record one request (a first attempt). `retry` calls this for you."""
+        if self.backend is not None:
+            self.backend.deposit(self)
+            return
+        self._deposit_local()
+
+    def _deposit_local(self) -> None:
         with self._lock:
             index, _ = self._slot()
             self._requests[index] += 1
@@ -338,6 +353,15 @@ class RetryBudget:
             `True` if the retry is allowed (and was recorded), `False` if the budget is
             exhausted (recorded as rejected).
         """
+        if self.backend is not None:
+            if self.backend.try_withdraw(self):
+                return True
+            with self._lock:
+                self._rejected += 1
+            return False
+        return self._withdraw_local()
+
+    def _withdraw_local(self) -> bool:
         with self._lock:
             index, epoch = self._slot()
             if self._available(*self._totals(epoch)) >= 1:
@@ -349,6 +373,12 @@ class RetryBudget:
     @property
     def stats(self) -> RetryBudgetStats:
         """A consistent `RetryBudgetStats` snapshot of the current window."""
+        if self.backend is not None:
+            requests, retries = self.backend.totals(self)
+            with self._lock:
+                rejected = self._rejected
+            allowed = max(math.floor(self._available(requests, retries)), 0)
+            return RetryBudgetStats(requests, retries, rejected, allowed)
         with self._lock:
             _, epoch = self._slot()
             requests, retries = self._totals(epoch)

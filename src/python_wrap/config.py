@@ -21,7 +21,7 @@ __all__ = ["configure", "configured", "get_config", "reset_config"]
 UNSET: Any = object()
 """Sentinel meaning "argument not passed"; resolved against the configured defaults."""
 
-_KEYS = ("logger", "retry", "redact", "redact_extra", "backend_errors")
+_KEYS = ("logger", "retry", "redact", "redact_extra", "backend_errors", "shared")
 _RETRY_KEYS = (
     "max_attempts",
     "delay",
@@ -77,6 +77,8 @@ def _validate(key: str, value: Any) -> Any:
             value.get("max_time"),
         )
         return dict(value)
+    if key == "shared":
+        return value
     if key == "backend_errors":
         if value is not None and value not in ("raise", "local", "allow"):
             raise ValueError("backend_errors must be 'raise', 'local', 'allow' or None")
@@ -106,6 +108,9 @@ def configure(**defaults: Any) -> None:
               (replaces `DEFAULT_REDACT`); `None` restores it.
             - `backend_errors`: default `on_backend_error` for shared backends:
               `"raise"`, `"local"` (in-process fallback) or `"allow"` (admit, no accounting).
+            - `shared`: a Redis client or `python_wrap.shared.SharedBackends` that the
+              presets and `PolicyRegistry` use for breakers, limiters, bulkheads and
+              retry budgets that do not name their own backend. `None` clears it.
             - `redact_extra`: fragments added to the redaction list (the built-ins
               stay), for `log_args` and `audit`.
 
@@ -154,6 +159,7 @@ def get_config() -> dict[str, Any]:
             "redact": _state.get("redact"),
             "redact_extra": _state.get("redact_extra", ()),
             "backend_errors": _state.get("backend_errors"),
+            "shared": _state.get("shared"),
         }
 
 

@@ -7,6 +7,7 @@ import contextvars
 import math
 import threading
 import uuid
+from dataclasses import dataclass
 from typing import Any
 
 from python_wrap import _core, _fork
@@ -15,7 +16,7 @@ from python_wrap._runtime import digest, seconds
 from python_wrap.coordination import AlreadyRunning, Lease
 from python_wrap.errors import BulkheadFull
 
-__all__ = ["RedisBreakerState", "SharedBulkhead"]
+__all__ = ["RedisBreakerState", "RedisRetryBudget", "SharedBackends", "SharedBulkhead"]
 
 _BREAKER = """
 local t=redis.call('TIME'); local now=t[1]*1000+math.floor(t[2]/1000)
@@ -76,6 +77,79 @@ return {admitted,state,gen,trial,wait,failures,
  redis.call('HGET',KEYS[1],'total_successes') or '0',
  redis.call('HGET',KEYS[1],'total_rejected') or '0',opened,old}
 """
+
+
+_BUDGET = """
+local t=redis.call('TIME'); local now=t[1]*1000+math.floor(t[2]/1000)
+local width=tonumber(ARGV[2]); local epoch=math.floor(now/width)
+local op=ARGV[1]
+if op=='deposit' then
+ redis.call('HINCRBY',KEYS[1],'r:'..epoch,1); redis.call('PEXPIRE',KEYS[1],width*12); return 1
+end
+local req,ret=0,0
+local all=redis.call('HGETALL',KEYS[1])
+for i=1,#all,2 do
+ local f=all[i]; local e=tonumber(string.sub(f,3))
+ if e<=epoch-10 then redis.call('HDEL',KEYS[1],f)
+ elseif string.sub(f,1,1)=='r' then req=req+tonumber(all[i+1])
+ else ret=ret+tonumber(all[i+1]) end
+end
+if op=='totals' then return {req,ret} end
+if tonumber(ARGV[3])*req+tonumber(ARGV[4])-ret>=1 then
+ redis.call('HINCRBY',KEYS[1],'t:'..epoch,1); redis.call('PEXPIRE',KEYS[1],width*12); return 1
+end
+return 0
+"""
+
+
+class RedisRetryBudget:
+    """A `RetryBudget` backend that counts requests and retries in Redis.
+
+    Two counters per time slot live in one hash and one Lua script updates them on the
+    Redis clock, so every process (and host) draws on one allowance. Keys come from
+    ``name``: two services that use the same name share a budget on purpose. Pass it as
+    ``RetryBudget(..., backend=RedisRetryBudget(client, "vendor"))``.
+    """
+
+    def __init__(
+        self,
+        client: Any,
+        name: str,
+        *,
+        prefix: str = "python-wrap:budget:",
+        on_backend_error: str | None = None,
+        retry_backend_after: float = 1.0,
+    ) -> None:
+        if not name:
+            raise ValueError("a shared retry budget needs a name")
+        self.client, self.name = client, name
+        self.key = prefix + "{" + digest(name) + "}"
+        self._monitor = BackendMonitor("budget", name, on_backend_error, retry_backend_after)
+
+    def _eval(self, budget: Any, op: str) -> Any:
+        width = max(1, math.ceil(budget.window * 1000 / 10))
+        return self.client.eval(_BUDGET, 1, self.key, op, width, budget.ratio, budget._reserve)
+
+    def deposit(self, budget: Any) -> None:
+        self._monitor.call("deposit", lambda: self._eval(budget, "deposit"), budget._deposit_local)
+
+    def try_withdraw(self, budget: Any) -> bool:
+        def fallback() -> bool:
+            return budget._withdraw_local() if self._monitor.mode == "local" else True
+
+        return bool(
+            self._monitor.call(
+                "withdraw", lambda: int(self._eval(budget, "withdraw")) == 1, fallback
+            )
+        )
+
+    def totals(self, budget: Any) -> tuple[int, int]:
+        def local() -> tuple[int, int]:
+            with budget._lock:
+                return budget._totals(budget._slot()[1])
+
+        row = self._monitor.call("totals", lambda: self._eval(budget, "totals"), local)
+        return int(row[0]), int(row[1])
 
 
 class RedisBreakerState:
@@ -291,3 +365,58 @@ class SharedBulkhead:
         finally:
             with self._lock:
                 self._active -= 1
+
+
+@dataclass
+class SharedBackends:
+    """The shared stores a preset or policy uses, built from one Redis client.
+
+    Give a bare ``client`` to share everything, or set a field to override one layer:
+    ``breaker_state`` (a `RedisBreakerState`), ``window`` (a Redis client for rate
+    windows), ``semaphore`` (a lease backend such as `RedisSemaphore`) and ``budget``
+    (a `RedisRetryBudget`-style backend). Keys derive from the preset or policy name.
+    """
+
+    client: Any = None
+    breaker_state: Any = None
+    window: Any = None
+    semaphore: Any = None
+    budget: Any = None
+
+    def breaker(self) -> Any:
+        if self.breaker_state is not None:
+            return self.breaker_state
+        return None if self.client is None else RedisBreakerState(self.client)
+
+    def rate_window(self, name: str, calls: int, period: float) -> Any:
+        from python_wrap.quotas import RedisWindow
+
+        client = self.window if self.window is not None else self.client
+        if client is None:
+            return None
+        return RedisWindow(client, f"python-wrap:window:{name}", calls=calls, period=period)
+
+    def lease_backend(self) -> Any:
+        if self.semaphore is not None:
+            return self.semaphore
+        if self.client is None:
+            return None
+        from python_wrap.coordination import RedisSemaphore
+
+        return RedisSemaphore(self.client)
+
+    def budget_backend(self, name: str) -> Any:
+        if self.budget is not None:
+            return self.budget
+        return None if self.client is None else RedisRetryBudget(self.client, name)
+
+
+def resolve_shared(shared: Any) -> SharedBackends | None:
+    """Turn ``shared=`` (a client or `SharedBackends`) or ``configure(shared=)`` into one."""
+    if shared is None:
+        from python_wrap.config import get_config
+
+        shared = get_config()["shared"]
+    if shared is None or shared is False:
+        return None
+    return shared if isinstance(shared, SharedBackends) else SharedBackends(client=shared)

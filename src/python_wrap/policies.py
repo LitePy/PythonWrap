@@ -92,6 +92,9 @@ class PolicyRegistry:
         from python_wrap.quotas import shared_rate_limit
         from python_wrap.retry import fallback, retry
 
+        from python_wrap.shared import resolve_shared
+
+        sb = resolve_shared(None)
         allowed = {"timeout", "retry", "breaker", "limiter", "bulkhead", "fallback", "cache"}
         unknown = set(settings) - allowed
         if unknown:
@@ -107,6 +110,8 @@ class PolicyRegistry:
                 roles[role] = retry(**options)
             elif role == "breaker":
                 options.setdefault("name", name)
+                if sb is not None and "backend" not in options and sb.breaker() is not None:
+                    options["backend"] = sb.breaker()
                 roles[role] = CircuitBreaker(**options)
             elif role == "limiter":
                 if "backend" in options:
@@ -117,9 +122,18 @@ class PolicyRegistry:
                         options["calls"] = options.pop("rate")
                     if "per" in options:
                         options["period"] = options.pop("per")
-                    roles[role] = RateLimiter(**options)
+                    window = (
+                        None
+                        if sb is None or "calls" not in options
+                        else sb.rate_window(
+                            options.get("name", name), options["calls"], options.get("period", 1.0)
+                        )
+                    )
+                    roles[role] = RateLimiter(**options, backend=window)
             elif role == "bulkhead":
                 options.setdefault("name", name)
+                if sb is not None and "backend" not in options:
+                    options["backend"] = sb.lease_backend()
                 roles[role] = Bulkhead(**options)
             elif role == "cache":
                 roles[role] = memoize(**options)

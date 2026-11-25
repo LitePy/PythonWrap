@@ -16,6 +16,10 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
   bulkheads and `RedisSource`, plus `configure(backend_errors=...)`, `retry_backend_after`,
   the events `backend.error` / `backend.recovered`, and a `degraded` health status while a
   fallback is active. `RedisStore`/`AsyncRedisStore` report through the same events.
+- `shared=` on every preset (`http_client`, `db_call`, `third_party_api`, `llm_client`) and
+  `configure(shared=...)`, also read by `PolicyRegistry`: breaker state, rate window, bulkhead
+  lease and retry budget move to Redis, keyed by the preset name. `SharedBackends` overrides
+  one layer. `RetryBudget(backend=...)` and `RedisRetryBudget` cap retries across a fleet.
 
 ### Added
 

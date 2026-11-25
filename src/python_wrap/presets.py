@@ -37,6 +37,7 @@ from python_wrap.llm import Budget, TokenRateLimiter, _BreakerLayer, _llm_breake
 from python_wrap.policy import Policy, policy
 from python_wrap.predicates import db_transient
 from python_wrap.retry import RetryBudget, retry
+from python_wrap.shared import SharedBackends, resolve_shared
 
 __all__ = ["TRANSPORT_ERRORS", "db_call", "http_client", "llm_client", "third_party_api"]
 
@@ -46,8 +47,17 @@ __all__ = ["TRANSPORT_ERRORS", "db_call", "http_client", "llm_client", "third_pa
 TRANSPORT_ERRORS: tuple[type[BaseException], ...] = (ConnectionError, TimeoutError)
 
 
-def _budget(budget: RetryBudget | None) -> RetryBudget:
-    return budget if budget is not None else RetryBudget(ratio=0.2, min_per_second=5)
+def _budget(
+    budget: RetryBudget | None, name: str = "", shared: SharedBackends | None = None
+) -> RetryBudget:
+    if budget is not None:
+        return budget
+    backend = None if shared is None else shared.budget_backend(name)
+    return RetryBudget(ratio=0.2, min_per_second=5, backend=backend)
+
+
+def _breaker(shared: SharedBackends | None, **options: Any) -> CircuitBreaker:
+    return CircuitBreaker(backend=None if shared is None else shared.breaker(), **options)
 
 
 def _retry(
@@ -61,6 +71,8 @@ def _retry(
     on: tuple[type[BaseException], ...] | type[BaseException],
     retry_if: Callable[[Any], bool] | None,
     budget: RetryBudget | None,
+    name: str = "",
+    shared: SharedBackends | None = None,
 ) -> Any:
     if not idempotent or attempts <= 1:
         return None
@@ -73,7 +85,7 @@ def _retry(
         max_time=seconds * attempts + delay * 2**attempts + 1,
         on=on,
         retry_if=retry_if,
-        budget=_budget(budget),
+        budget=_budget(budget, name, shared),
     )
 
 
@@ -86,6 +98,7 @@ def http_client(
     breaker: bool = True,
     on: tuple[type[BaseException], ...] = TRANSPORT_ERRORS,
     budget: RetryBudget | None = None,
+    shared: Any = None,
 ) -> Policy:
     """A policy for calls to an internal HTTP service you own.
 
@@ -97,6 +110,9 @@ def http_client(
         breaker: Include a `CircuitBreaker` (5 failures, 30 s recovery).
         on: Exception types that are retried and counted by the breaker.
         budget: Share one `RetryBudget` between several policies; a new one otherwise.
+        shared: A Redis client or `SharedBackends`: the breaker state and the retry budget
+            then live in Redis, keyed by ``name``, so every worker process shares them
+            (default: ``configure(shared=...)``, else per-process state).
 
     Returns:
         A `Policy`, usable as a decorator.
@@ -115,10 +131,11 @@ def http_client(
         assert users.explain().ok
         ```
     """
+    sb = resolve_shared(shared)
     return policy(
         name=name,
         breaker=(
-            CircuitBreaker(failure_threshold=5, recovery_timeout=30.0, on=on, name=name)
+            _breaker(sb, failure_threshold=5, recovery_timeout=30.0, on=on, name=name)
             if breaker
             else None
         ),
@@ -132,6 +149,8 @@ def http_client(
             on=on,
             retry_if=None,
             budget=budget,
+            name=name,
+            shared=sb,
         ),
         timeout=timeout(timeout_seconds),
     )
@@ -146,6 +165,7 @@ def db_call(
     breaker: bool = False,
     retry_if: Callable[[Any], bool] = db_transient,
     budget: RetryBudget | None = None,
+    shared: Any = None,
 ) -> Policy:
     """A policy for a database unit of work (a whole transaction, not one statement).
 
@@ -163,15 +183,18 @@ def db_call(
         breaker: Include a `CircuitBreaker` (10 failures, 15 s recovery).
         retry_if: Which exceptions are transient; default `db_transient`.
         budget: A shared `RetryBudget`, or None for a new one.
+        shared: A Redis client or `SharedBackends` for breaker state and the retry budget
+            (see `http_client`).
 
     Returns:
         A `Policy`.
     """
+    sb = resolve_shared(shared)
     return policy(
         name=name,
         breaker=(
-            CircuitBreaker(
-                failure_threshold=10, recovery_timeout=15.0, on=TRANSPORT_ERRORS, name=name
+            _breaker(
+                sb, failure_threshold=10, recovery_timeout=15.0, on=TRANSPORT_ERRORS, name=name
             )
             if breaker
             else None
@@ -188,6 +211,8 @@ def db_call(
                 not isinstance(exc, (CircuitOpenError, TimeoutExpired)) and retry_if(exc)
             ),
             budget=budget,
+            name=name,
+            shared=sb,
         ),
         timeout=timeout(timeout_seconds),
     )
@@ -204,6 +229,7 @@ def third_party_api(
     period: float = 1.0,
     max_concurrent: int | None = None,
     budget: RetryBudget | None = None,
+    shared: Any = None,
 ) -> Policy:
     """A policy for an external vendor API (payment gateway, ERP, SMS/e-mail provider).
 
@@ -223,15 +249,29 @@ def third_party_api(
         period: Rate-limit period in seconds.
         max_concurrent: Bulkhead size (None: no bulkhead).
         budget: A shared `RetryBudget`, or None for a new one.
+        shared: A Redis client or `SharedBackends`: breaker state, the rate window, the
+            bulkhead lease and the retry budget are then shared by every worker process,
+            so ``calls`` is a fleet-wide limit (see `http_client`).
 
     Returns:
         A `Policy`.
     """
+    sb = resolve_shared(shared)
+    window = None if sb is None or calls is None else sb.rate_window(name, calls, period)
+    lease = None if sb is None else sb.lease_backend()
     return policy(
         name=name,
-        limiter=RateLimiter(calls, period, name=name) if calls is not None else None,
-        bulkhead=Bulkhead(max_concurrent, name=name) if max_concurrent is not None else None,
-        breaker=CircuitBreaker(failure_threshold=5, recovery_timeout=60.0, on=on, name=name),
+        limiter=(
+            None
+            if calls is None
+            else RateLimiter(calls, period, name=name, backend=window)
+            if window is not None
+            else RateLimiter(calls, period, name=name)
+        ),
+        bulkhead=(
+            Bulkhead(max_concurrent, name=name, backend=lease) if max_concurrent is not None else None
+        ),
+        breaker=_breaker(sb, failure_threshold=5, recovery_timeout=60.0, on=on, name=name),
         retry=_retry(
             idempotent=idempotent,
             attempts=attempts,
@@ -242,6 +282,8 @@ def third_party_api(
             on=on,
             retry_if=None,
             budget=budget,
+            name=name,
+            shared=sb,
         ),
         timeout=timeout(timeout_seconds),
     )
@@ -258,6 +300,7 @@ def llm_client(
     budget: RetryBudget | None = None,
     spend: Budget | None = None,
     tokens: TokenRateLimiter | None = None,
+    shared: Any = None,
 ) -> Policy:
     """A policy for calls to an LLM provider (chat/completions/messages endpoints).
 
@@ -281,6 +324,8 @@ def llm_client(
         spend: A token/dollar `python_wrap.llm.Budget`, placed in the ``limiter`` role
             (checked once per logical call; usage recorded from the final response).
         tokens: A `python_wrap.llm.TokenRateLimiter`, also in the ``limiter`` role.
+        shared: A Redis client or `SharedBackends` for the breaker state and the retry
+            budget (see `http_client`).
 
     Returns:
         A `Policy`.
@@ -300,12 +345,18 @@ def llm_client(
         assert chat.explain().findings == ()
         ```
     """
+    sb = resolve_shared(shared)
     limiters = [layer for layer in (spend, tokens) if layer is not None]
     return policy(
         name=name,
         limiter=limiters or None,
         breaker=(
-            _BreakerLayer(_llm_breaker(failure_threshold=5, recovery_timeout=60.0, name=name))
+            _BreakerLayer(_llm_breaker(
+                    failure_threshold=5,
+                    recovery_timeout=60.0,
+                    name=name,
+                    backend=None if sb is None else sb.breaker(),
+                ))
             if breaker
             else None
         ),
@@ -316,7 +367,7 @@ def llm_client(
                 max_delay=max_delay,
                 jitter=0.5,
                 max_time=timeout_seconds * attempts + max_delay * (attempts - 1) + 1,
-                budget=_budget(budget),
+                budget=_budget(budget, name, sb),
             )
             if idempotent and attempts > 1
             else None

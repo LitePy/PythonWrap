@@ -55,6 +55,32 @@ charge_policy = third_party_api("payments", idempotent=False)
 assert "retry" not in [layer.role for layer in charge_policy.explain().layers]
 ```
 
+### Sharing state across worker processes
+
+Without `shared=`, every preset keeps its breaker, limiter, bulkhead and retry budget in
+the current process, so N workers allow N times a rate limit and each one discovers an
+outage alone (`doctor --multiprocess` reports PW012). Pass a Redis client, or set it once
+for the project:
+
+<!-- skip -->
+```python
+from python_wrap import configure
+from python_wrap.presets import third_party_api
+from python_wrap.shared import SharedBackends
+
+payments = third_party_api("payments", calls=30, period=60, max_concurrent=8, shared=client)
+
+configure(shared=client)                      # every preset and PolicyRegistry role
+configure(shared=SharedBackends(client=client, semaphore=my_lease_backend))  # override a layer
+```
+
+Keys derive from the preset name, so two services that use the same name share state on
+purpose. A bare client wraps `RedisBreakerState`, `RedisWindow`, `RedisSemaphore` and the new
+`RedisRetryBudget` (two counters per time slot in one hash, one Lua script). The same
+`RedisRetryBudget` works on its own: `RetryBudget(ratio=0.2, backend=RedisRetryBudget(client, "vendor"))`.
+Layers built this way report `shared=True`, so PW012 stays quiet. Store failures follow
+[`on_backend_error`](../concurrency/shared-limits.md#when-the-shared-store-is-down).
+
 ## Explaining a policy
 
 `Policy.explain()` (or `python_wrap.doctor.explain`) lists the layers outermost first with
