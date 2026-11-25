@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import logging
 import math
 import pickle
 import re
 from collections.abc import Callable, Hashable
 from typing import Any
 
+from python_wrap._backend import BackendMonitor
 from python_wrap._runtime import digest
 
 __all__ = ["RedisStore"]
@@ -42,24 +42,23 @@ class RedisStore:
         loads: Callable[[bytes], Any] = pickle.loads,
         key_format: Callable[[Hashable], str] | None = None,
         fail_open: bool = True,
+        retry_backend_after: float = 1.0,
     ) -> None:
         if not prefix:
             raise ValueError("RedisStore needs a nonempty per-function prefix")
         self.client, self.prefix = client, prefix
         self.dumps, self.loads = dumps, loads
         self.key_format, self.fail_open = key_format, fail_open
+        # fail_open=True is "allow" (a miss); False is "raise".
+        self._monitor = BackendMonitor(
+            "cache", prefix, "allow" if fail_open else "raise", retry_backend_after
+        )
 
     def _key(self, key: Hashable) -> str:
         return self.prefix + (self.key_format(key) if self.key_format else digest(key))
 
     def _run(self, action: Callable[[], Any], default: Any = None) -> Any:
-        try:
-            return action()
-        except Exception:
-            if not self.fail_open:
-                raise
-            logging.getLogger("python_wrap").warning("RedisStore operation failed", exc_info=True)
-            return default
+        return self._monitor.call("cache", action, lambda: default)
 
     def get(self, key: Hashable, /) -> Any:
         """Return a decoded entry, or None on a miss."""

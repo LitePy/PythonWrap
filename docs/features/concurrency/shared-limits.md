@@ -111,5 +111,57 @@ managers work too. For shared async use `async with capacity` so release can awa
 backend I/O. Lease expiry has the same [limits](leases-and-idempotency.md#redis-and-sql-backends)
 as a distributed lock; long external work must tolerate a lost lease.
 
+## When the shared store is down
+
+Every shared backend takes the same option, `on_backend_error`:
+
+| Value | Effect |
+|---|---|
+| `"raise"` (default) | The store error propagates. |
+| `"local"` | Use this process's own breaker, window, quota or bulkhead cap until the store answers. |
+| `"allow"` | Admit the call and skip accounting. |
+
+<!-- skip -->
+```python
+from python_wrap import CircuitBreaker, configure
+from python_wrap.shared import RedisBreakerState
+
+configure(backend_errors="local")  # project default for every shared backend
+breaker = CircuitBreaker(name="vendor", backend=RedisBreakerState(client),
+                         retry_backend_after=1.0)  # skip a dead store for 1 s
+```
+
+The first error emits `backend.error` (fields `backend`, `operation`, `error`); the next
+success emits `backend.recovered`. While a fallback is active `health.summary()` reports
+`degraded`. Idempotency result stores always raise. `RedisStore` keeps `fail_open`
+(`True` is `"allow"`, `False` is `"raise"`); `RedisSource` takes `on_backend_error` and
+answers its `default`.
+
+## When the shared store is down
+
+Every shared backend takes the same option, `on_backend_error`:
+
+| Value | Effect |
+|---|---|
+| `"raise"` (default) | The store error propagates. |
+| `"local"` | Use this process's own breaker, window, quota or bulkhead cap until the store answers. |
+| `"allow"` | Admit the call and skip accounting. |
+
+<!-- skip -->
+```python
+from python_wrap import CircuitBreaker, configure
+from python_wrap.shared import RedisBreakerState
+
+configure(backend_errors="local")  # project default for every shared backend
+breaker = CircuitBreaker(name="vendor", backend=RedisBreakerState(client),
+                         retry_backend_after=1.0)  # skip a dead store for 1 s
+```
+
+The first error emits `backend.error` (fields `backend`, `operation`, `error`); the next
+success emits `backend.recovered`. While a fallback is active `health.summary()` reports
+`degraded`. Idempotency result stores always raise. `RedisStore` keeps `fail_open`
+(`True` is `"allow"`, `False` is `"raise"`); `RedisSource` takes `on_backend_error` and
+answers its `default`.
+
 See [quotas API](../../api/quotas.md), [shared backends API](../../api/shared.md),
 and [bulkhead API](../../api/bulkhead.md).

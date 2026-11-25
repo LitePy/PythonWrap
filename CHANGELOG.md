@@ -10,6 +10,20 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
 
 ## [Unreleased]
 
+### Added
+
+- `on_backend_error="raise" | "local" | "allow"` on shared breakers, windows, quotas,
+  bulkheads and `RedisSource`, plus `configure(backend_errors=...)`, `retry_backend_after`,
+  the events `backend.error` / `backend.recovered`, and a `degraded` health status while a
+  fallback is active. `RedisStore`/`AsyncRedisStore` report through the same events.
+
+### Added
+
+- `on_backend_error="raise" | "local" | "allow"` on shared breakers, windows, quotas,
+  bulkheads and `RedisSource`, plus `configure(backend_errors=...)`, `retry_backend_after`,
+  the events `backend.error` / `backend.recovered`, and a `degraded` health status while a
+  fallback is active. `RedisStore`/`AsyncRedisStore` report through the same events.
+
 ## [0.4.0b1] - 2026-11-11
 
 First beta. The public API is feature-complete for 0.4: the remaining work before the

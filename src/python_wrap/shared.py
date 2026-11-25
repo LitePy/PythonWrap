@@ -10,6 +10,7 @@ import uuid
 from typing import Any
 
 from python_wrap import _core, _fork
+from python_wrap._backend import BackendMonitor
 from python_wrap._runtime import digest, seconds
 from python_wrap.coordination import AlreadyRunning, Lease
 from python_wrap.errors import BulkheadFull
@@ -143,6 +144,8 @@ class SharedBulkhead:
         max_waiting: int | None = None,
         timeout: float | None = None,
         ttl: float = 60,
+        on_backend_error: str | None = None,
+        retry_backend_after: float = 1.0,
     ) -> None:
         if (
             isinstance(max_concurrent, bool)
@@ -160,6 +163,7 @@ class SharedBulkhead:
         self.max_waiting = max_waiting
         self.timeout = None if timeout is None else seconds(timeout, positive=False)
         self.ttl = seconds(ttl)
+        self._monitor = BackendMonitor("bulkhead", name, on_backend_error, retry_backend_after)
         self._stack: contextvars.ContextVar[tuple[tuple[Lease, object], ...]] = (
             contextvars.ContextVar("bulkhead_leases", default=())
         )
@@ -182,6 +186,18 @@ class SharedBulkhead:
         with self._lock:
             return self._active
 
+    def _store_down(self, exc: Exception) -> None:
+        """Apply on_backend_error to a failed lease call (re-raise in "raise" mode)."""
+        self._monitor.failed(exc, "acquire")
+        if self._monitor.mode == "raise":
+            raise exc
+
+    def _local_admit(self, owner: object) -> None:
+        """Store is down: "allow" admits; "local" admits up to this process's capacity."""
+        if self._monitor.mode == "local" and self.active >= self.capacity:
+            raise self._rejected("shared bulkhead full (local fallback)")
+        self._admitted(None, owner)  # type: ignore[arg-type]
+
     def _lease(self) -> Lease:
         return Lease(self.name, backend=self.backend, ttl=self.ttl, limit=self.capacity, wait=False)
 
@@ -203,6 +219,8 @@ class SharedBulkhead:
             self._active += 1
 
     def acquire(self) -> None:
+        if self._monitor._skipping():
+            return self._local_admit(threading.get_ident())
         lease = self._lease()
         try:
             lease.__enter__()
@@ -216,6 +234,10 @@ class SharedBulkhead:
             finally:
                 with self._lock:
                     self._waiting -= 1
+        except Exception as exc:
+            self._store_down(exc)
+            return self._local_admit(threading.get_ident())
+        self._monitor.succeeded()
         self._admitted(lease, threading.get_ident())
 
     def release(self, typ: Any = None, exc: Any = None, tb: Any = None) -> None:
@@ -227,12 +249,15 @@ class SharedBulkhead:
             raise RuntimeError("shared bulkhead must be released in its acquiring thread")
         self._stack.set(stack[:-1])
         try:
-            lease.__exit__(typ, exc, tb)
+            if lease is not None:
+                lease.__exit__(typ, exc, tb)
         finally:
             with self._lock:
                 self._active -= 1
 
     async def acquire_async(self) -> None:
+        if self._monitor._skipping():
+            return self._local_admit(asyncio.current_task())
         lease = self._lease()
         try:
             await lease.__aenter__()
@@ -246,6 +271,10 @@ class SharedBulkhead:
             finally:
                 with self._lock:
                     self._waiting -= 1
+        except Exception as exc:
+            self._store_down(exc)
+            return self._local_admit(asyncio.current_task())
+        self._monitor.succeeded()
         self._admitted(lease, asyncio.current_task())
 
     async def release_async(self, typ: Any = None, exc: Any = None, tb: Any = None) -> None:
@@ -257,7 +286,8 @@ class SharedBulkhead:
             raise RuntimeError("shared bulkhead must be released in its acquiring task")
         self._stack.set(stack[:-1])
         try:
-            await lease.__aexit__(typ, exc, tb)
+            if lease is not None:
+                await lease.__aexit__(typ, exc, tb)
         finally:
             with self._lock:
                 self._active -= 1

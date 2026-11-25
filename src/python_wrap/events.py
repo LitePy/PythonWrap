@@ -127,6 +127,14 @@ EVENT_NAMES: Mapping[str, str] = MappingProxyType(
             "bucket (or raised, with fail_open=False). function is the window name. "
             "Fields: error (str, the exception class), op (str)."
         ),
+        "backend.error": (
+            "A shared backend (breaker state, window, quota, cache store, switch source) "
+            "raised. function is the backend name. Fields: backend (str kind), operation "
+            "(str), error (str, the exception class). The call then follows on_backend_error."
+        ),
+        "backend.recovered": (
+            "A shared backend answered again after backend.error. Fields: backend (str)."
+        ),
         "llm.stream_resumed": (
             "A resume_safe stream failed before any output and is reopened. function is "
             "the stream name. Fields: attempt (int, the attempt that failed), exception "

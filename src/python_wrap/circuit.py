@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any, Concatenate, NoReturn, ParamSpec, Protocol, TypeVar, cast, overload
 
 from python_wrap import _core, _fork
+from python_wrap._backend import BackendMonitor
 from python_wrap._core import F, LoggerLike, P, R
 from python_wrap.errors import CircuitOpenError
 
@@ -98,6 +99,12 @@ class CircuitBreaker:
         on_state_change: Listener called with ``(breaker, old_state, new_state)``.
         name: Name used in log messages, errors and events.
         logger: Logger (or name) for state transitions.
+        window: Count failures inside this many seconds instead of consecutive failures.
+        backend: Shared state such as `python_wrap.shared.RedisBreakerState`.
+        on_backend_error: What a store error does: ``"raise"`` (default), ``"local"``
+            (use this process's own breaker until the store answers) or ``"allow"``
+            (admit the call, skip accounting). Defaults to ``configure(backend_errors=)``.
+        retry_backend_after: Seconds to skip a failed store before trying it again.
 
     Raises:
         ValueError: If a numeric option is out of range.
@@ -131,6 +138,10 @@ class CircuitBreaker:
         ```
     """
 
+    @staticmethod
+    def name_for(name: str | None) -> str:
+        return name or "circuit"
+
     def __reduce__(self) -> NoReturn:
         _core.refuse_pickle(self)
 
@@ -148,6 +159,8 @@ class CircuitBreaker:
         logger: LoggerLike = None,
         window: float | None = None,
         backend: Any = None,
+        on_backend_error: str | None = None,
+        retry_backend_after: float = 1.0,
     ) -> None:
         if (
             isinstance(failure_threshold, bool)
@@ -174,6 +187,11 @@ class CircuitBreaker:
         if backend is not None and not name:
             raise ValueError("shared breakers require an explicit name")
         self.window, self.backend = window, backend
+        self._monitor: BackendMonitor | None = (
+            None
+            if backend is None
+            else BackendMonitor("breaker", self.name_for(name), on_backend_error, retry_backend_after)
+        )
         self._failure_times: deque[float] = deque()
         self.failure_threshold = failure_threshold
         self.recovery_timeout = recovery_timeout
@@ -212,8 +230,9 @@ class CircuitBreaker:
     @property
     def state(self) -> CircuitState:
         """Current state (an open circuit past its timeout reports ``half_open``)."""
-        if self.backend is not None:
-            return CircuitState(self._remote("state")["state"])
+        data = self._try("state")
+        if data is not None:
+            return CircuitState(data["state"])
         with self._lock:
             self._maybe_half_open()
             state = self._state
@@ -223,16 +242,17 @@ class CircuitBreaker:
     @property
     def failure_count(self) -> int:
         """Consecutive failures counted so far."""
-        if self.backend is not None:
-            return int(self._remote("state")["failures"])
+        data = self._try("state")
+        if data is not None:
+            return int(data["failures"])
         with self._lock:
             return self._failures
 
     @property
     def stats(self) -> CircuitStats:
         """A consistent `CircuitStats` snapshot of the counters and state."""
-        if self.backend is not None:
-            data = self._remote("state")
+        data = self._try("state")
+        if data is not None:
             return CircuitStats(
                 name=self.name,
                 state=CircuitState(data["state"]),
@@ -258,8 +278,7 @@ class CircuitBreaker:
 
     def reset(self) -> None:
         """Force the breaker back to closed and zero every counter."""
-        if self.backend is not None:
-            self._remote("reset")
+        if self._try("reset") is not None:
             return
         with self._lock:
             self._failure_times.clear()
@@ -277,12 +296,22 @@ class CircuitBreaker:
 
     def force_open(self) -> None:
         """Force open for maintenance/tests, without simulating dependency failures."""
-        if self.backend is not None:
-            self._remote("force_open")
+        if self._try("force_open") is not None:
             return
         with self._lock:
             self._open()
         self._notify()
+
+    def _try(self, operation: str, generation: int = 0, trial: bool = False) -> dict[str, Any] | None:
+        """Backend result, or None when this call must use the local state (or be bypassed)."""
+        if self._monitor is None:
+            return None
+        return self._monitor.call(
+            operation, lambda: self._remote(operation, generation, trial), lambda: None
+        )
+
+    def _bypass(self) -> bool:
+        return self._monitor is not None and self._monitor.mode == "allow"
 
     def _remote(self, operation: str, generation: int = 0, trial: bool = False) -> dict[str, Any]:
         data: dict[str, Any] = self.backend.operate(self, operation, generation, trial)
@@ -347,8 +376,10 @@ class CircuitBreaker:
 
     def _acquire(self) -> tuple[int, bool]:
         """Admit a call. Returns ``(generation, is_trial)`` or raises CircuitOpenError."""
-        if self.backend is not None:
-            data = self._remote("admit")
+        data = self._try("admit")
+        if data is None and self._bypass():
+            return 0, False
+        if data is not None:
             if not data["admitted"]:
                 wait = data["wait"] / 1000
                 _core.emit("circuit.rejected", self.name, retry_after=wait)
@@ -381,8 +412,7 @@ class CircuitBreaker:
         return admitted
 
     def _success(self, generation: int, trial: bool) -> None:
-        if self.backend is not None:
-            self._remote("success", generation, trial)
+        if self._try("success", generation, trial) is not None or self._bypass():
             return
         with self._lock:
             self._total_successes += 1
@@ -407,8 +437,7 @@ class CircuitBreaker:
         self._notify()
 
     def _failure(self, generation: int, trial: bool) -> None:
-        if self.backend is not None:
-            self._remote("failure", generation, trial)
+        if self._try("failure", generation, trial) is not None or self._bypass():
             return
         with self._lock:
             self._total_failures += 1
@@ -428,8 +457,7 @@ class CircuitBreaker:
 
     def _release(self, generation: int, trial: bool) -> None:
         """A non-counted exception ended the call: free its trial slot, if any."""
-        if self.backend is not None:
-            self._remote("neutral", generation, trial)
+        if self._try("neutral", generation, trial) is not None or self._bypass():
             return
         if not trial:
             return

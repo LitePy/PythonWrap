@@ -19,7 +19,6 @@ import copy
 import functools
 import inspect
 import json
-import logging
 import math
 import pickle
 import re
@@ -29,6 +28,7 @@ from collections.abc import Awaitable, Callable, Hashable
 from typing import Any, Protocol, TypeVar, runtime_checkable
 
 from python_wrap import _core, _fork
+from python_wrap._backend import BackendMonitor
 from python_wrap._runtime import digest
 from python_wrap.caching import CacheInfo, _await_shared, _make_key_builder, _shared_future
 
@@ -203,26 +203,22 @@ class AsyncRedisStore:
         loads: Callable[[bytes], Any] = pickle.loads,
         key_format: Callable[[Hashable], str] | None = None,
         fail_open: bool = True,
+        retry_backend_after: float = 1.0,
     ) -> None:
         if not prefix:
             raise ValueError("AsyncRedisStore needs a nonempty per-function prefix")
         self.client, self.prefix = client, prefix
         self.dumps, self.loads = dumps, loads
         self.key_format, self.fail_open = key_format, fail_open
+        self._monitor = BackendMonitor(
+            "cache", prefix, "allow" if fail_open else "raise", retry_backend_after
+        )
 
     def _key(self, key: Hashable) -> str:
         return self.prefix + (self.key_format(key) if self.key_format else digest(key))
 
     async def _run(self, action: Callable[[], Awaitable[Any]], default: Any = None) -> Any:
-        try:
-            return await action()
-        except Exception:
-            if not self.fail_open:
-                raise
-            logging.getLogger("python_wrap").warning(
-                "AsyncRedisStore operation failed", exc_info=True
-            )
-            return default
+        return await self._monitor.acall("cache", action, lambda: default)
 
     async def get(self, key: Hashable, /) -> Any | None:
         """Return a decoded entry, or None on a miss."""
