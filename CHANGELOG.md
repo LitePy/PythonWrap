@@ -21,6 +21,8 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
 
 ### Added
 
+- Retry, HTTP retry and Celery countdowns accept `jitter="full"` or `"equal"`;
+  doctor PW024 flags retries without backoff or jitter across worker processes.
 - Web adapters can trust a remaining-deadline header with `trust_deadline_header=True`;
   Celery publishes and restores request ids and optionally inherits the caller's
   deadline with `install(inherit_deadline=True)`. Header names can be set through

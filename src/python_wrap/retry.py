@@ -80,7 +80,7 @@ def _validate(
     delay: float,
     backoff: float,
     max_delay: float | None,
-    jitter: float,
+    jitter: float | str,
     max_time: float | None = None,
 ) -> None:
     if max_attempts is not None and max_attempts < 1:
@@ -89,8 +89,10 @@ def _validate(
         raise ValueError(f"delay must be >= 0, got {delay!r}")
     if backoff < 1:
         raise ValueError(f"backoff must be >= 1, got {backoff!r}")
-    if jitter < 0:
-        raise ValueError(f"jitter must be >= 0, got {jitter!r}")
+    if jitter not in ("full", "equal") and (
+        isinstance(jitter, str) or not isinstance(jitter, (int, float)) or jitter < 0
+    ):
+        raise ValueError(f"jitter must be >= 0, 'full' or 'equal', got {jitter!r}")
     if max_delay is not None and max_delay < 0:
         raise ValueError(f"max_delay must be >= 0, got {max_delay!r}")
     if max_time is not None and max_time < 0:
@@ -117,7 +119,7 @@ def _validate_delays(delays: Sequence[float] | None) -> tuple[float, ...] | None
 
 
 def _compute_delay(
-    attempt: int, delay: float, backoff: float, max_delay: float | None, jitter: float
+    attempt: int, delay: float, backoff: float, max_delay: float | None, jitter: float | str
 ) -> float:
     try:
         wait = delay * backoff ** (attempt - 1)
@@ -125,8 +127,12 @@ def _compute_delay(
         wait = sys.float_info.max
     if max_delay is not None:
         wait = min(wait, max_delay)
+    if jitter == "full":
+        return random.uniform(0, wait)
+    if jitter == "equal":
+        return random.uniform(wait / 2, wait)
     if jitter:
-        wait += random.uniform(0, jitter)
+        wait += random.uniform(0, float(jitter))
     return wait
 
 
@@ -601,7 +607,7 @@ class _Engine:
         delay: float,
         backoff: float,
         max_delay: float | None,
-        jitter: float,
+        jitter: float | str,
         max_time: float | None,
         on: ExceptionTypes,
         retry_if: ExceptionPredicate | None,
@@ -957,7 +963,7 @@ def retry(
     delay: float = ...,
     backoff: float = ...,
     max_delay: float | None = ...,
-    jitter: float = ...,
+    jitter: float | str = ...,
     max_time: float | None = ...,
     on: ExceptionTypes = ...,
     retry_if: ExceptionPredicate | None = ...,
@@ -980,7 +986,7 @@ def retry(
     delay: float = ...,
     backoff: float = ...,
     max_delay: float | None = ...,
-    jitter: float = ...,
+    jitter: float | str = ...,
     max_time: float | None = ...,
     on: ExceptionTypes = ...,
     retry_if: ExceptionPredicate | None = ...,
@@ -1002,7 +1008,7 @@ def retry(
     delay: float = _UNSET,
     backoff: float = _UNSET,
     max_delay: float | None = _UNSET,
-    jitter: float = _UNSET,
+    jitter: float | str = _UNSET,
     max_time: float | None = _UNSET,
     on: ExceptionTypes = Exception,
     retry_if: ExceptionPredicate | None = None,
@@ -1363,7 +1369,7 @@ def retrying(
     delay: float = _UNSET,
     backoff: float = _UNSET,
     max_delay: float | None = _UNSET,
-    jitter: float = _UNSET,
+    jitter: float | str = _UNSET,
     max_time: float | None = _UNSET,
     on: ExceptionTypes = Exception,
     retry_if: ExceptionPredicate | None = None,
@@ -1481,7 +1487,7 @@ def retry_on_exception(
     delay: float = 0.0,
     backoff: float = 1.0,
     max_delay: float | None = None,
-    jitter: float = 0.0,
+    jitter: float | str = 0.0,
     retry_if: Callable[[BaseException], bool] | None = None,
     on_retry: Callable[[RetryState], None] | None = None,
     logger: LoggerLike = None,

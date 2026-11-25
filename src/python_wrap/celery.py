@@ -14,7 +14,6 @@ prefork children, which otherwise each keep their own.
 from __future__ import annotations
 
 import contextvars
-import random
 from collections.abc import Sequence
 from typing import Any, NoReturn
 
@@ -207,7 +206,7 @@ def retry_countdown(
     delay: float = 5.0,
     backoff: float = 2.0,
     max_delay: float = 600.0,
-    jitter: float = 0.0,
+    jitter: float | str = 0.0,
     respect_retry_after: bool = True,
 ) -> float:
     """Seconds to wait before Celery runs ``task`` again, following python-wrap rules.
@@ -248,10 +247,9 @@ def retry_countdown(
         assert retry_countdown(task, CircuitOpenError("open", retry_after=42)) == 42
         ```
     """
-    from python_wrap.retry import retry_after_header
+    from python_wrap.retry import _compute_delay, _validate, retry_after_header
 
-    if delay < 0 or max_delay < 0 or jitter < 0 or backoff < 1:
-        raise ValueError("delay, max_delay and jitter must be >= 0 and backoff >= 1")
+    _validate(1, delay, backoff, max_delay, jitter)
     if delays is not None and not delays:
         raise ValueError("delays must not be empty")
     if respect_retry_after and exc is not None:
@@ -263,7 +261,7 @@ def retry_countdown(
         base = float(delays[min(retries, len(delays) - 1)])
     else:
         base = delay * backoff**retries
-    return min(base, max_delay) + (random.uniform(0, jitter) if jitter else 0.0)
+    return _compute_delay(1, base, 1, max_delay, jitter)
 
 
 def retry_task(
@@ -275,7 +273,7 @@ def retry_task(
     delay: float = 5.0,
     backoff: float = 2.0,
     max_delay: float = 600.0,
-    jitter: float = 0.0,
+    jitter: float | str = 0.0,
     respect_retry_after: bool = True,
 ) -> NoReturn:
     """Ask Celery to retry ``task`` later with a `retry_countdown` schedule.

@@ -145,6 +145,7 @@ The doctor reports codes PW001 to PW019 (the table lists them by group, not stri
 | PW021 | warning | An `mcp_guard` retries every tool (`retry=` without `retry_tools=`): a retried MCP write may run twice. |
 | PW022 | warning | `memoize` with a shared store and no `key=` on a function with dict, set or unannotated parameters: equal arguments are keyed alike in every process, but an unsupported object raises `TypeError`. |
 | PW023 | warning | `python_wrap.celery.check_visibility`: a blocking limiter, unbounded bulkhead queue or retry `max_time` can outlive the broker's visibility timeout, so the broker delivers the task again while it still runs. |
+| PW024 | warning | With `--multiprocess`, a retry layer has no backoff or jitter; workers may retry together. Use `backoff=2, jitter="full"`. |
 | PW018 | warning | A python-wrap LLM retry wraps an SDK client (`llm_retry(client=...)`) whose own retries are still on: attempts multiply (4 x 3 = 12). See [OpenAI and Anthropic SDK clients](../ai/openai-anthropic.md#doctor-checks). |
 | PW019 | warning | A retry wraps a streamed LLM call (`stream_timeout`) without `resume_safe`: a replay after output started repeats text and half-done tool calls. |
 

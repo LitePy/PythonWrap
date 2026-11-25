@@ -97,6 +97,18 @@ def test_jitter_added(fake_clock: FakeClock, monkeypatch: pytest.MonkeyPatch) ->
     assert seen == [(0, 0.5), (0, 0.5)]
 
 
+def test_jitter_modes_span_the_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    from python_wrap.retry import _compute_delay
+
+    bounds = []
+    monkeypatch.setattr(random, "uniform", lambda low, high: bounds.append((low, high)) or high)
+    assert _compute_delay(2, 1, 2, 30, "full") == 2
+    assert _compute_delay(2, 1, 2, 30, "equal") == 2
+    assert bounds == [(0, 2), (1, 2)]
+    with pytest.raises(ValueError, match="jitter"):
+        retry(jitter="unknown")
+
+
 def test_unlimited_attempts(fake_clock: FakeClock) -> None:
     f = Flaky(20)
     assert retry(f, max_attempts=None, delay=0)() == "ok"

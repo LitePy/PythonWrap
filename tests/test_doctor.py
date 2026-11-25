@@ -60,6 +60,14 @@ def test_unbounded_retry_is_an_error():
     assert "PW001" in codes(report)
 
 
+def test_multiprocess_retry_warns_without_backoff_or_jitter():
+    stack = policy(retry=retry(on=OSError))
+    assert "PW024" not in codes(stack.explain())
+    assert "PW024" in codes(explain(stack, multiprocess=True))
+    safe = policy(retry=retry(on=OSError, backoff=2, jitter="full"))
+    assert "PW024" not in codes(explain(safe, multiprocess=True))
+
+
 def test_non_idempotent_retry_is_an_error_only_when_declared():
     stack = policy(
         retry=retry(max_attempts=3, on=OSError, budget=RetryBudget()), timeout=timeout(1)

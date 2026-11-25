@@ -259,6 +259,15 @@ def _check(
     for layer in retries:
         settings = layer.settings
         attempts, max_time = settings.get("max_attempts"), settings.get("max_time")
+        if multiprocess and (settings.get("backoff") == 1 or not settings.get("jitter")):
+            found.append(
+                Finding(
+                    "PW024",
+                    "warning",
+                    "retry across workers has no backoff or jitter: synchronized retries can "
+                    "overload a recovering dependency. Use backoff=2, jitter='full'.",
+                )
+            )
         if attempts is None and max_time is None:
             found.append(
                 Finding(

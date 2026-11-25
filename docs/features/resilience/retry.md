@@ -40,6 +40,11 @@
     ```
 
 `retry` works bare (`@retry`), with options, and as a plain call: `retry(func, max_attempts=5)`.
+For several workers, set a project default before decorating functions:
+`configure(retry={"backoff": 2, "jitter": "full", "max_delay": 30})`.
+`jitter="full"` chooses any wait between zero and the capped backoff; `"equal"`
+chooses between half and all of it. A numeric jitter still adds up to that many
+seconds. Bare retry defaults stay unchanged for this release.
 
 ## When to use it
 

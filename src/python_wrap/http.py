@@ -15,7 +15,6 @@ from __future__ import annotations
 import contextlib
 import importlib
 import logging
-import random
 import threading
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
@@ -23,7 +22,7 @@ from typing import Any
 
 from python_wrap import _core
 from python_wrap.deadline import remaining as _deadline_remaining
-from python_wrap.retry import RetryBudget, http_status, retry, retry_after_header
+from python_wrap.retry import RetryBudget, _compute_delay, http_status, retry, retry_after_header
 
 __all__ = [
     "IDEMPOTENT_METHODS",
@@ -103,7 +102,7 @@ class HttpRetryPolicy:
     delay: float = 0.5
     backoff: float = 2.0
     max_delay: float = 30.0
-    jitter: float = 0.0
+    jitter: float | str = 0.0
     statuses: frozenset[int] = RETRYABLE_STATUSES
     methods: frozenset[str] = IDEMPOTENT_METHODS
     retry_on: tuple[type[BaseException], ...] = (ConnectionError, TimeoutError, OSError)
@@ -122,8 +121,12 @@ class HttpRetryPolicy:
             raise ValueError(f"backoff must be >= 1, got {self.backoff!r}")
         if not self.max_delay >= 0:
             raise ValueError(f"max_delay must be >= 0, got {self.max_delay!r}")
-        if not self.jitter >= 0:
-            raise ValueError(f"jitter must be >= 0, got {self.jitter!r}")
+        if self.jitter not in ("full", "equal") and (
+            isinstance(self.jitter, str)
+            or not isinstance(self.jitter, (int, float))
+            or self.jitter < 0
+        ):
+            raise ValueError(f"jitter must be >= 0, 'full' or 'equal', got {self.jitter!r}")
         if not self.max_retry_after >= 0:
             raise ValueError(f"max_retry_after must be >= 0, got {self.max_retry_after!r}")
         if self.budget is not None and not isinstance(self.budget, RetryBudget):
@@ -239,14 +242,9 @@ def retry_delay(
         hinted = retry_after_header(response_or_exc)
         if hinted is not None:
             return None if hinted > policy.max_retry_after else hinted
-    try:
-        wait = policy.delay * policy.backoff ** max(attempt - 1, 0)
-    except OverflowError:
-        wait = policy.max_delay
-    wait = min(wait, policy.max_delay)
-    if policy.jitter:
-        wait += random.uniform(0, policy.jitter)
-    return float(wait)
+    return _compute_delay(
+        max(attempt, 1), policy.delay, policy.backoff, policy.max_delay, policy.jitter
+    )
 
 
 class _Run:
@@ -377,7 +375,7 @@ class HttpPolicy:
 
     # -- per-host state ----------------------------------------------------------------
     def _build(self, kind: str, value: Any, name: str) -> Any:
-        if value is None or not callable(value) and value is not True:
+        if value is None or (not callable(value) and value is not True):
             return value
         if value is True:  # only the breaker has a default
             from python_wrap.circuit import CircuitBreaker
@@ -452,7 +450,9 @@ class HttpPolicy:
             if left is not None:
                 for key in ("connect", "read", "write", "pool"):
                     value = current.get(key)
-                    current[key] = max(left, 0.001) if value is None else min(value, max(left, 0.001))
+                    current[key] = (
+                        max(left, 0.001) if value is None else min(value, max(left, 0.001))
+                    )
             if current:
                 extensions["timeout"] = current
         if self.propagate:
