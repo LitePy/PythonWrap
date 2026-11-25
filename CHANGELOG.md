@@ -21,6 +21,10 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
 
 ### Added
 
+- Web adapters can trust a remaining-deadline header with `trust_deadline_header=True`;
+  Celery publishes and restores request ids and optionally inherits the caller's
+  deadline with `install(inherit_deadline=True)`. Header names can be set through
+  `python_wrap.propagation.set_headers`.
 - Celery: `resilient_task` (re-queue on open breaker, used-up limit or full bulkhead, with the
   error's `retry_after`; blocking limiters raise instead of sleeping), `idempotent_task` (one
   run per task name and arguments across redeliveries, re-queue while running),

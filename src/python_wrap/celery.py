@@ -37,7 +37,12 @@ class TaskContext:
     """Signal subscription handle; close disconnects only this app's handlers."""
 
     def __init__(
-        self, app: Any, *, use_soft_deadline: bool = True, hard_margin: float = 5.0
+        self,
+        app: Any,
+        *,
+        use_soft_deadline: bool = True,
+        hard_margin: float = 5.0,
+        inherit_deadline: bool = False,
     ) -> None:
         import importlib
 
@@ -45,7 +50,8 @@ class TaskContext:
         task_postrun, task_prerun = signals.task_postrun, signals.task_prerun
 
         self.app, self.use_soft_deadline = app, use_soft_deadline
-        self.hard_margin = hard_margin
+        self.hard_margin, self.inherit_deadline = hard_margin, inherit_deadline
+        signals.before_task_publish.connect(self._publish, weak=False)
         self.closed = False
         self._active = 0
         self._lock = _fork.ForkSafeLock()
@@ -59,6 +65,22 @@ class TaskContext:
     def _reset_after_fork(self) -> None:
         self._scopes.set(())
         self._active = 0
+
+    def _publish(self, sender: Any = None, headers: Any = None, **kw: Any) -> None:
+        """Copy the request id (and, if enabled, the absolute deadline) into task headers."""
+        if headers is None:
+            return
+        import time
+
+        from python_wrap.deadline import remaining
+        from python_wrap.logs import current_log_context
+
+        request_id = current_log_context().get("request_id")
+        if request_id:
+            headers.setdefault("x_request_id", str(request_id))
+        left = remaining()
+        if self.inherit_deadline and left is not None:
+            headers.setdefault("x_deadline_at", time.time() + left)
 
     def _before(
         self, sender: Any = None, task_id: str | None = None, task: Any = None, **kw: Any
@@ -76,11 +98,26 @@ class TaskContext:
             budget = limits[1]
         if self.use_soft_deadline and budget is None:
             # Only a hard limit: stop cooperatively a little before the worker kills the task.
-            hard = limits[0] if limits and limits[0] is not None else getattr(task, "time_limit", None)
+            hard = (
+                limits[0] if limits and limits[0] is not None else getattr(task, "time_limit", None)
+            )
             if hard:
                 budget = max(hard - self.hard_margin, hard * 0.5)
+        request = getattr(task, "request", None)
+        fields = {"task_id": task_id, "task_name": getattr(task, "name", None)}
+        inherited = getattr(request, "x_request_id", None)
+        if inherited:
+            from python_wrap._integration import request_id
+
+            fields["request_id"] = request_id(inherited)
+        deadline_at = getattr(request, "x_deadline_at", None)
+        if self.inherit_deadline and isinstance(deadline_at, (int, float)):
+            import time
+
+            left = max(deadline_at - time.time(), 0.0)
+            budget = left if budget is None else min(budget, left)
         try:
-            stack = scope({"task_id": task_id, "task_name": getattr(task, "name", None)}, budget)
+            stack = scope(fields, budget)
         except BaseException:
             with self._lock:
                 self._active -= 1
@@ -122,19 +159,29 @@ class TaskContext:
             disconnect = self._active == 0
         import importlib
 
-        importlib.import_module("celery.signals").task_prerun.disconnect(self._before)
+        signals = importlib.import_module("celery.signals")
+        signals.task_prerun.disconnect(self._before)
+        signals.before_task_publish.disconnect(self._publish)
         if disconnect:
             self._disconnect_after()
 
 
 def install(
-    app: Any, *, use_soft_deadline: bool = True, hard_margin: float = 5.0
+    app: Any,
+    *,
+    use_soft_deadline: bool = True,
+    hard_margin: float = 5.0,
+    inherit_deadline: bool = False,
 ) -> TaskContext:
     """Bind task_id/name and a deadline from the task's time limit around task execution.
 
     The deadline is the soft time limit; with only a hard limit it is the hard limit minus
     ``hard_margin`` seconds (at least half of it), so cooperative code stops before the
-    worker kills the task.
+    worker kills the task. Published tasks carry the request id in their headers and the
+    worker binds it again, so logs from the web request and the task join. With
+    ``inherit_deadline=True`` the publisher's remaining deadline is sent too and the task
+    runs under the smaller of it and its time limit (opt in: most tasks should outlive the
+    request that queued them).
 
     Fork-safe python-wrap components reset through their POSIX hooks automatically;
     this adapter never starts background loops or opens backend connections at import.
@@ -142,7 +189,12 @@ def install(
     existing = getattr(app, "_python_wrap_context", None)
     if existing is not None and not existing.closed:
         return existing  # type: ignore[no-any-return]
-    handle = TaskContext(app, use_soft_deadline=use_soft_deadline, hard_margin=hard_margin)
+    handle = TaskContext(
+        app,
+        use_soft_deadline=use_soft_deadline,
+        hard_margin=hard_margin,
+        inherit_deadline=inherit_deadline,
+    )
     app._python_wrap_context = handle
     return handle
 

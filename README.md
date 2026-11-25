@@ -56,7 +56,7 @@ Unreleased on `main`; see the [CHANGELOG](https://github.com/LitePy/PythonWrap/b
 | --- | --- |
 | Sensible numbers without guessing | `presets.http_client()`, `presets.db_call()`, `presets.third_party_api()` |
 | Catch unsafe stacks before production | `Policy.explain()`, `python -m python_wrap doctor` (unbounded or non-idempotent retries, missing timeouts/budgets, misordering) |
-| HTTP clients | `python_wrap.http`: method-safe retrying transports for httpx, a `requests` adapter, `http_retry` for aiohttp |
+| HTTP clients | `python_wrap.http`: method-safe retrying transports for httpx, a `requests` adapter, `http_retry` for aiohttp; `HttpPolicy(propagate=True)` carries request ids and deadlines |
 | Database errors worth retrying | `db_transient`, `postgres_transient`, `mysql_transient`, `sqlserver_transient` |
 | Async caches that never block the loop | `amemoize` with `AsyncRedisStore` (`redis.asyncio`) |
 | Metrics and dashboards | `PrometheusExporter`, `StatsDExporter`, live `Dashboard`, Grafana sample, `health.summary()` endpoints |

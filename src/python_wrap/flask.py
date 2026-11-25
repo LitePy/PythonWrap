@@ -8,6 +8,7 @@ from typing import Any
 from python_wrap._integration import request_id, scope
 from python_wrap._runtime import seconds
 from python_wrap.health import health
+from python_wrap.propagation import deadline_budget, header_names
 
 __all__ = ["init_app"]
 
@@ -19,12 +20,15 @@ def init_app(
     request_id_header: str = "X-Request-ID",
     budget: float | None = None,
     health_path: str | None = None,
+    trust_deadline_header: bool = False,
 ) -> None:
     """Bind request/user context and an optional cooperative deadline.
 
     Health routes are opt-in; apply your framework's authorization policy before
     exposing dependency details. Install ContextFilter on app handlers separately.
-    Repeated initialization on the same app is a no-op.
+    Repeated initialization on the same app is a no-op. With ``trust_deadline_header=True``
+    an ``X-Request-Deadline`` header (remaining milliseconds) can shorten, never extend,
+    ``budget``; enable it only for callers you trust.
     """
     import importlib
 
@@ -36,10 +40,12 @@ def init_app(
     budget = None if budget is None else seconds(budget, positive=False)
 
     def before() -> None:
-        fields: dict[str, Any] = {"request_id": request_id(request.headers.get(request_id_header))}
+        id_header = header_names()[0] if request_id_header == "X-Request-ID" else request_id_header
+        fields: dict[str, Any] = {"request_id": request_id(request.headers.get(id_header))}
         if user:
             fields["user"] = user()
-        stack = scope(fields, budget)
+        header = request.headers.get(header_names()[1])
+        stack = scope(fields, deadline_budget(header, budget, trust=trust_deadline_header))
         request.environ["python_wrap.scope"] = stack
 
     def after(error: Any = None) -> None:

@@ -8,6 +8,14 @@ request or task, replace framework logging, or start periodic jobs at import.
 Attach `ContextFilter` to application log handlers if you want the bound fields on all
 records; see [production observability](../features/observability/production.md).
 
+To pass a request budget between services, enable `trust_deadline_header=True` on the
+web adapter and `HttpPolicy(propagate=True)` on the outbound HTTP client. The client
+sends the request id and remaining budget in milliseconds; the receiver uses the
+smaller of that value and its own `budget`. Trust the inbound deadline only when the
+caller is trusted. `set_headers(request_id=..., deadline=...)` in
+`python_wrap.propagation` changes the header names for both sides. Trace context is
+handled by OpenTelemetry instrumentation separately.
+
 ## Flask
 
 <!-- skip -->
@@ -77,6 +85,9 @@ With `use_soft_deadline=True`, the task's configured soft limit becomes a cooper
 budget for python-wrap retry/timeout code; Celery retains ownership of actual task time
 limits. Signal handlers are scoped to this app. Installation returns a disconnect handle
 and repeated installation reuses the active handle.
+Published tasks carry the current request id. Pass `inherit_deadline=True` to `install`
+when a task should stop within the caller's remaining budget; it is off by default
+because most queued tasks must continue after the request ends.
 
 ### Retrying tasks with Celery and python-wrap together
 
