@@ -21,6 +21,14 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
 
 ### Added
 
+- `HttpPolicy` with `PolicyTransport`, `AsyncPolicyTransport` and `mount_policy`: retries plus
+  a circuit breaker, rate limiter and bulkhead (optionally one set per host), default
+  connect/read timeouts shortened to the surrounding deadline, 429 `Retry-After` pauses and
+  `propagate=True` request-id / `X-Request-Deadline` headers. `RetryTransport`,
+  `AsyncRetryTransport` and `mount_retries` are now thin wrappers over them.
+- `python_wrap.propagation`: the header pair and helpers used to carry the request id and the
+  remaining deadline across processes.
+
 - `on_backend_error="raise" | "local" | "allow"` on shared breakers, windows, quotas,
   bulkheads and `RedisSource`, plus `configure(backend_errors=...)`, `retry_backend_after`,
   the events `backend.error` / `backend.recovered`, and a `degraded` health status while a
