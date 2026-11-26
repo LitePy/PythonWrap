@@ -10,6 +10,8 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
 
 ## [Unreleased]
 
+## [0.4.0b2] - 2026-11-26
+
 ### Breaking changes
 
 - `observability.enable()` now adds python_wrap events as span events on the current
@@ -909,7 +911,8 @@ Core:
 
 Initial release.
 
-[Unreleased]: https://github.com/LitePy/PythonWrap/compare/v0.4.0b1...HEAD
+[Unreleased]: https://github.com/LitePy/PythonWrap/compare/v0.4.0b2...HEAD
+[0.4.0b2]: https://github.com/LitePy/PythonWrap/compare/v0.4.0b1...v0.4.0b2
 [0.4.0b1]: https://github.com/LitePy/PythonWrap/compare/v0.3.0...v0.4.0b1
 [0.3.0]: https://github.com/LitePy/PythonWrap/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/LitePy/PythonWrap/compare/v0.1.0...v0.2.1
