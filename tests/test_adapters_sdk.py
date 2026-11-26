@@ -1506,6 +1506,7 @@ def test_limiter_wait_survives_float_precision_at_large_clock_values() -> None:
 
 
 def test_guarded_clients_example_runs() -> None:
+    import os
     import subprocess
     import sys
     from pathlib import Path
@@ -1517,7 +1518,7 @@ def test_guarded_clients_example_runs() -> None:
         capture_output=True,
         text=True,
         timeout=30,
-        env={"PYTHONPATH": str(root / "src")},
+        env={**os.environ, "PYTHONPATH": str(root / "src")},
         check=False,
     )
     assert result.returncode == 0, result.stderr

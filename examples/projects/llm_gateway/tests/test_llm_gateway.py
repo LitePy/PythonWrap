@@ -23,6 +23,14 @@ def clean_chaos() -> None:
     chaos.clear()
 
 
+@pytest.fixture
+def signals_usable_for_layout(monkeypatch: pytest.MonkeyPatch) -> None:
+    import importlib
+
+    doctor_module = importlib.import_module("python_wrap.doctor")
+    monkeypatch.setattr(doctor_module, "_preemptive", lambda use_signals: use_signals is not False)
+
+
 def test_happy_path_is_cached_traced_and_priced(tmp_path: Path) -> None:
     gateway, tape = build_gateway(tmp_path / "audit.jsonl")
     first = gateway.chat("acme", "What is a bulkhead?")
@@ -82,7 +90,9 @@ def test_healthy_stream_records_usage() -> None:
     assert gateway.stack("acme").spend.spent().tokens > 0
 
 
-def test_python_wrap_cli_surfaces(capsys: pytest.CaptureFixture[str]) -> None:
+def test_python_wrap_cli_surfaces(
+    capsys: pytest.CaptureFixture[str], signals_usable_for_layout: None
+) -> None:
     assert python_wrap_cli(["doctor", "gateway_app.app:acme_chat"]) == 0  # no errors
     report = capsys.readouterr().out
     for layer in ("cache", "budget", "limiter", "fallback", "timeout"):
@@ -94,7 +104,7 @@ def test_python_wrap_cli_surfaces(capsys: pytest.CaptureFixture[str]) -> None:
     assert "Budget" in capsys.readouterr().out
 
 
-def test_doctor_findings_are_available_to_code() -> None:
+def test_doctor_findings_are_available_to_code(signals_usable_for_layout: None) -> None:
     gateway, _ = build_gateway()
     codes = {finding.code for finding in gateway.doctor_findings("acme")}
     assert codes <= {"PW006"}  # budget sits outside the fallback chain on purpose

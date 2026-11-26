@@ -287,6 +287,9 @@ class TestSecrets:
         text = Path(path).read_text()
         assert "pw-123456" not in text and "output_tokens" in text
 
+    @pytest.mark.skipif(
+        os.name == "nt", reason="POSIX file permission bits are not available on Windows"
+    )
     def test_file_is_private(self, path: str) -> None:
         record(path, Wire(), Req({}))
         assert os.stat(path).st_mode & 0o077 == 0

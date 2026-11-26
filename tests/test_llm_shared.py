@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import sqlite3
 import subprocess
@@ -124,6 +125,12 @@ class TestHeaders:
 
 
 class TestStep:
+    def test_clock_rollback_does_not_refill_the_same_interval_twice(self) -> None:
+        state, _ = _step(None, "reserve", 100, 0, 100, 1, 10.0)
+        state, _ = _step(state, "level", 0, 0, 100, 1, 5.0)
+        state, level = _step(state, "level", 0, 0, 100, 1, 10.0)
+        assert level == 0
+
     def test_new_bucket_is_full_and_reserve_takes_tokens(self) -> None:
         state, wait = _step(None, "reserve", 40, 0, 100, 1, 10.0)
         assert wait == 0 and state[0] == 60
@@ -247,7 +254,7 @@ class TestSQLiteWindow:
         fake_clock.advance(7)
         assert b(lambda: "x")() == "x"
 
-    def test_remaining_header_lowers_shared_level(self, db: str) -> None:
+    def test_remaining_header_lowers_shared_level(self, db: str, fake_clock: Any) -> None:
         a = token_rate_limit(6000, estimate=10, store=SQLiteTokenWindow(db))
         b = token_rate_limit(6000, estimate=10, store=SQLiteTokenWindow(db))
         a.observe_headers({"x-ratelimit-remaining-tokens": "250"})
@@ -435,6 +442,23 @@ class TestSQLiteBudget:
         ask()  # the check happens before the call, so this one still runs
         with pytest.raises(python_wrap.llm.BudgetExceeded):
             ask()
+
+
+def test_sqlite_samples_time_after_acquiring_the_write_lock(
+    db: str, fake_clock: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    window = SQLiteTokenWindow(db, fail_open=False)
+    assert window.reserve(10, 10, 1) == 0
+    connection = window._file.connection
+
+    @contextlib.contextmanager
+    def delayed_connection() -> Any:
+        with connection() as conn:
+            fake_clock.advance(10)
+            yield conn
+
+    monkeypatch.setattr(window._file, "connection", delayed_connection)
+    assert window.reserve(10, 10, 1) == 0
 
 
 # -------------------------------------------------------------- cross-process admission

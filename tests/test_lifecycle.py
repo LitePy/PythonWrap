@@ -90,6 +90,31 @@ def test_slow_callable_times_out_and_budget_skips_the_rest(manager: ShutdownMana
     assert [i.name for i in report.timed_out] == ["slow", "skipped"]
 
 
+def test_timeout_exhausts_budget_even_when_the_wait_returns_early(
+    manager: ShutdownManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+
+    called: list[str] = []
+    manager.register(lambda: (called.append("slow"), threading.Event().wait(1)), name="slow")
+    manager.register(lambda: called.append("skipped"), name="skipped")
+
+    original_join = threading.Thread.join
+    first_join = True
+
+    def early_join(thread: threading.Thread, timeout: float | None = None) -> None:
+        nonlocal first_join
+        if thread.name == "python-wrap-shutdown" and first_join:
+            first_join = False
+            return
+        original_join(thread, timeout)
+
+    monkeypatch.setattr(threading.Thread, "join", early_join)
+    report = manager.drain(timeout=0.05)
+    assert called == ["slow"]
+    assert [item.status for item in report.items] == ["timeout", "timeout"]
+
+
 def test_async_callable_in_sync_drain(manager: ShutdownManager) -> None:
     done: list[str] = []
 

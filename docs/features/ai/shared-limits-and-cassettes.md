@@ -18,6 +18,7 @@ import tempfile
 
 from python_wrap.llm import token_rate_limit
 from python_wrap.llm_shared import SQLiteTokenWindow
+from python_wrap.testing import fake_clock
 
 path = os.path.join(tempfile.mkdtemp(), "tokens.db")
 
@@ -28,8 +29,9 @@ limit = token_rate_limit(60_000, estimate=2_000, block=False, store=SQLiteTokenW
 def complete(prompt: str) -> dict[str, object]:
     return {"usage": {"input_tokens": 500, "output_tokens": 100}}
 
-complete("hello")  # reserves 2000, settles at the real 600, for the whole fleet
-assert 59_000 < limit.available < 59_500
+with fake_clock():
+    complete("hello")  # reserves 2000, settles at the real 600, for the whole fleet
+    assert limit.available == 59_400
 ```
 
 | Window | Shares across | Notes |

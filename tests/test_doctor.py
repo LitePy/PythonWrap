@@ -28,6 +28,14 @@ def codes(report: Report) -> list[str]:
     return [finding.code for finding in report.findings]
 
 
+@pytest.fixture
+def signals_usable_for_layout(monkeypatch):
+    import importlib
+
+    doctor_module = importlib.import_module("python_wrap.doctor")
+    monkeypatch.setattr(doctor_module, "_preemptive", lambda use_signals: use_signals is not False)
+
+
 def test_explain_lists_layers_in_canonical_order_with_settings():
     budget = RetryBudget()
     stack = policy(
@@ -122,7 +130,7 @@ def test_duplicate_retry_layers_multiply_attempts():
     assert "PW007" in codes(report)
 
 
-def test_doctor_walks_hand_stacked_decorators():
+def test_doctor_walks_hand_stacked_decorators(signals_usable_for_layout):
     @retry(max_attempts=3, on=ConnectionError, budget=RetryBudget())
     @timeout(2)
     @memoize
@@ -136,7 +144,7 @@ def test_doctor_walks_hand_stacked_decorators():
     assert fetch(2) == 2  # inspecting did not break anything
 
 
-def test_doctor_flags_retry_outside_breaker_order():
+def test_doctor_flags_retry_outside_breaker_order(signals_usable_for_layout):
     breaker = CircuitBreaker(name="b")
 
     @breaker
@@ -168,7 +176,7 @@ def test_doctor_on_async_and_plain_functions():
     assert report.layers == () and "no python-wrap layers" in str(report)
 
 
-def test_presets_are_clean_and_ordered():
+def test_presets_are_clean_and_ordered(signals_usable_for_layout):
     for preset in (
         http_client("svc"),
         db_call("db"),
@@ -278,6 +286,18 @@ def test_pw009_not_for_async_or_policy_timeouts():
 
     assert "PW009" not in codes(doctor(work))
     assert "PW009" not in codes(explain(policy(timeout=timeout(1, use_signals=False))))
+
+
+def test_pw009_when_signals_are_unavailable(monkeypatch):
+    import importlib
+
+    timeouts = importlib.import_module("python_wrap.timeouts")
+    monkeypatch.setattr(timeouts, "_HAS_SETITIMER", False)
+
+    @timeout(1)
+    def work() -> None: ...
+
+    assert "PW009" in codes(doctor(work))
 
 
 def test_pw009_off_main_thread():

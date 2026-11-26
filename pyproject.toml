@@ -62,7 +62,7 @@ Issues = "https://github.com/LitePy/PythonWrap/issues"
 Changelog = "https://github.com/LitePy/PythonWrap/blob/main/CHANGELOG.md"
 
 [dependency-groups]
-dev = [
+core-test = [
     "pytest>=9.2.0",
     "pytest-cov>=6.0",
     "pytest-asyncio>=1.4.1.post1",
@@ -71,6 +71,9 @@ dev = [
     "mypy>=2.4.1",
     "opentelemetry-api>=1.45.2",
     "opentelemetry-sdk>=1.45.1",
+]
+dev = [
+    { include-group = "core-test" },
     "langchain-core>=0.3,<2",
 ]
 docs = [

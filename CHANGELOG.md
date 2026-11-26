@@ -10,6 +10,15 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
 
 ## [Unreleased]
 
+### Security
+
+- Shared SQLite token windows now sample time after taking the writer lock and keep stored
+  timestamps from moving backward, preventing delayed transactions or clock rollback from
+  granting extra refill. Tagged cache invalidation now weakly tracks Redis clients (or their
+  cache stores when a client cannot be weakly referenced), so abandoned closed clients do not
+  stay alive and disrupt later invalidations. A synchronous shutdown callback that times out
+  exhausts the remaining finite drain budget before another callback can start.
+
 ## [0.4.0b2] - 2026-11-26
 
 ### Breaking changes
