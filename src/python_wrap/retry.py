@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import datetime
 import functools
 import inspect
@@ -22,6 +23,12 @@ from python_wrap import _core, _fork, config
 from python_wrap._core import F, LoggerLike, P, R
 from python_wrap.deadline import remaining as _deadline_remaining
 from python_wrap.errors import CircuitOpenError
+
+# retry engine id -> monotonic start of its current attempt, per thread/task; set only
+# while event listeners exist, so events can carry attempt_seconds for real spans.
+_ATTEMPT_STARTS: contextvars.ContextVar[dict[int, float] | None] = contextvars.ContextVar(
+    "python_wrap_attempt_starts", default=None
+)
 
 T = TypeVar("T")
 T_co = TypeVar("T_co", covariant=True)
@@ -672,9 +679,21 @@ class _Engine:
     def start_attempt(self) -> None:
         with self.stats._lock:
             self.stats.attempts_total += 1
+        if _core.listeners:
+            _ATTEMPT_STARTS.set({**(_ATTEMPT_STARTS.get() or {}), id(self): _core.monotonic()})
+
+    def _attempt_seconds(self) -> float | None:
+        started = (_ATTEMPT_STARTS.get() or {}).get(id(self))
+        return None if started is None else max(0.0, _core.monotonic() - started)
 
     def success(self, attempts: int) -> None:
-        _core.emit("retry.succeeded", self.name, attempts=attempts)
+        if _core.listeners:
+            _core.emit(
+                "retry.succeeded",
+                self.name,
+                attempts=attempts,
+                attempt_seconds=self._attempt_seconds(),
+            )
 
     def slept(self, seconds: float) -> None:
         with self.stats._lock:
@@ -746,7 +765,13 @@ class _Engine:
                     self.stats.budget_exhausted += 1
             if denied:
                 _core.emit("retry.budget_exhausted", self.name, attempts=attempt, exception=exc)
-            _core.emit("retry.gave_up", self.name, attempts=attempt, exception=exc)
+            _core.emit(
+                "retry.gave_up",
+                self.name,
+                attempts=attempt,
+                exception=exc,
+                attempt_seconds=self._attempt_seconds(),
+            )
             return None
         with self.stats._lock:
             self.stats.retries += 1
@@ -781,7 +806,12 @@ class _Engine:
                 ),
             )
         _core.emit(
-            "retry.attempt_failed", self.name, attempt=attempt, exception=exc, next_delay=wait
+            "retry.attempt_failed",
+            self.name,
+            attempt=attempt,
+            exception=exc,
+            next_delay=wait,
+            attempt_seconds=self._attempt_seconds(),
         )
 
     def _record(self, exc: BaseException) -> None:

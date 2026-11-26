@@ -6,12 +6,14 @@ results: exceptions are reduced to their type names.
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from python_wrap import _fork
 from python_wrap.events import Event, subscribe
 
 __all__ = [
+    "COUNTERS",
     "Breadcrumbs",
     "GenAITelemetry",
     "Telemetry",
@@ -21,57 +23,198 @@ __all__ = [
     "genai_span_attributes",
     "sentry_breadcrumbs",
 ]
-_COUNTERS = {
-    "retry.attempt_failed": "pw_retry_retries_total",
-    "cache.hit": "pw_cache_hits_total",
-    "cache.miss": "pw_cache_misses_total",
-    "bulkhead.rejected": "pw_bulkhead_rejected_total",
-    "circuit.rejected": "pw_breaker_rejected_total",
-    "timeout.expired": "pw_timeouts_total",
-}
+# One table of event -> counter, used by `Telemetry` and checked against the Prometheus
+# exporter in tests so the two cannot drift. Each row: legacy name, OpenTelemetry-style
+# name, unit, description.
+COUNTERS: dict[str, tuple[str, str, str, str]] = {
+    "retry.attempt_failed": (
+        "pw_retry_retries_total", "python_wrap.retry.retries", "{retry}",
+        "Failed attempts that were followed by a retry.",
+    ),
+    "retry.gave_up": (
+        "pw_retry_gave_up_total", "python_wrap.retry.gave_up", "{call}",
+        "Calls whose retries were exhausted.",
+    ),
+    "retry.budget_exhausted": (
+        "pw_retry_budget_exhausted_total", "python_wrap.retry.budget_exhausted", "{call}",
+        "Calls stopped because the retry budget was used up.",
+    ),
+    "cache.hit": ("pw_cache_hits_total", "python_wrap.cache.hits", "{hit}", "Cache hits."),
+    "cache.miss": ("pw_cache_misses_total", "python_wrap.cache.misses", "{miss}", "Cache misses."),
+    "bulkhead.rejected": (
+        "pw_bulkhead_rejected_total", "python_wrap.bulkhead.rejected", "{call}",
+        "Calls refused by a full bulkhead.",
+    ),
+    "circuit.rejected": (
+        "pw_breaker_rejected_total", "python_wrap.circuit.rejected", "{call}",
+        "Calls refused by an open circuit breaker.",
+    ),
+    "rate_limit.rejected": (
+        "pw_rate_limit_rejected_total", "python_wrap.rate_limit.rejected", "{call}",
+        "Calls refused by a rate limiter.",
+    ),
+    "timeout.expired": (
+        "pw_timeouts_total", "python_wrap.timeouts", "{call}", "Calls that hit their time limit."
+    ),
+    "backend.error": (
+        "pw_backend_errors_total", "python_wrap.backend.errors", "{error}",
+        "Errors from a shared backend (function is the backend name).",
+    ),
+    "rate_limit.store_error": (
+        "pw_rate_limit_store_errors_total", "python_wrap.rate_limit.store_errors", "{error}",
+        "Errors from a shared token window's storage.",
+    ),
+}  # fmt: skip
+WAIT = ("pw_limiter_wait_seconds", "python_wrap.rate_limit.wait")
+BREAKER_STATE = ("pw_breaker_state", "python_wrap.circuit.state")
+HEALTH_UP = ("pw_health_up", "python_wrap.health.up")
+_STATES = {"closed": 0, "half_open": 1, "open": 2}
+SPAN_MODES = ("events", "notifications", "off")
 
 
 class Telemetry:
-    """A subscription handle. Close removes instrumentation without changing providers."""
+    """A subscription handle. Close removes instrumentation without changing providers.
 
-    def __init__(self, tracer: Any, meter: Any, *, max_functions: int = 100) -> None:
+    Metrics: one counter per `COUNTERS` row, a histogram of rate-limiter waits, and two
+    observable gauges read at each collection: every breaker's state (0 closed,
+    1 half-open, 2 open; a shared breaker reports its state as this process sees it, so
+    every process converges within ``state_ttl``) and each health component's ``up``.
+
+    Traces: ``spans="events"`` (default) adds each event as a span event on the current
+    span; ``"notifications"`` opens and closes a ``pw.<event>`` span per event (the
+    pre-0.4.0b2 behaviour); ``"off"`` adds nothing. ``attempt_spans=True`` records one
+    span per retry attempt with its real duration and attempt number;
+    ``wait_spans=True`` one span per rate-limiter wait.
+    """
+
+    def __init__(
+        self,
+        tracer: Any,
+        meter: Any,
+        *,
+        max_functions: int = 100,
+        spans: str = "events",
+        attempt_spans: bool = False,
+        wait_spans: bool = False,
+        naming: str = "legacy",
+        current_span: Any = None,
+        registry: Any = None,
+    ) -> None:
         if max_functions < 1:
             raise ValueError("max_functions must be positive")
+        if spans not in SPAN_MODES:
+            raise ValueError(f"spans must be one of {SPAN_MODES}")
+        if naming not in ("legacy", "otel"):
+            raise ValueError("naming must be 'legacy' or 'otel'")
         self.tracer = tracer
         self.limit = max_functions
+        self.spans, self.attempt_spans, self.wait_spans = spans, attempt_spans, wait_spans
+        self._current_span = current_span
         self._names: set[str] = set()
         self._lock = _fork.ForkSafeLock()
-        self._counters = (
-            {event: meter.create_counter(name) for event, name in _COUNTERS.items()}
-            if meter
-            else {}
-        )
-        self._waits = meter.create_histogram("pw_limiter_wait_seconds", unit="s") if meter else None
-        self._states = meter.create_gauge("pw_breaker_state") if meter else None
+        pick = 0 if naming == "legacy" else 1
+        self._counters: dict[str, Any] = {}
+        self._waits = self._states = self._health = None
+        if meter:
+            for event, row in COUNTERS.items():
+                if pick:
+                    self._counters[event] = meter.create_counter(
+                        row[1], unit=row[2], description=row[3]
+                    )
+                else:
+                    self._counters[event] = meter.create_counter(row[0])
+            self._waits = meter.create_histogram(WAIT[pick], unit="s")
+            self._states = meter.create_observable_gauge(
+                BREAKER_STATE[pick], callbacks=[self._observe_breakers]
+            )
+            self._registry = registry
+            if registry is not None:
+                self._health = meter.create_observable_gauge(
+                    HEALTH_UP[pick], callbacks=[self._observe_health]
+                )
         self._unsubscribe = subscribe(self._event)
         self.closed = False
 
-    def _event(self, event: Event) -> None:
+    def _label(self, name: str) -> str:
         with self._lock:
-            name = event.function
             if name not in self._names:
                 if len(self._names) >= self.limit:
-                    name = "_other"
-                else:
-                    self._names.add(name)
+                    return "_other"
+                self._names.add(name)
+        return name
+
+    def _observe_breakers(self, options: Any = None) -> Any:
+        from opentelemetry.metrics import Observation
+
+        from python_wrap.circuit import _BREAKERS
+
+        if self.closed:
+            return []
+        out = []
+        for breaker in list(_BREAKERS):
+            try:
+                state = breaker.state.value
+            except Exception:  # a store error must not break the whole collection
+                continue
+            out.append(Observation(_STATES[state], {"function": self._label(breaker.name)}))
+        return out
+
+    def _observe_health(self, options: Any = None) -> Any:
+        from opentelemetry.metrics import Observation
+
+        if self.closed:
+            return []
+        report = self._registry.report()
+        return [
+            Observation(1 if info.get("healthy") else 0, {"component": component})
+            for component, info in sorted(report.items())
+        ]
+
+    def _span_back(self, name: str, seconds: Any, attributes: dict[str, Any]) -> None:
+        """A span that ended now and lasted ``seconds`` (skipped when unknown)."""
+        if self.tracer is None or not isinstance(seconds, (int, float)) or seconds <= 0:
+            return
+        end = time.time_ns()
+        span = self.tracer.start_span(
+            name, start_time=end - int(seconds * 1e9), attributes=attributes
+        )
+        span.end(end_time=end)
+
+    def _event(self, event: Event) -> None:
+        name = self._label(event.function)
         labels = {"function": name}
-        if self.tracer is not None:
+        if self.tracer is not None and self.spans == "notifications":
             with self.tracer.start_as_current_span("pw." + event.name) as span:
                 span.set_attribute("python_wrap.function", name)
                 # Exception messages, args, result payloads and context are never labels.
+        elif self._current_span is not None and self.spans == "events":
+            span = self._current_span()
+            if span.is_recording():
+                span.add_event("pw." + event.name, {"python_wrap.function": name})
         counter = self._counters.get(event.name)
         if counter is not None:
             counter.add(1, labels)
-        if self._waits is not None and event.name == "rate_limit.waited":
-            self._waits.record(float(event.fields["seconds"]), labels)
-        if self._states is not None and event.name == "circuit.state_changed":
-            state = getattr(event.fields["new"], "value", event.fields["new"])
-            self._states.set({"closed": 0, "half_open": 1, "open": 2}[state], labels)
+        fields = event.fields
+        if event.name == "rate_limit.waited":
+            if self._waits is not None:
+                self._waits.record(float(fields["seconds"]), labels)
+            if self.wait_spans:
+                self._span_back(
+                    "python_wrap.rate_limit.wait",
+                    fields.get("seconds"),
+                    {"python_wrap.function": name},
+                )
+        if self.attempt_spans and event.name in _ATTEMPT_EVENTS:
+            attempt, outcome = _ATTEMPT_EVENTS[event.name](fields)
+            self._span_back(
+                "python_wrap.retry.attempt",
+                fields.get("attempt_seconds"),
+                {
+                    "python_wrap.function": name,
+                    "python_wrap.retry.attempt": attempt,
+                    "python_wrap.retry.outcome": outcome,
+                },
+            )
 
     def close(self) -> None:
         if not self.closed:
@@ -85,23 +228,53 @@ class Telemetry:
         self.close()
 
 
+_ATTEMPT_EVENTS: dict[str, Any] = {
+    "retry.attempt_failed": lambda f: (f.get("attempt", 0), "retry"),
+    "retry.gave_up": lambda f: (f.get("attempts", 0), "gave_up"),
+    "retry.succeeded": lambda f: (f.get("attempts", 0), "success"),
+}
+
+
 def enable(
-    *, tracer_provider: Any = None, meter_provider: Any = None, max_functions: int = 100
+    *,
+    tracer_provider: Any = None,
+    meter_provider: Any = None,
+    max_functions: int = 100,
+    spans: str = "events",
+    attempt_spans: bool = False,
+    wait_spans: bool = False,
+    naming: str = "legacy",
+    registry: Any = None,
 ) -> Telemetry | None:
     """Subscribe using supplied or global OpenTelemetry providers; no-op if absent.
 
-    Requires a recent opentelemetry-api with synchronous gauges for meter support.
-    Event spans describe notifications, not the duration of an underlying operation;
-    use trace(otel=True) for operation-duration spans. No provider is installed or shut
-    down by this helper. Metrics never use request/user/cache-key labels.
+    See `Telemetry` for the instruments and span modes. ``naming="otel"`` uses
+    OpenTelemetry-style names with units (``python_wrap.retry.gave_up``); the default
+    ``"legacy"`` keeps the ``pw_*`` names until a minor release changes it. ``registry``
+    (default: `python_wrap.health.health`) feeds the component health gauge; pass
+    ``False`` to leave it out. No provider is installed or shut down by this helper, and
+    service attributes come from the provider's resource. Metrics never use
+    request/user/cache-key labels; the only label is a bounded ``function``.
     """
     try:
         from opentelemetry import metrics, trace
     except ImportError:
         return None
+    if registry is None:
+        from python_wrap.health import health as registry
     tracer = (tracer_provider or trace).get_tracer("python_wrap")
     meter = (meter_provider or metrics).get_meter("python_wrap")
-    return Telemetry(tracer, meter, max_functions=max_functions)
+    return Telemetry(
+        tracer,
+        meter,
+        max_functions=max_functions,
+        spans=spans,
+        attempt_spans=attempt_spans,
+        wait_spans=wait_spans,
+        naming=naming,
+        current_span=trace.get_current_span,
+        registry=None if registry is False else registry,
+    )
 
 
 def _safe(value: Any) -> Any:

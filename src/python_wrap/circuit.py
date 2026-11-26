@@ -6,6 +6,7 @@ import asyncio
 import enum
 import functools
 import math
+import weakref
 from collections import deque
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
@@ -73,6 +74,10 @@ class CircuitStats:
     opened_at: float | None
     failure_rate: float | None = None
     slow_rate: float | None = None
+
+
+# Every live breaker in this process, so metrics can read each one's current state.
+_BREAKERS: weakref.WeakSet[CircuitBreaker] = weakref.WeakSet()
 
 
 class CircuitBreaker:
@@ -260,6 +265,7 @@ class CircuitBreaker:
         # Transitions made under the lock, delivered to listeners after releasing it.
         self._pending: list[tuple[CircuitState, CircuitState]] = []
         _fork.register(self)
+        _BREAKERS.add(self)
 
     def _reset_after_fork(self) -> None:
         # Shared backends remain authoritative; never reset their state from a child.

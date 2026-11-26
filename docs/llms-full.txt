@@ -4914,13 +4914,15 @@ Every public name: `python_wrap.__all__` first, then names public only in a subm
   Opt-in OpenTelemetry and Sentry adapters for decorator events.
 - `python_wrap.observability.Breadcrumbs`: `Breadcrumbs(sentry: Any, prefixes: tuple[str, ...])`
   Subscription handle returned by `sentry_breadcrumbs`; `close()` stops recording.
+- `python_wrap.observability.COUNTERS`
+  Constant: {'retry.attempt_failed': ('pw_retry_retries_total', 'python_wrap.retry.retries', '{retry}', 'Failed attempts that were followed by a retry.'), 'retry.gave_up': ('pw_retry_gave_up_total', 'python_wrap.retry.gave_up', '{call}', 'Calls whose retries were exhausted.'), 'retry.budget_exhausted': ('pw_retry_budget_exhausted_total', 'python_wrap.retry.budget_exhausted', '{call}', 'Calls stopped because the retry budget was used up.'), 'cache.hit': ('pw_cache_hits_total', 'python_wrap.cache.hits', '{hit}', 'Cache hits.'), 'cache.miss': ('pw_cache_misses_total', 'python_wrap.cache.misses', '{miss}', 'Cache misses.'), 'bulkhead.rejected': ('pw_bulkhead_rejected_total', 'python_wrap.bulkhead.rejected', '{call}', 'Calls refused by a full bulkhead.'), 'circuit.rejected': ('pw_breaker_rejected_total', 'python_wrap.circuit.rejected', '{call}', 'Calls refused by an open circuit breaker.'), 'rate_limit.rejected': ('pw_rate_limit_rejected_total', 'python_wrap.rate_limit.rejected', '{call}', 'Calls refused by a rate limiter.'), 'timeout.expired': ('pw_timeouts_total', 'python_wrap.timeouts', '{call}', 'Calls that hit their time limit.'), 'backend.error': ('pw_backend_errors_total', 'python_wrap.backend.errors', '{error}', 'Errors from a shared backend (function is the backend name).'), 'rate_limit.store_error': ('pw_rate_limit_store_errors_total', 'python_wrap.rate_limit.store_errors', '{error}', "Errors from a shared token window's storage.")}
 - `python_wrap.observability.GenAITelemetry`: `GenAITelemetry(tracer: Any)`
   Subscription that turns ``genai.*`` events into OpenTelemetry spans.
-- `python_wrap.observability.Telemetry`: `Telemetry(tracer: Any, meter: Any, *, max_functions: int = 100)`
+- `python_wrap.observability.Telemetry`: `Telemetry(tracer: Any, meter: Any, *, max_functions: int = 100, spans: str = 'events', attempt_spans: bool = False, wait_spans: bool = False, naming: str = 'legacy', current_span: Any = None, registry: Any = None)`
   A subscription handle. Close removes instrumentation without changing providers.
 - `python_wrap.observability.annotate_span`: `annotate_span(span: Any, exc: BaseException) -> None`
   Add a re-raised exception's retry timeline to an OpenTelemetry-style span.
-- `python_wrap.observability.enable`: `enable(*, tracer_provider: Any = None, meter_provider: Any = None, max_functions: int = 100) -> Telemetry | None`
+- `python_wrap.observability.enable`: `enable(*, tracer_provider: Any = None, meter_provider: Any = None, max_functions: int = 100, spans: str = 'events', attempt_spans: bool = False, wait_spans: bool = False, naming: str = 'legacy', registry: Any = None) -> Telemetry | None`
   Subscribe using supplied or global OpenTelemetry providers; no-op if absent.
 - `python_wrap.observability.enable_genai`: `enable_genai(*, tracer: Any = None, tracer_provider: Any = None) -> GenAITelemetry | None`
   Emit GenAI-convention spans for traced LLM and tool calls; no-op without OpenTelemetry.

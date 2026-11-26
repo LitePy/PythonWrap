@@ -10,6 +10,13 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
 
 ## [Unreleased]
 
+### Breaking changes
+
+- `observability.enable()` now adds python_wrap events as span events on the current
+  span instead of opening a zero-length `pw.<event>` span per event. Pass
+  `spans="notifications"` for the old behaviour. The breaker-state metric is now an
+  observable gauge read at collection time for every breaker in the process.
+
 ### Fixed
 
 - Shared cache keys (`RedisStore`, `AsyncRedisStore`) and `idempotent`/`single_instance` call
@@ -21,6 +28,12 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
 
 ### Added
 
+- OpenTelemetry export reaches parity with the Prometheus exporter from one shared
+  table (`observability.COUNTERS`): gave-up, budget-exhausted, rate-limit rejected,
+  backend-error and store-error counters, plus a component health gauge. Opt-in
+  `attempt_spans=` (one span per retry attempt, with its real duration) and
+  `wait_spans=`; `naming="otel"` uses OpenTelemetry-style names with units. Retry events
+  carry `attempt_seconds`. Shared breakers report their state in every process.
 - `memoize` and `amemoize` gain `lock=` (with `lock_ttl`, `lock_wait`): on a miss one
   process computes under a shared lease while the others wait and read the store again;
   stale refreshes take the same lease. `tags=` with `invalidate_tags()` /
