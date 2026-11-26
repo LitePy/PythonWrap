@@ -92,11 +92,13 @@ def idempotent(
 ) -> Callable[[F], F]:
     """Run once per key within TTL; duplicates return the stored result.
 
-    `in_progress` is raise, wait, or return_none. Failed calls release their lease
-    without caching. Distributed use requires BOTH a shared result store and shared
-    lease backend; RedisStore(fail_open=False) automatically supplies a matching
-    RedisLock unless a backend is explicitly given. Other shared stores need an
-    explicitly supplied shared lease backend.
+    `in_progress` is raise, wait, or return_none. ``store`` may also be an
+    `python_wrap.async_cache.AsyncCacheStore` (for ``async def`` functions): it is
+    awaited directly, and an `AsyncRedisStore` gets a matching `AsyncRedisLock`.
+    Failed calls release their lease without caching. Distributed use requires BOTH a
+    shared result store and shared lease backend; RedisStore(fail_open=False)
+    automatically supplies a matching RedisLock unless a backend is explicitly given.
+    Other shared stores need an explicitly supplied shared lease backend.
     This cannot guarantee exactly-once external effects across a process crash between
     writing an external system and recording the result. Use transactional outboxes or
     database idempotency keys for that guarantee. Ownership is checked and extended
@@ -107,22 +109,36 @@ def idempotent(
     retention, lease_seconds = seconds(ttl), seconds(lease_ttl)
     if in_progress not in {"raise", "wait", "return_none"}:
         raise ValueError("in_progress must be raise, wait or return_none")
-    results = MemoryResultStore() if store is None else store
+    results: Any = MemoryResultStore() if store is None else store
     if getattr(results, "fail_open", False):
         raise ValueError("idempotency requires a result store with fail_open=False")
     if backend is not None and not isinstance(backend, LocalLease) and store is None:
         raise ValueError("a distributed lease requires an explicitly shared result store")
+    native = _core.is_async(results.get)  # an AsyncCacheStore: awaited, never threaded
     if backend is None:
-        from python_wrap.coordination import RedisLock
+        from python_wrap.async_cache import AsyncRedisStore
+        from python_wrap.coordination import AsyncRedisLock, RedisLock
         from python_wrap.stores import RedisStore
 
-        if isinstance(results, RedisStore):
-            backend = RedisLock(
+        if isinstance(results, (RedisStore, AsyncRedisStore)):
+            lock = AsyncRedisLock if isinstance(results, AsyncRedisStore) else RedisLock
+            backend = lock(
                 results.client,
                 prefix="python-wrap:idempotency-locks:" + digest(results.prefix) + ":",
             )
 
+    async def read(k: str) -> Any:
+        return await (results.get(k) if native else asyncio.to_thread(results.get, k))
+
+    def write(k: str, value: Any) -> Any:
+        if native:
+            return asyncio.ensure_future(results.set(k, (value,), retention))
+        return asyncio.create_task(asyncio.to_thread(results.set, k, (value,), retention))
+
     def decorate(func: F) -> F:
+        if native and not _core.is_async(func):
+            raise TypeError("an async result store needs an async def function")
+
         def scope(k: str) -> Lease:
             return Lease(
                 "idem:" + k,
@@ -137,7 +153,7 @@ def idempotent(
             @functools.wraps(func)
             async def aw(*args: Any, **kw: Any) -> Any:
                 k = call_key(func, key, args, kw)
-                found = await asyncio.to_thread(results.get, k)
+                found = await read(k)
                 if found is not None:
                     return found[0]
                 lease = scope(k)
@@ -149,16 +165,13 @@ def idempotent(
                     raise
                 async with AsyncExitStack() as stack:
                     stack.push_async_exit(lease)
-                    found = await asyncio.to_thread(results.get, k)
+                    found = await read(k)
                     if found is not None:
                         return found[0]
                     value = await func(*args, **kw)
                     # A stalled/failed heartbeat must not publish a stale owner's result.
                     await lease.check_async()
-                    write = asyncio.create_task(
-                        asyncio.to_thread(results.set, k, (value,), retention)
-                    )
-                    _, error, cancelled = await _drain(write)
+                    _, error, cancelled = await _drain(write(k, value))
                     if cancelled:
                         raise asyncio.CancelledError
                     if error is not None:

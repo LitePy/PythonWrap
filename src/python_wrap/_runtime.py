@@ -11,8 +11,8 @@ import inspect
 import math
 import pickle
 import re
-from pathlib import PurePath
 from collections.abc import Callable
+from pathlib import PurePath
 from typing import Any, ParamSpec, TypeVar
 
 

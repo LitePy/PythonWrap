@@ -24,11 +24,32 @@ When omitted, a key is derived from the function and its bound arguments; use an
 key for service objects or arguments that cannot be serialized deterministically.
 
 `Lease` is also a sync/async context manager. Each context is single-use, cannot be
-entered concurrently, and must not cross a fork. Backend I/O in async lease operations
-runs in a worker thread. Cancellation cleanup waits for already-started client I/O to
-settle and releases an acquired token; clients therefore need finite I/O timeouts. By default a heartbeat renews
-the lease while the function runs. A lost lease raises `LeaseLost` on otherwise successful
-completion; an existing function exception or cancellation is preserved.
+entered concurrently, and must not cross a fork. Sync backends run async lease I/O in a
+worker thread. An async backend such as `AsyncRedisLock` awaits every round trip (acquire,
+heartbeat renewal, release and `check_async`) on the event loop, with no thread. Using an
+async backend with a synchronous `with` or `check()` raises `TypeError`. Likewise,
+`@idempotent` on an `async def` function awaits an `AsyncCacheStore` directly, such as
+`AsyncRedisStore(..., fail_open=False)` or `AsyncMemoryStore`; an `AsyncRedisStore` gets a
+matching `AsyncRedisLock` automatically. Cancellation cleanup waits for already-started
+client I/O to settle and releases an acquired token; clients therefore need finite I/O
+timeouts. By default a heartbeat renews the lease while the function runs. A lost lease
+raises `LeaseLost` on otherwise successful completion; an existing function exception or
+cancellation is preserved.
+
+<!-- skip -->
+```python
+import redis.asyncio
+from python_wrap.coordination import AsyncRedisLock, Lease
+
+client = redis.asyncio.Redis()
+
+async def nightly_report() -> None:
+    async with Lease("nightly-report", backend=AsyncRedisLock(client), ttl=30):
+        await build_report()
+```
+
+`AsyncRedisLock` uses the same script and keys as `RedisLock`, so sync and async
+processes contend for the same lease.
 
 ## Redis and SQL backends
 

@@ -337,3 +337,47 @@ def test_redis_checkpoint_and_switch_source_roundtrip(redis_client):
     assert source("feature") is False
     redis_client.set("sw:feature", "on")
     assert source("feature") is True
+
+
+class AsyncClient:
+    """Awaitable ``eval`` over the sync test client, as ``redis.asyncio`` exposes it."""
+
+    def __init__(self, sync):
+        self.sync = sync
+
+    async def eval(self, *args):
+        return self.sync.eval(*args)
+
+
+def test_async_and_sync_processes_share_breaker_and_lease_state(redis_client):
+    import asyncio
+
+    from python_wrap import Lease
+    from python_wrap.coordination import AlreadyRunning, AsyncRedisLock
+    from python_wrap.shared import AsyncRedisBreakerState
+
+    sync_breaker = CircuitBreaker(
+        name="mixed", failure_threshold=1, backend=RedisBreakerState(redis_client)
+    )
+    async_breaker = CircuitBreaker(
+        name="mixed",
+        failure_threshold=1,
+        backend=AsyncRedisBreakerState(AsyncClient(redis_client)),
+    )
+    sync_breaker.reset()
+
+    @async_breaker
+    async def boom():
+        raise ValueError
+
+    with pytest.raises(ValueError):
+        asyncio.run(boom())
+    with pytest.raises(CircuitOpenError):
+        sync_breaker.call(lambda: None)
+
+    async def contend():
+        async with Lease("mixed-job", backend=AsyncRedisLock(AsyncClient(redis_client)), ttl=5):
+            with pytest.raises(AlreadyRunning), Lease("mixed-job", backend=RedisLock(redis_client)):
+                pass
+
+    asyncio.run(contend())

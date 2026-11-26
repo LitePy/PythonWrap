@@ -21,6 +21,16 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
 
 ### Added
 
+- Async-native shared backends: `AsyncRedisBreakerState`, `AsyncRedisLock` and
+  `AsyncRedisSemaphore` reuse the sync Lua scripts and keys, so sync and async processes
+  share state, and are awaited on the event loop instead of a worker thread. Breakers,
+  leases and shared bulkheads detect an async backend and raise `TypeError` when used
+  from sync code; `CircuitBreaker.areset()` and `aforce_open()` cover the admin calls.
+  `SharedBackends` (and `shared=`) builds the async classes for a `redis.asyncio`
+  client. `idempotent(store=...)` accepts an `AsyncCacheStore` (an `AsyncRedisStore`
+  gets a matching `AsyncRedisLock`). `amemoize` gains `stale_ttl`, `cache_exceptions`,
+  `exception_ttl` and `logger`, matching `memoize`. The benchmark adds shared rows for
+  the sync, async-native and async-through-a-thread paths.
 - Shared Redis caches accept `signed_pickle_codec(secret)`, a project `cache_codec`
   default and a `version=` namespace. Bad signatures produce `cache.rejected` misses;
   implicit pickle now warns before a later default change to JSON.

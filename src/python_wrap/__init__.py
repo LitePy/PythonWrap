@@ -128,6 +128,8 @@ from .config import (
 )
 from .coordination import (
     AlreadyRunning,
+    AsyncRedisLock,
+    AsyncRedisSemaphore,
     Lease,
     LeaseLost,
     LocalLease,
@@ -328,6 +330,7 @@ from .retry import (
     suppress,
 )
 from .shared import (
+    AsyncRedisBreakerState,
     RedisBreakerState,
 )
 from .slow import (
@@ -383,6 +386,9 @@ __all__ = [
     "AsyncDebounced",
     "AsyncMemoryStore",
     "AsyncPeriodic",
+    "AsyncRedisBreakerState",
+    "AsyncRedisLock",
+    "AsyncRedisSemaphore",
     "AsyncRedisStore",
     "AsyncRedisTokenWindow",
     "AsyncRedisWindow",

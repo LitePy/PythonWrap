@@ -91,7 +91,6 @@ class PolicyRegistry:
         from python_wrap.concurrency import RateLimiter, timeout
         from python_wrap.quotas import shared_rate_limit
         from python_wrap.retry import fallback, retry
-
         from python_wrap.shared import resolve_shared
 
         sb = resolve_shared(None)

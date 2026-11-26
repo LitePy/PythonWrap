@@ -407,8 +407,8 @@ class HttpPolicy:
                     self._build(kind, getattr(self, kind), name)
                     for kind in ("breaker", "limiter", "bulkhead")
                 )
-                self._hosts[key] = found  # type: ignore[assignment]
-            return found  # type: ignore[return-value]
+                self._hosts[key] = found
+            return found
 
     # -- helpers shared by the sync and async paths ------------------------------------
     def _blocked_wait(self, host: str) -> float:

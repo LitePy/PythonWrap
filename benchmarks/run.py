@@ -36,11 +36,14 @@ except ImportError:  # running from a checkout without installing
 from python_wrap.batching import batch_calls
 from python_wrap.bulkhead import Bulkhead, limit_concurrency
 from python_wrap.caching import cache, memoize, once
-from python_wrap.circuit import circuit_breaker
+from python_wrap.circuit import CircuitBreaker, circuit_breaker
 from python_wrap.concurrency import rate_limit, singleflight, throttle, timeout
+from python_wrap.coordination import AsyncRedisSemaphore, RedisSemaphore
 from python_wrap.devtools import deprecate, mock_data
 from python_wrap.logs import audit, log_args
+from python_wrap.quotas import AsyncRedisWindow, RedisWindow, shared_rate_limit
 from python_wrap.retry import retry
+from python_wrap.shared import AsyncRedisBreakerState, RedisBreakerState
 from python_wrap.timing import timing
 from python_wrap.validation import check_type, enforce_types, validate_args
 
@@ -110,6 +113,53 @@ def _batch_async(fn: Fn) -> Fn:
     return call
 
 
+class _MemoryEval:
+    """A Redis client stand-in that answers every script at once (no network).
+
+    The shared rows measure what the library adds around a store round trip: the
+    sync path, the async path that awaits an async client, and the async path that
+    hands a sync client to a worker thread.
+    """
+
+    def __init__(self, answer: Any) -> None:
+        self.answer = answer
+
+    def eval(self, *args: Any) -> Any:
+        return self.answer
+
+
+class _AsyncMemoryEval(_MemoryEval):
+    async def eval(self, *args: Any) -> Any:  # type: ignore[override]
+        return self.answer
+
+
+_CLOSED = [1, "closed", 1, 0, 0, 0, 0, 0, 0, 0, "closed"]
+
+
+def _shared(name: str, build: Callable[[Any], Callable[[Any], Any]], answer: Any) -> list[Case]:
+    """Sync, async-native and async-through-a-thread rows for one shared layer."""
+    sync, native = _MemoryEval(answer), _AsyncMemoryEval(answer)
+    return [
+        Case(f"{name} (shared)", lambda fn: build(sync)(fn), lambda fn: build(native)(fn)),
+        Case(f"{name} (shared, async via thread)", None, lambda fn: build(sync)(fn)),
+    ]
+
+
+def _shared_breaker(client: Any) -> Callable[[Any], Any]:
+    kind = AsyncRedisBreakerState if isinstance(client, _AsyncMemoryEval) else RedisBreakerState
+    return CircuitBreaker(name="bench", backend=kind(client), logger=LOG)
+
+
+def _shared_bulkhead(client: Any) -> Callable[[Any], Any]:
+    kind = AsyncRedisSemaphore if isinstance(client, _AsyncMemoryEval) else RedisSemaphore
+    return Bulkhead(8, name="bench", backend=kind(client))
+
+
+def _shared_window(client: Any) -> Callable[[Any], Any]:
+    kind = AsyncRedisWindow if isinstance(client, _AsyncMemoryEval) else RedisWindow
+    return shared_rate_limit(kind(client, "bench", calls=10**9, period=1))
+
+
 def cases() -> list[Case]:
     out = [
         _case("timing (logging off)", lambda: timing(logger=LOG)),
@@ -139,7 +189,17 @@ def cases() -> list[Case]:
         _case("Bulkhead(8)", lambda: Bulkhead(8)),
         Case("batch_calls (max_size=1)", None, _batch_async),
         Case("retry+timeout+circuit_breaker", _stack, _stack_async),
+        *_shared("circuit_breaker", _shared_breaker, _CLOSED),
+        *_shared("Bulkhead(8)", _shared_bulkhead, 1),
     ]
+    # An async window refuses sync functions, so it has no "via thread" row.
+    out.append(
+        Case(
+            "rate_limit (shared)",
+            lambda fn: _shared_window(_MemoryEval(0))(fn),
+            lambda fn: _shared_window(_AsyncMemoryEval(0))(fn),
+        )
+    )
     return [c for c in out if c is not None]
 
 

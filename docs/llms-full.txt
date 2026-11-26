@@ -3448,6 +3448,32 @@ charge_policy = third_party_api("payments", idempotent=False)
 assert "retry" not in [layer.role for layer in charge_policy.explain().layers]
 ```
 
+#### Sharing state across worker processes
+
+Without `shared=`, every preset keeps its breaker, limiter, bulkhead and retry budget in
+the current process, so N workers allow N times a rate limit and each one discovers an
+outage alone (`doctor --multiprocess` reports PW012). Pass a Redis client, or set it once
+for the project:
+
+<!-- skip -->
+```python
+from python_wrap import configure
+from python_wrap.presets import third_party_api
+from python_wrap.shared import SharedBackends
+
+payments = third_party_api("payments", calls=30, period=60, max_concurrent=8, shared=client)
+
+configure(shared=client)                      # every preset and PolicyRegistry role
+configure(shared=SharedBackends(client=client, semaphore=my_lease_backend))  # override a layer
+```
+
+Keys derive from the preset name, so two services that use the same name share state on
+purpose. A bare client wraps `RedisBreakerState`, `RedisWindow`, `RedisSemaphore` and the new
+`RedisRetryBudget` (two counters per time slot in one hash, one Lua script). The same
+`RedisRetryBudget` works on its own: `RetryBudget(ratio=0.2, backend=RedisRetryBudget(client, "vendor"))`.
+Layers built this way report `shared=True`, so PW012 stays quiet. Store failures follow
+[`on_backend_error`](../concurrency/shared-limits.md#when-the-shared-store-is-down).
+
 ### Explaining a policy
 
 `Policy.explain()` (or `python_wrap.doctor.explain`) lists the layers outermost first with
@@ -3510,6 +3536,9 @@ The doctor reports codes PW001 to PW019 (the table lists them by group, not stri
 | PW015 | warning | A generic `retry` without `retry_if=` wraps an LLM call: refusals and bad requests are retried. |
 | PW020 | warning | An `mcp_guard` (or a pydantic-ai / OpenAI Agents SDK tool wrapped by the python-wrap adapters) has no timeout: a hung server or tool holds the agent turn forever. See [Agent frameworks and MCP](../ai/agent-frameworks.md#doctor-checks). |
 | PW021 | warning | An `mcp_guard` retries every tool (`retry=` without `retry_tools=`): a retried MCP write may run twice. |
+| PW022 | warning | `memoize` with a shared store and no `key=` on a function with dict, set or unannotated parameters: equal arguments are keyed alike in every process, but an unsupported object raises `TypeError`. |
+| PW023 | warning | `python_wrap.celery.check_visibility`: a blocking limiter, unbounded bulkhead queue or retry `max_time` can outlive the broker's visibility timeout, so the broker delivers the task again while it still runs. |
+| PW024 | warning | With `--multiprocess`, a retry layer has no backoff or jitter; workers may retry together. Use `backoff=2, jitter="full"`. |
 | PW018 | warning | A python-wrap LLM retry wraps an SDK client (`llm_retry(client=...)`) whose own retries are still on: attempts multiply (4 x 3 = 12). See [OpenAI and Anthropic SDK clients](../ai/openai-anthropic.md#doctor-checks). |
 | PW019 | warning | A retry wraps a streamed LLM call (`stream_timeout`) without `resume_safe`: a replay after output started repeats text and half-done tool calls. |
 
@@ -4037,11 +4066,17 @@ Every public name: `python_wrap.__all__` first, then names public only in a subm
   An in-process LRU `AsyncCacheStore` that respects ttl on read.
 - `python_wrap.AsyncPeriodic`: `AsyncPeriodic(func: Callable[P, Coroutine[Any, Any, R]], *config: Any)`
   An ``async def`` function that runs as a task on the current loop; see `periodic`.
-- `python_wrap.AsyncRedisStore`: `AsyncRedisStore(client: Any, prefix: str, *, dumps: Callable[[Any], bytes] = dumps, loads: Callable[[bytes], Any] = loads, key_format: Callable[[Hashable], str] | None = None, fail_open: bool = True)`
+- `python_wrap.AsyncRedisBreakerState`: `AsyncRedisBreakerState(client: Any, prefix: str = 'python-wrap:breaker:')`
+  `RedisBreakerState` for ``redis.asyncio`` clients: ``operate`` is awaited.
+- `python_wrap.AsyncRedisLock`: `AsyncRedisLock(client: Any, prefix: str = 'python-wrap:lease:')`
+  `RedisLock` for ``redis.asyncio`` clients: every round trip is awaited, not threaded.
+- `python_wrap.AsyncRedisSemaphore`: `AsyncRedisSemaphore(client: Any, prefix: str = 'python-wrap:lease:')`
+  `AsyncRedisLock` with capacity supplied by Lease(limit=...).
+- `python_wrap.AsyncRedisStore`: `AsyncRedisStore(client: Any, prefix: str, *, dumps: Callable[[Any], bytes] | None = None, loads: Callable[[bytes], Any] | None = None, key_format: Callable[[Hashable], str] | None = None, fail_open: bool = True, retry_backend_after: float = 1.0, version: int | None = None)`
   A namespaced `AsyncCacheStore` for ``redis.asyncio``-compatible clients.
 - `python_wrap.AsyncRedisTokenWindow`: `AsyncRedisTokenWindow(client: Any, name: str = 'tokens', *, prefix: str = 'python-wrap:tokens', fail_open: bool = True)`
   `RedisTokenWindow` for ``redis.asyncio`` clients: round trips are awaited.
-- `python_wrap.AsyncRedisWindow`: `AsyncRedisWindow(client: Any, key: str, *, calls: int, period: float | str)`
+- `python_wrap.AsyncRedisWindow`: `AsyncRedisWindow(client: Any, key: str, *, calls: int, period: float | str, on_backend_error: str | None = None, retry_backend_after: float = 1.0)`
   `RedisWindow` for ``redis.asyncio`` clients: the round trip is awaited, not threaded.
 - `python_wrap.Attempt`: `Attempt(number: int, run: _Run)`
   One attempt of a `retrying` loop; use it as a context manager.
@@ -4091,7 +4126,7 @@ Every public name: `python_wrap.__all__` first, then names public only in a subm
   A cassette file is unreadable, truncated or in an unknown format.
 - `python_wrap.CassetteMiss`: `CassetteMiss(message: str, *, method: str, url: str, key: str)`
   A request has no (unused) recording, and the cassette is not recording.
-- `python_wrap.CircuitBreaker`: `CircuitBreaker(*, failure_threshold: int = 5, recovery_timeout: float = 30.0, half_open_max_calls: int = 1, success_threshold: int = 1, on: ExceptionTypes = Exception, exclude: ExceptionTypes = (), on_state_change: StateChangeListener | None = None, name: str | None = None, logger: LoggerLike = None, window: float | None = None, backend: Any = None)`
+- `python_wrap.CircuitBreaker`: `CircuitBreaker(*, failure_threshold: int = 5, recovery_timeout: float = 30.0, half_open_max_calls: int = 1, success_threshold: int = 1, on: ExceptionTypes = Exception, exclude: ExceptionTypes = (), on_state_change: StateChangeListener | None = None, name: str | None = None, logger: LoggerLike = None, window: float | None = None, backend: Any = None, on_backend_error: str | None = None, retry_backend_after: float = 1.0)`
   Stop calling a failing dependency until it has had time to recover.
 - `python_wrap.CircuitOpenError`: `CircuitOpenError(message: str, *, retry_after: float)`
   The circuit breaker is open, so the call was not attempted.
@@ -4139,7 +4174,7 @@ Every public name: `python_wrap.__all__` first, then names public only in a subm
   A disabled integration was called.
 - `python_wrap.HealthRegistry`: `HealthRegistry()`
   Register named components; report structural state without calling user functions.
-- `python_wrap.HttpRetryPolicy`: `HttpRetryPolicy(max_attempts: int = 3, delay: float = 0.5, backoff: float = 2.0, max_delay: float = 30.0, jitter: float = 0.0, statuses: frozenset[int] = frozenset({408, 425, 429, 500, 502, 503, 504}), methods: frozenset[str] = frozenset({'DELETE', 'GET', 'HEAD', 'OPTIONS', 'PUT', 'TRACE'}), retry_on: tuple[type[BaseException], ...] = (ConnectionError, TimeoutError, OSError), retry_on_names: frozenset[str] = frozenset({'ClientConnectionError', 'ClientOSError', 'ConnectError', 'ConnectTimeout', 'ConnectionError', 'ReadTimeout', 'ServerDisconnectedError', 'Timeout', 'TransportError'}), respect_retry_after: bool = True, max_retry_after: float = 60.0, budget: RetryBudget | None = None, idempotency_header: str | None = 'Idempotency-Key')`
+- `python_wrap.HttpRetryPolicy`: `HttpRetryPolicy(max_attempts: int = 3, delay: float = 0.5, backoff: float = 2.0, max_delay: float = 30.0, jitter: float | str = 0.0, statuses: frozenset[int] = frozenset({408, 425, 429, 500, 502, 503, 504}), methods: frozenset[str] = frozenset({'DELETE', 'GET', 'HEAD', 'OPTIONS', 'PUT', 'TRACE'}), retry_on: tuple[type[BaseException], ...] = (ConnectionError, TimeoutError, OSError), retry_on_names: frozenset[str] = frozenset({'ClientConnectionError', 'ClientOSError', 'ConnectError', 'ConnectTimeout', 'ConnectionError', 'ReadTimeout', 'ServerDisconnectedError', 'Timeout', 'TransportError'}), respect_retry_after: bool = True, max_retry_after: float = 60.0, budget: RetryBudget | None = None, idempotency_header: str | None = 'Idempotency-Key')`
   What to retry, how long to wait, and when to stop, for HTTP calls.
 - `python_wrap.INJECTED`
   Constant: INJECTED
@@ -4187,7 +4222,7 @@ Every public name: `python_wrap.__all__` first, then names public only in a subm
   A callable predicate supporting short-circuit |, &, and ~ composition.
 - `python_wrap.PythonWrapError`
   Base class for every exception this package raises.
-- `python_wrap.Quota`: `Quota(limit: int, name: str = 'quota', *, client: Any = None, key: str | None = None, ttl: float | str | None = None)`
+- `python_wrap.Quota`: `Quota(limit: int, name: str = 'quota', *, client: Any = None, key: str | None = None, ttl: float | str | None = None, on_backend_error: str | None = None, retry_backend_after: float = 1.0)`
   A thread-safe explicit run budget; optionally shared via a Redis counter.
 - `python_wrap.QuotaExhausted`
   A named run quota has no remaining allowance.
@@ -4213,13 +4248,13 @@ Every public name: `python_wrap.__all__` first, then names public only in a subm
   Redis-server-clock leases, acquired/renewed/released atomically with Lua.
 - `python_wrap.RedisSemaphore`: `RedisSemaphore(client: Any, prefix: str = 'python-wrap:lease:')`
   The same atomic lease backend, with capacity supplied by Lease(limit=...).
-- `python_wrap.RedisSource`: `RedisSource(client: Any, prefix: str = 'python-wrap:switch:', *, default: bool = True)`
-  Read a boolean flag from a supplied Redis client; backend errors propagate.
-- `python_wrap.RedisStore`: `RedisStore(client: Any, prefix: str, *, dumps: Callable[[Any], bytes] = dumps, loads: Callable[[bytes], Any] = loads, key_format: Callable[[Hashable], str] | None = None, fail_open: bool = True)`
+- `python_wrap.RedisSource`: `RedisSource(client: Any, prefix: str = 'python-wrap:switch:', *, default: bool = True, on_backend_error: str | None = None, retry_backend_after: float = 1.0)`
+  Read a boolean flag from a supplied Redis client.
+- `python_wrap.RedisStore`: `RedisStore(client: Any, prefix: str, *, dumps: Callable[[Any], bytes] | None = None, loads: Callable[[bytes], Any] | None = None, key_format: Callable[[Hashable], str] | None = None, fail_open: bool = True, retry_backend_after: float = 1.0, version: int | None = None)`
   A namespaced `CacheStore` with opaque hashed keys and configurable serialization.
 - `python_wrap.RedisTokenWindow`: `RedisTokenWindow(client: Any, name: str = 'tokens', *, prefix: str = 'python-wrap:tokens', fail_open: bool = True)`
   A `SharedTokenWindow` on Redis, shared by every worker on every host.
-- `python_wrap.RedisWindow`: `RedisWindow(client: Any, key: str, *, calls: int, period: float | str)`
+- `python_wrap.RedisWindow`: `RedisWindow(client: Any, key: str, *, calls: int, period: float | str, on_backend_error: str | None = None, retry_backend_after: float = 1.0)`
   Atomic sliding-window admission using the Redis server's clock.
 - `python_wrap.ReplayMismatch`
   The code under test made a call that does not match the next recorded one.
@@ -4231,7 +4266,7 @@ Every public name: `python_wrap.__all__` first, then names public only in a subm
   Raised by a replayed call that failed when recorded.
 - `python_wrap.ResumableStream`: `ResumableStream(factory: Callable[[], Any], *, max_attempts: int = 3, retry_if: Callable[[BaseException], bool] | None = None, delay: float = 0.5, max_delay: float = 8.0, first_token: float | None = None, chunk_gap: float | None = None, total: float | None = None, on_finish: _Finish | None = None, name: str = 'stream')`
   A streamed LLM response that reopens itself only while that is safe.
-- `python_wrap.RetryBudget`: `RetryBudget(ratio: float = 0.1, min_per_second: float = 10, window: float = 10.0)`
+- `python_wrap.RetryBudget`: `RetryBudget(ratio: float = 0.1, min_per_second: float = 10, window: float = 10.0, *, backend: Any = None)`
   A retry allowance shared by many retried functions (Finagle/Envoy style).
 - `python_wrap.RetryBudgetStats`: `RetryBudgetStats(requests: int, retries: int, rejected: int, allowed: int)`
   Snapshot of a `RetryBudget`, returned by `RetryBudget.stats`.
@@ -4319,7 +4354,7 @@ Every public name: `python_wrap.__all__` first, then names public only in a subm
   Shorthand for `RunGuard`: ``with agent_run(max_steps=20) as run: ...``.
 - `python_wrap.amap_iter`: `amap_iter(fn: Callable[[T], Awaitable[R]], items: Iterable[T] | AsyncIterable[T], *, limit: int, ordered: bool = True, return_exceptions: bool = False) -> AsyncGenerator[Any, None]`
   Apply `fn` to every item, at most `limit` at a time, yielding results as they come.
-- `python_wrap.amemoize`: `amemoize(*, ttl: float | None = None, key: Callable[..., Hashable] | None = None, store: AsyncCacheStore | None = None, cache_none: bool = True, copy_result: bool = False, singleflight: bool = True) -> Callable[[F], F]`
+- `python_wrap.amemoize`: `amemoize(*, ttl: float | None = None, key: Callable[..., Hashable] | None = None, store: AsyncCacheStore | None = None, cache_none: bool = True, copy_result: bool = False, singleflight: bool = True, stale_ttl: float | datetime.timedelta | None = None, cache_exceptions: type[BaseException] | tuple[type[BaseException], ...] = (), exception_ttl: float | datetime.timedelta | None = None, logger: _core.LoggerLike = None) -> Callable[[F], F]`
   Cache the results of an ``async def`` function in an `AsyncCacheStore`.
 - `python_wrap.aprocess_batches`: `aprocess_batches(items: Iterable[Any], handler: Callable[[Any], Any], *, chunk_size: int = 500, classify: Callable[[Exception], str] = <lambda>, checkpoint: Any = None, on_progress: Callable[[int, int], Any] | None = None) -> BatchResult[Any, Any]`
   Await per-item processing with the same checkpoint and outcome semantics.
@@ -4495,15 +4530,15 @@ Every public name: `python_wrap.__all__` first, then names public only in a subm
   Decorate with a named policy, resolving configuration at call time.
 - `python_wrap.resume_safe`: `resume_safe(source: Callable[..., Any] | None = None, /, *, max_attempts: int = 3, retry_if: Callable[[BaseException], bool] | None = None, delay: float = 0.5, max_delay: float = 8.0, first_token: float | None = None, chunk_gap: float | None = None, total: float | None = None, name: str | None = None) -> Any`
   Reopen a failed LLM stream only when no output has been handed out yet.
-- `python_wrap.retry`: `retry(func: Callable[..., Any] | None = None, /, *, max_attempts: int | None = <unset>, delay: float = <unset>, backoff: float = <unset>, max_delay: float | None = <unset>, jitter: float = <unset>, max_time: float | None = <unset>, on: ExceptionTypes = Exception, retry_if: ExceptionPredicate | None = None, retry_if_result: ResultPredicate | None = None, on_retry: RetryCallback | None = None, delay_from: Callable[[Any], float | None] | None = None, delays: Sequence[float] | None = None, budget: RetryBudget | None = <unset>, logger: LoggerLike = None, log_level: int | None = <unset>, log_exc_info: bool = False, log_values: bool = True) -> Any`
+- `python_wrap.retry`: `retry(func: Callable[..., Any] | None = None, /, *, max_attempts: int | None = <unset>, delay: float = <unset>, backoff: float = <unset>, max_delay: float | None = <unset>, jitter: float | str = <unset>, max_time: float | None = <unset>, on: ExceptionTypes = Exception, retry_if: ExceptionPredicate | None = None, retry_if_result: ResultPredicate | None = None, on_retry: RetryCallback | None = None, delay_from: Callable[[Any], float | None] | None = None, delays: Sequence[float] | None = None, budget: RetryBudget | None = <unset>, logger: LoggerLike = None, log_level: int | None = <unset>, log_exc_info: bool = False, log_values: bool = True) -> Any`
   Retry a function when it raises (or returns a bad value), with optional backoff.
 - `python_wrap.retry_after_header`: `retry_after_header(value: Any, *, json_key: str | None = None) -> float | None`
   Extract a server-requested wait for `delay_from=`, from an error **or a result**.
-- `python_wrap.retry_on_exception`: `retry_on_exception(*exceptions: type[BaseException], max_attempts: int | None = 3, delay: float = 0.0, backoff: float = 1.0, max_delay: float | None = None, jitter: float = 0.0, retry_if: Callable[[BaseException], bool] | None = None, on_retry: Callable[[RetryState], None] | None = None, logger: LoggerLike = None) -> Callable[[F], F]`
+- `python_wrap.retry_on_exception`: `retry_on_exception(*exceptions: type[BaseException], max_attempts: int | None = 3, delay: float = 0.0, backoff: float = 1.0, max_delay: float | None = None, jitter: float | str = 0.0, retry_if: Callable[[BaseException], bool] | None = None, on_retry: Callable[[RetryState], None] | None = None, logger: LoggerLike = None) -> Callable[[F], F]`
   Deprecated alias for ``retry(on=exceptions or Exception, ...)``.
 - `python_wrap.retry_stats`: `retry_stats(func: Callable[..., Any]) -> RetryStats | None`
   Return the `RetryStats` of a function decorated with `retry`.
-- `python_wrap.retrying`: `retrying(*, max_attempts: int | None = <unset>, delay: float = <unset>, backoff: float = <unset>, max_delay: float | None = <unset>, jitter: float = <unset>, max_time: float | None = <unset>, on: ExceptionTypes = Exception, retry_if: ExceptionPredicate | None = None, retry_if_result: ResultPredicate | None = None, on_retry: RetryCallback | None = None, delay_from: Callable[[Any], float | None] | None = None, delays: Sequence[float] | None = None, budget: RetryBudget | None = <unset>, logger: LoggerLike = None, log_level: int | None = <unset>, log_exc_info: bool = False, log_values: bool = True, name: str = 'retrying') -> Retrying`
+- `python_wrap.retrying`: `retrying(*, max_attempts: int | None = <unset>, delay: float = <unset>, backoff: float = <unset>, max_delay: float | None = <unset>, jitter: float | str = <unset>, max_time: float | None = <unset>, on: ExceptionTypes = Exception, retry_if: ExceptionPredicate | None = None, retry_if_result: ResultPredicate | None = None, on_retry: RetryCallback | None = None, delay_from: Callable[[Any], float | None] | None = None, delays: Sequence[float] | None = None, budget: RetryBudget | None = <unset>, logger: LoggerLike = None, log_level: int | None = <unset>, log_exc_info: bool = False, log_values: bool = True, name: str = 'retrying') -> Retrying`
   Retry an inline block of code instead of a whole function.
 - `python_wrap.revert_on_failure`: `revert_on_failure(func: Callable[..., Any] | None = None, /, *, target: str | int = 0, attrs: Iterable[str] | None = None, deep: bool = False) -> Any`
   Restore an object's attributes if the function raises.
@@ -4606,7 +4641,7 @@ Every public name: `python_wrap.__all__` first, then names public only in a subm
 - `python_wrap.async_cache`
   Async cache stores and ``amemoize``: caching without blocking the event loop.
 - `python_wrap.async_cache.json_codec`: `json_codec() -> tuple[Callable[[Any], bytes], Callable[[bytes], Any]]`
-  Return ``(dumps, loads)`` that store entries as JSON instead of pickle.
+  Return a JSON codec for cache entries with JSON-compatible values.
 - `python_wrap.batching`
   Coalesce many single-item calls into one batched call: `batch_calls`.
 - `python_wrap.buffering`
@@ -4623,13 +4658,19 @@ Every public name: `python_wrap.__all__` first, then names public only in a subm
   Caching decorators: `memoize`, `cache`, `once` and `cached_property`.
 - `python_wrap.celery`
   Celery integration: task context, Celery-aware retry countdowns and shared breakers.
-- `python_wrap.celery.TaskContext`: `TaskContext(app: Any, *, use_soft_deadline: bool = True)`
+- `python_wrap.celery.TaskContext`: `TaskContext(app: Any, *, use_soft_deadline: bool = True, hard_margin: float = 5.0, inherit_deadline: bool = False)`
   Signal subscription handle; close disconnects only this app's handlers.
-- `python_wrap.celery.install`: `install(app: Any, *, use_soft_deadline: bool = True) -> TaskContext`
-  Bind task_id/name and an optional soft-time-limit deadline around task execution.
-- `python_wrap.celery.retry_countdown`: `retry_countdown(task: Any, exc: BaseException | None = None, *, delays: Sequence[float] | None = None, delay: float = 5.0, backoff: float = 2.0, max_delay: float = 600.0, jitter: float = 0.0, respect_retry_after: bool = True) -> float`
+- `python_wrap.celery.check_visibility`: `check_visibility(target: Any, visibility_timeout: float) -> tuple[Any, ...]`
+  PW023: blocking waits that can outlive the broker's ``visibility_timeout``.
+- `python_wrap.celery.idempotent_task`: `idempotent_task(*, key: Any = None, store: Any = None, ttl: float | str = '1d', backend: Any = None, lease_ttl: float | str = 600, requeue_delay: float = 30.0, max_retries: int | None = None) -> Any`
+  Run a bound task once per name and arguments, even when the broker delivers it twice.
+- `python_wrap.celery.install`: `install(app: Any, *, use_soft_deadline: bool = True, hard_margin: float = 5.0, inherit_deadline: bool = False) -> TaskContext`
+  Bind task_id/name and a deadline from the task's time limit around task execution.
+- `python_wrap.celery.resilient_task`: `resilient_task(policy: Any = None, *, requeue_on: tuple[type[BaseException], ...] | None = None, delays: Sequence[float] | None = None, max_retries: int | None = None, requeue_when_limited: bool = True, **schedule: Any) -> Any`
+  Run a bound task body through ``policy`` and re-queue it when the dependency is busy.
+- `python_wrap.celery.retry_countdown`: `retry_countdown(task: Any, exc: BaseException | None = None, *, delays: Sequence[float] | None = None, delay: float = 5.0, backoff: float = 2.0, max_delay: float = 600.0, jitter: float | str = 0.0, respect_retry_after: bool = True) -> float`
   Seconds to wait before Celery runs ``task`` again, following python-wrap rules.
-- `python_wrap.celery.retry_task`: `retry_task(task: Any, exc: BaseException, *, max_retries: int | None = None, delays: Sequence[float] | None = None, delay: float = 5.0, backoff: float = 2.0, max_delay: float = 600.0, jitter: float = 0.0, respect_retry_after: bool = True) -> NoReturn`
+- `python_wrap.celery.retry_task`: `retry_task(task: Any, exc: BaseException, *, max_retries: int | None = None, delays: Sequence[float] | None = None, delay: float = 5.0, backoff: float = 2.0, max_delay: float = 600.0, jitter: float | str = 0.0, respect_retry_after: bool = True) -> NoReturn`
   Ask Celery to retry ``task`` later with a `retry_countdown` schedule.
 - `python_wrap.celery.shared_breaker`: `shared_breaker(name: str, backend: Any, **options: Any) -> Any`
   A `CircuitBreaker` whose state lives in ``backend``, shared by every worker process.
@@ -4685,7 +4726,7 @@ Every public name: `python_wrap.__all__` first, then names public only in a subm
   Developer tools: deprecation warnings, mock data and decorator composition.
 - `python_wrap.django`
   Sync/async Django middleware for request context and cooperative deadlines.
-- `python_wrap.django.ContextMiddleware`: `ContextMiddleware(get_response: Callable[..., Any], *, budget: float | None = None, user: Callable[[Any], Any] | None = None)`
+- `python_wrap.django.ContextMiddleware`: `ContextMiddleware(get_response: Callable[..., Any], *, budget: float | None = None, user: Callable[[Any], Any] | None = None, trust_deadline_header: bool = False)`
   Add python_wrap.django.ContextMiddleware to Django's MIDDLEWARE.
 - `python_wrap.doctor`
   Explain and lint resilience stacks: which layers wrap a function, and what is risky.
@@ -4723,13 +4764,13 @@ Every public name: `python_wrap.__all__` first, then names public only in a subm
   Send events to a StatsD or DogStatsD agent over UDP, fire-and-forget.
 - `python_wrap.fastapi`
   Pure ASGI context middleware for FastAPI/Starlette, with no framework imports.
-- `python_wrap.fastapi.ContextMiddleware`: `ContextMiddleware(app: Any, *, user: Callable[[dict[str, Any]], Any] | None = None, request_id_header: str = 'X-Request-ID', budget: float | None = None)`
+- `python_wrap.fastapi.ContextMiddleware`: `ContextMiddleware(app: Any, *, user: Callable[[dict[str, Any]], Any] | None = None, request_id_header: str = 'X-Request-ID', budget: float | None = None, trust_deadline_header: bool = False)`
   Bind context around HTTP dispatch/streaming and restore on errors/cancellation.
-- `python_wrap.fastapi.install`: `install(app: Any, *, user: Callable[[dict[str, Any]], Any] | None = None, request_id_header: str = 'X-Request-ID', budget: float | None = None, health_path: str | None = None) -> None`
+- `python_wrap.fastapi.install`: `install(app: Any, *, user: Callable[[dict[str, Any]], Any] | None = None, request_id_header: str = 'X-Request-ID', budget: float | None = None, health_path: str | None = None, trust_deadline_header: bool = False) -> None`
   Install middleware before app startup; optional health endpoint returns JSON.
 - `python_wrap.flask`
   Flask request context adapter; Flask is imported only by init_app().
-- `python_wrap.flask.init_app`: `init_app(app: Any, *, user: Callable[[], Any] | None = None, request_id_header: str = 'X-Request-ID', budget: float | None = None, health_path: str | None = None) -> None`
+- `python_wrap.flask.init_app`: `init_app(app: Any, *, user: Callable[[], Any] | None = None, request_id_header: str = 'X-Request-ID', budget: float | None = None, health_path: str | None = None, trust_deadline_header: bool = False) -> None`
   Bind request/user context and an optional cooperative deadline.
 - `python_wrap.genai`
   Observability and compliance for LLM and tool calls: enriched events, redaction, audit tape.
@@ -4743,18 +4784,26 @@ Every public name: `python_wrap.__all__` first, then names public only in a subm
   Hedged requests: `hedge` starts a backup attempt when the first one is slow.
 - `python_wrap.http`
   HTTP client integration: retry policy, httpx transports, requests adapter, generic decorator.
+- `python_wrap.http.AsyncPolicyTransport`: `AsyncPolicyTransport(inner: Any, policy: HttpPolicy | None = None)`
+  The asyncio counterpart of `PolicyTransport` for ``httpx.AsyncClient``.
 - `python_wrap.http.AsyncRetryTransport`: `AsyncRetryTransport(inner: Any, policy: HttpRetryPolicy | None = None)`
   The asyncio counterpart of `RetryTransport` for ``httpx.AsyncClient``.
+- `python_wrap.http.HttpPolicy`: `HttpPolicy(retry: HttpRetryPolicy = <factory>, breaker: Any = None, limiter: Any = None, bulkhead: Any = None, connect_timeout: float | None = None, read_timeout: float | None = None, per_host: bool = False, shared: Any = None, propagate: bool = False)`
+  Retries plus a circuit breaker, rate limiter, bulkhead and timeouts for HTTP calls.
 - `python_wrap.http.IDEMPOTENT_METHODS`
   Constant: frozenset({'DELETE', 'GET', 'HEAD', 'OPTIONS', 'PUT', 'TRACE'})
+- `python_wrap.http.PolicyTransport`: `PolicyTransport(inner: Any, policy: HttpPolicy | None = None)`
+  A synchronous httpx transport that applies a whole `HttpPolicy`.
 - `python_wrap.http.RETRYABLE_STATUSES`
   Constant: frozenset({408, 425, 429, 500, 502, 503, 504})
 - `python_wrap.http.RetryTransport`: `RetryTransport(inner: Any, policy: HttpRetryPolicy | None = None)`
   A synchronous httpx transport wrapper that retries per an `HttpRetryPolicy`.
 - `python_wrap.http.http_retry`: `http_retry(policy: HttpRetryPolicy | None = None, *, method: str = 'GET', idempotent: bool | None = None) -> Callable[[Callable[..., Any]], Callable[..., Any]]`
   Decorate any function or coroutine that returns a response-like object.
+- `python_wrap.http.mount_policy`: `mount_policy(session: Any, policy: HttpPolicy | None = None, prefixes: Iterable[str] = ('http://', 'https://')) -> Any`
+  Mount an adapter that applies a whole `HttpPolicy` on a ``requests.Session``.
 - `python_wrap.http.mount_retries`: `mount_retries(session: Any, policy: HttpRetryPolicy | None = None, prefixes: Iterable[str] = ('http://', 'https://')) -> Any`
-  Mount a retrying adapter on a ``requests.Session``.
+  Mount a retrying adapter on a ``requests.Session`` (retries only).
 - `python_wrap.http.retry_delay`: `retry_delay(response_or_exc: Any, attempt: int, policy: HttpRetryPolicy | None = None) -> float | None`
   Seconds to wait after failed attempt number `attempt` (1-based).
 - `python_wrap.http.should_retry`: `should_retry(method: str, headers: Mapping[str, str] | Any, status: int | None = None, exc: BaseException | None = None, policy: HttpRetryPolicy | None = None) -> bool`
@@ -4889,16 +4938,24 @@ Every public name: `python_wrap.__all__` first, then names public only in a subm
   Opinionated, documented starting points for the most common resilience stacks.
 - `python_wrap.presets.TRANSPORT_ERRORS`
   Constant: (ConnectionError, TimeoutError)
-- `python_wrap.presets.db_call`: `db_call(name: str, *, timeout_seconds: float = 5.0, attempts: int = 3, idempotent: bool = True, breaker: bool = False, retry_if: Callable[[Any], bool] = <python_wrap.predicates.Predicate object>, budget: RetryBudget | None = None) -> Policy`
+- `python_wrap.presets.db_call`: `db_call(name: str, *, timeout_seconds: float = 5.0, attempts: int = 3, idempotent: bool = True, breaker: bool = False, retry_if: Callable[[Any], bool] = <python_wrap.predicates.Predicate object>, budget: RetryBudget | None = None, shared: Any = None) -> Policy`
   A policy for a database unit of work (a whole transaction, not one statement).
-- `python_wrap.presets.http_client`: `http_client(name: str, *, timeout_seconds: float = 10.0, attempts: int = 3, idempotent: bool = True, breaker: bool = True, on: tuple[type[BaseException], ...] = (ConnectionError, TimeoutError), budget: RetryBudget | None = None) -> Policy`
+- `python_wrap.presets.http_client`: `http_client(name: str, *, timeout_seconds: float = 10.0, attempts: int = 3, idempotent: bool = True, breaker: bool = True, on: tuple[type[BaseException], ...] = (ConnectionError, TimeoutError), budget: RetryBudget | None = None, shared: Any = None) -> Policy`
   A policy for calls to an internal HTTP service you own.
-- `python_wrap.presets.llm_client`: `llm_client(name: str, *, timeout_seconds: float = 60.0, attempts: int = 4, idempotent: bool = True, breaker: bool = True, max_delay: float = 60.0, budget: RetryBudget | None = None, spend: Budget | None = None, tokens: TokenRateLimiter | None = None) -> Policy`
+- `python_wrap.presets.llm_client`: `llm_client(name: str, *, timeout_seconds: float = 60.0, attempts: int = 4, idempotent: bool = True, breaker: bool = True, max_delay: float = 60.0, budget: RetryBudget | None = None, spend: Budget | None = None, tokens: TokenRateLimiter | None = None, shared: Any = None) -> Policy`
   A policy for calls to an LLM provider (chat/completions/messages endpoints).
-- `python_wrap.presets.third_party_api`: `third_party_api(name: str, *, timeout_seconds: float = 15.0, attempts: int = 4, idempotent: bool = True, on: tuple[type[BaseException], ...] = (ConnectionError, TimeoutError), calls: int | None = None, period: float = 1.0, max_concurrent: int | None = None, budget: RetryBudget | None = None) -> Policy`
+- `python_wrap.presets.third_party_api`: `third_party_api(name: str, *, timeout_seconds: float = 15.0, attempts: int = 4, idempotent: bool = True, on: tuple[type[BaseException], ...] = (ConnectionError, TimeoutError), calls: int | None = None, period: float = 1.0, max_concurrent: int | None = None, budget: RetryBudget | None = None, shared: Any = None) -> Policy`
   A policy for an external vendor API (payment gateway, ERP, SMS/e-mail provider).
 - `python_wrap.processing`
   Per-item batch outcomes and explicit checkpoints for resumable processing.
+- `python_wrap.propagation`
+  Carry the request id and the remaining deadline across process boundaries.
+- `python_wrap.propagation.deadline_budget`: `deadline_budget(header: Any, budget: float | None, *, trust: bool) -> float | None`
+  The budget for an inbound request: the smaller of ``budget`` and the header, if trusted.
+- `python_wrap.propagation.outgoing_headers`: `outgoing_headers() -> dict[str, str]`
+  Headers for an outgoing call: the bound request id and the remaining deadline in ms.
+- `python_wrap.propagation.set_headers`: `set_headers(*, request_id: str | None = None, deadline: str | None = None) -> None`
+  Rename the request-id and/or deadline header for this process.
 - `python_wrap.pytest_plugin`
   Opt-in pytest fixtures for LLM cassettes and HTTP-level chaos.
 - `python_wrap.pytest_plugin.chaos_llm_http`: `chaos_llm_http() -> LLMHTTPFaults`
@@ -4915,7 +4972,11 @@ Every public name: `python_wrap.__all__` first, then names public only in a subm
   Split a name into lowercase word segments.
 - `python_wrap.shared`
   Redis coordination backends for circuit breakers and bulkheads.
-- `python_wrap.shared.SharedBulkhead`: `SharedBulkhead(max_concurrent: int, *, backend: Any, name: str, max_waiting: int | None = None, timeout: float | None = None, ttl: float = 60)`
+- `python_wrap.shared.RedisRetryBudget`: `RedisRetryBudget(client: Any, name: str, *, prefix: str = 'python-wrap:budget:', on_backend_error: str | None = None, retry_backend_after: float = 1.0)`
+  A `RetryBudget` backend that counts requests and retries in Redis.
+- `python_wrap.shared.SharedBackends`: `SharedBackends(client: Any = None, breaker_state: Any = None, window: Any = None, semaphore: Any = None, budget: Any = None)`
+  The shared stores a preset or policy uses, built from one Redis client.
+- `python_wrap.shared.SharedBulkhead`: `SharedBulkhead(max_concurrent: int, *, backend: Any, name: str, max_waiting: int | None = None, timeout: float | None = None, ttl: float = 60, on_backend_error: str | None = None, retry_backend_after: float = 1.0)`
   Renewable lease-backed concurrency cap; max_waiting is a per-process queue bound.
 - `python_wrap.slow`
   Slow-call detection for synchronous and asynchronous functions.
@@ -4923,6 +4984,8 @@ Every public name: `python_wrap.__all__` first, then names public only in a subm
   State safety: `revert_on_failure` and transactions.
 - `python_wrap.stores`
   Optional Redis cache adapter. The caller supplies a client; redis is not imported.
+- `python_wrap.stores.signed_pickle_codec`: `signed_pickle_codec(secret: bytes) -> tuple[Callable[[Any], bytes], Callable[[bytes], Any]]`
+  Authenticate pickle bytes before loading them; keep the signing key private.
 - `python_wrap.switches`
   Dynamic kill switches, with explicit sources and bounded local read caching.
 - `python_wrap.testing`

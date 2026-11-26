@@ -269,7 +269,9 @@ def third_party_api(
             else RateLimiter(calls, period, name=name)
         ),
         bulkhead=(
-            Bulkhead(max_concurrent, name=name, backend=lease) if max_concurrent is not None else None
+            None
+            if max_concurrent is None
+            else Bulkhead(max_concurrent, name=name, backend=lease)
         ),
         breaker=_breaker(sb, failure_threshold=5, recovery_timeout=60.0, on=on, name=name),
         retry=_retry(

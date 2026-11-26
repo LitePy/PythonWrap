@@ -187,10 +187,14 @@ class CircuitBreaker:
         if backend is not None and not name:
             raise ValueError("shared breakers require an explicit name")
         self.window, self.backend = window, backend
+        self._async_backend = backend is not None and _core.is_async(backend.operate)
+        self._last: dict[str, Any] | None = None  # last async-backend answer, for .state
         self._monitor: BackendMonitor | None = (
             None
             if backend is None
-            else BackendMonitor("breaker", self.name_for(name), on_backend_error, retry_backend_after)
+            else BackendMonitor(
+                "breaker", self.name_for(name), on_backend_error, retry_backend_after
+            )
         )
         self._failure_times: deque[float] = deque()
         self.failure_threshold = failure_threshold
@@ -278,8 +282,10 @@ class CircuitBreaker:
 
     def reset(self) -> None:
         """Force the breaker back to closed and zero every counter."""
-        if self._try("reset") is not None:
-            return
+        if self._try("reset") is None:
+            self._local_reset()
+
+    def _local_reset(self) -> None:
         with self._lock:
             self._failure_times.clear()
             if self._state is not CircuitState.CLOSED:
@@ -296,25 +302,65 @@ class CircuitBreaker:
 
     def force_open(self) -> None:
         """Force open for maintenance/tests, without simulating dependency failures."""
-        if self._try("force_open") is not None:
-            return
+        if self._try("force_open") is None:
+            self._local_force_open()
+
+    def _local_force_open(self) -> None:
         with self._lock:
             self._open()
         self._notify()
 
-    def _try(self, operation: str, generation: int = 0, trial: bool = False) -> dict[str, Any] | None:
+    def _try(
+        self, operation: str, generation: int = 0, trial: bool = False
+    ) -> dict[str, Any] | None:
         """Backend result, or None when this call must use the local state (or be bypassed)."""
         if self._monitor is None:
             return None
+        if self._async_backend:
+            if operation == "state":
+                return self._last
+            raise TypeError(
+                f"circuit {self.name} has an async backend; use the async form of this call"
+            )
         return self._monitor.call(
             operation, lambda: self._remote(operation, generation, trial), lambda: None
         )
+
+    async def _atry(
+        self, operation: str, generation: int = 0, trial: bool = False
+    ) -> dict[str, Any] | None:
+        """`_try` for an async backend: the store round trip is awaited."""
+        if self._monitor is None:
+            return None
+
+        async def run() -> dict[str, Any]:
+            return self._observe(await self.backend.operate(self, operation, generation, trial))
+
+        return await self._monitor.acall(operation, run, lambda: None)
+
+    async def areset(self) -> None:
+        """`reset` for a breaker with an async backend (works for any breaker)."""
+        if not self._async_backend:
+            return self.reset()
+        if await self._atry("reset") is None:
+            self._local_reset()
+
+    async def aforce_open(self) -> None:
+        """`force_open` for a breaker with an async backend (works for any breaker)."""
+        if not self._async_backend:
+            return self.force_open()
+        if await self._atry("force_open") is None:
+            self._local_force_open()
 
     def _bypass(self) -> bool:
         return self._monitor is not None and self._monitor.mode == "allow"
 
     def _remote(self, operation: str, generation: int = 0, trial: bool = False) -> dict[str, Any]:
-        data: dict[str, Any] = self.backend.operate(self, operation, generation, trial)
+        return self._observe(self.backend.operate(self, operation, generation, trial))
+
+    def _observe(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Record a backend answer and report the transition it made, if any."""
+        self._last = data
         if data["old"] != data["state"]:
             _core.emit("circuit.state_changed", self.name, old=data["old"], new=data["state"])
             if self.on_state_change:
@@ -376,7 +422,12 @@ class CircuitBreaker:
 
     def _acquire(self) -> tuple[int, bool]:
         """Admit a call. Returns ``(generation, is_trial)`` or raises CircuitOpenError."""
-        data = self._try("admit")
+        return self._admit(self._try("admit"))
+
+    async def _aacquire(self) -> tuple[int, bool]:
+        return self._admit(await self._atry("admit"))
+
+    def _admit(self, data: dict[str, Any] | None) -> tuple[int, bool]:
         if data is None and self._bypass():
             return 0, False
         if data is not None:
@@ -412,8 +463,14 @@ class CircuitBreaker:
         return admitted
 
     def _success(self, generation: int, trial: bool) -> None:
-        if self._try("success", generation, trial) is not None or self._bypass():
-            return
+        if self._try("success", generation, trial) is None and not self._bypass():
+            self._local_success(generation, trial)
+
+    async def _asuccess(self, generation: int, trial: bool) -> None:
+        if await self._atry("success", generation, trial) is None and not self._bypass():
+            self._local_success(generation, trial)
+
+    def _local_success(self, generation: int, trial: bool) -> None:
         with self._lock:
             self._total_successes += 1
             if generation != self._generation:
@@ -437,8 +494,10 @@ class CircuitBreaker:
         self._notify()
 
     def _failure(self, generation: int, trial: bool) -> None:
-        if self._try("failure", generation, trial) is not None or self._bypass():
-            return
+        if self._try("failure", generation, trial) is None and not self._bypass():
+            self._local_failure(generation, trial)
+
+    def _local_failure(self, generation: int, trial: bool) -> None:
         with self._lock:
             self._total_failures += 1
             if generation != self._generation:
@@ -457,20 +516,41 @@ class CircuitBreaker:
 
     def _release(self, generation: int, trial: bool) -> None:
         """A non-counted exception ended the call: free its trial slot, if any."""
-        if self._try("neutral", generation, trial) is not None or self._bypass():
-            return
+        if self._try("neutral", generation, trial) is None and not self._bypass():
+            self._local_release(generation, trial)
+
+    async def _arelease(self, generation: int, trial: bool) -> None:
+        if await self._atry("neutral", generation, trial) is None and not self._bypass():
+            self._local_release(generation, trial)
+
+    def _local_release(self, generation: int, trial: bool) -> None:
         if not trial:
             return
         with self._lock:
             if generation == self._generation:
                 self._trials = max(self._trials - 1, 0)
 
+    def _counted(self, exc: BaseException) -> bool:
+        return isinstance(exc, self.on) and not isinstance(exc, self.exclude)
+
     def _settle(self, generation: int, trial: bool, exc: BaseException) -> None:
         """Book a call that raised ``exc``: a failure, or uncounted."""
-        if isinstance(exc, self.on) and not isinstance(exc, self.exclude):
+        if self._counted(exc):
             self._failure(generation, trial)
         else:
             self._release(generation, trial)
+
+    async def _asettle(self, generation: int, trial: bool, exc: BaseException) -> None:
+        if not self._counted(exc):
+            return await self._arelease(generation, trial)
+        if await self._atry("failure", generation, trial) is None and not self._bypass():
+            self._local_failure(generation, trial)
+
+    def _offload(self, name: str, *args: Any) -> asyncio.Task[Any]:
+        """Run a backend step as a task: awaited natively, or in a worker thread."""
+        if self._async_backend:
+            return asyncio.ensure_future(getattr(self, "_a" + name.lstrip("_"))(*args))
+        return asyncio.create_task(asyncio.to_thread(getattr(self, name), *args))
 
     # -- public call API -----------------------------------------------------------
     @overload
@@ -500,6 +580,8 @@ class CircuitBreaker:
         return self._call_sync(func, args, kwargs)
 
     def _call_sync(self, func: Callable[..., Any], args: Any, kwargs: Any) -> Any:
+        if self._async_backend:
+            raise TypeError(f"circuit {self.name} has an async backend; it protects async def only")
         generation, trial = self._acquire()
         try:
             result = func(*args, **kwargs)
@@ -518,13 +600,13 @@ class CircuitBreaker:
         # Synchronous network admission cannot be abandoned on cancellation: a late
         # successful admission would otherwise strand a half-open trial reservation.
         if self.backend is not None:
-            admission = asyncio.create_task(asyncio.to_thread(self._acquire))
+            admission = self._offload("_acquire")
             try:
                 generation, trial = await asyncio.shield(admission)
             except asyncio.CancelledError:
                 acquired, error, _ = await _drain(admission)
                 if error is None:
-                    cleanup = asyncio.create_task(asyncio.to_thread(self._release, *acquired))
+                    cleanup = self._offload("_release", *acquired)
                     await _drain(cleanup)
                 raise
         else:
@@ -533,9 +615,7 @@ class CircuitBreaker:
             result = await func(*args, **kwargs)
         except BaseException as exc:
             if self.backend is not None:
-                settlement = asyncio.create_task(
-                    asyncio.to_thread(self._settle, generation, trial, exc)
-                )
+                settlement = self._offload("_settle", generation, trial, exc)
                 _, error, cancelled = await _drain(settlement)
                 if cancelled:
                     raise asyncio.CancelledError from None
@@ -553,7 +633,7 @@ class CircuitBreaker:
                     )
             raise
         if self.backend is not None:
-            success = asyncio.create_task(asyncio.to_thread(self._success, generation, trial))
+            success = self._offload("_success", generation, trial)
             _, error, cancelled = await _drain(success)
             if cancelled:
                 raise asyncio.CancelledError

@@ -16,7 +16,13 @@ from python_wrap._runtime import digest, seconds
 from python_wrap.coordination import AlreadyRunning, Lease
 from python_wrap.errors import BulkheadFull
 
-__all__ = ["RedisBreakerState", "RedisRetryBudget", "SharedBackends", "SharedBulkhead"]
+__all__ = [
+    "AsyncRedisBreakerState",
+    "RedisBreakerState",
+    "RedisRetryBudget",
+    "SharedBackends",
+    "SharedBulkhead",
+]
 
 _BREAKER = """
 local t=redis.call('TIME'); local now=t[1]*1000+math.floor(t[2]/1000)
@@ -146,7 +152,8 @@ class RedisRetryBudget:
     def totals(self, budget: Any) -> tuple[int, int]:
         def local() -> tuple[int, int]:
             with budget._lock:
-                return budget._totals(budget._slot()[1])
+                totals: tuple[int, int] = budget._totals(budget._slot()[1])
+                return totals
 
         row = self._monitor.call("totals", lambda: self._eval(budget, "totals"), local)
         return int(row[0]), int(row[1])
@@ -169,8 +176,11 @@ class RedisBreakerState:
     def operate(
         self, breaker: Any, operation: str, generation: int = 0, trial: bool = False
     ) -> dict[str, Any]:
+        return self._parse(self.client.eval(*self._args(breaker, operation, generation, trial)))
+
+    def _args(self, breaker: Any, operation: str, generation: int, trial: bool) -> tuple[Any, ...]:
         key = self.prefix + "{" + digest(breaker.name) + "}"
-        row = self.client.eval(
+        return (
             _BREAKER,
             2,
             key,
@@ -185,6 +195,9 @@ class RedisBreakerState:
             int(trial),
             uuid.uuid4().hex,
         )
+
+    @staticmethod
+    def _parse(row: Any) -> dict[str, Any]:
         keys = (
             "admitted",
             "state",
@@ -204,6 +217,22 @@ class RedisBreakerState:
             if name not in {"state", "old"}:
                 data[name] = int(data[name])
         return data
+
+
+class AsyncRedisBreakerState(RedisBreakerState):
+    """`RedisBreakerState` for ``redis.asyncio`` clients: ``operate`` is awaited.
+
+    Same Lua script and keys, so sync and async processes share one breaker. A breaker
+    with this backend protects ``async def`` functions only; its sync ``state`` and
+    ``stats`` report the last state the store returned in this process.
+    """
+
+    async def operate(  # type: ignore[override]
+        self, breaker: Any, operation: str, generation: int = 0, trial: bool = False
+    ) -> dict[str, Any]:
+        return self._parse(
+            await self.client.eval(*self._args(breaker, operation, generation, trial))
+        )
 
 
 class SharedBulkhead:
@@ -238,6 +267,8 @@ class SharedBulkhead:
         self.timeout = None if timeout is None else seconds(timeout, positive=False)
         self.ttl = seconds(ttl)
         self._monitor = BackendMonitor("bulkhead", name, on_backend_error, retry_backend_after)
+        acquire = getattr(backend, "acquire", None)
+        self._async = acquire is not None and _core.is_async(acquire)
         self._stack: contextvars.ContextVar[tuple[tuple[Lease, object], ...]] = (
             contextvars.ContextVar("bulkhead_leases", default=())
         )
@@ -293,6 +324,10 @@ class SharedBulkhead:
             self._active += 1
 
     def acquire(self) -> None:
+        if self._async:
+            raise TypeError(
+                "this bulkhead's backend is async; it protects async def functions only"
+            )
         if self._monitor._skipping():
             return self._local_admit(threading.get_ident())
         lease = self._lease()
@@ -383,32 +418,44 @@ class SharedBackends:
     semaphore: Any = None
     budget: Any = None
 
+    @property
+    def is_async(self) -> bool:
+        """True for a ``redis.asyncio`` client: layers are built from the async classes."""
+        return self.client is not None and _core.is_async(self.client.eval)
+
     def breaker(self) -> Any:
         if self.breaker_state is not None:
             return self.breaker_state
-        return None if self.client is None else RedisBreakerState(self.client)
+        if self.client is None:
+            return None
+        return (AsyncRedisBreakerState if self.is_async else RedisBreakerState)(self.client)
 
     def rate_window(self, name: str, calls: int, period: float) -> Any:
-        from python_wrap.quotas import RedisWindow
+        from python_wrap.quotas import AsyncRedisWindow, RedisWindow
 
         client = self.window if self.window is not None else self.client
         if client is None:
             return None
-        return RedisWindow(client, f"python-wrap:window:{name}", calls=calls, period=period)
+        kind = AsyncRedisWindow if _core.is_async(client.eval) else RedisWindow
+        return kind(client, f"python-wrap:window:{name}", calls=calls, period=period)
 
     def lease_backend(self) -> Any:
         if self.semaphore is not None:
             return self.semaphore
         if self.client is None:
             return None
-        from python_wrap.coordination import RedisSemaphore
+        from python_wrap.coordination import AsyncRedisSemaphore, RedisSemaphore
 
-        return RedisSemaphore(self.client)
+        return (AsyncRedisSemaphore if self.is_async else RedisSemaphore)(self.client)
 
     def budget_backend(self, name: str) -> Any:
         if self.budget is not None:
             return self.budget
-        return None if self.client is None else RedisRetryBudget(self.client, name)
+        # shortcut: retry budgets are sync only, so an async client keeps them per process;
+        # pass budget=RedisRetryBudget(sync_client, name) to share them.
+        if self.client is None or self.is_async:
+            return None
+        return RedisRetryBudget(self.client, name)
 
 
 def resolve_shared(shared: Any) -> SharedBackends | None:

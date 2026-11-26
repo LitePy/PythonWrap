@@ -73,6 +73,14 @@ class BackendMonitor:
         with self._lock:
             self._down = True
             self._until = time.monotonic() + self.retry_backend_after
+        _core.get_logger(None).warning(
+            "%s backend %r: %s failed (%s); on_backend_error=%s",
+            self.kind,
+            self.name,
+            operation,
+            type(exc).__name__,
+            self.mode,
+        )
         _core.emit(
             "backend.error",
             self.name,
