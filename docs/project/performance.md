@@ -73,11 +73,27 @@ numbers show what the library adds around a store round trip, not the network
 | Bulkhead(8) (shared, async via thread) | - | 191,379 |
 | rate_limit (shared) | 2,960 | 3,315 |
 
-Against a real Redis, run `python benchmarks/run.py --filter redis --redis-url
-redis://localhost:6379/0` (needs the `redis` package): it adds a `(redis)` row for the
-shared breaker, bulkhead, rate limiter and a `memoize` hit on `RedisStore`. Those numbers
-depend on the network round trip, so measure them where your service runs; for several
-processes at once use `python benchmarks/soak.py --processes 4 --redis-url ...`.
+Against a real Redis (local server, CPython 3.11, Apple M2 Pro), from
+`python benchmarks/run.py --filter redis --redis-url redis://localhost:6379/0` (needs the
+`redis` package):
+
+| Decorator | sync ns/call |
+| --- | ---: |
+| circuit_breaker (redis) | 3,300 |
+| Bulkhead(8) (redis) | 229,396 |
+| rate_limit (redis) | 97,673 |
+| memoize (redis hit) | 83,965 |
+
+The breaker row is low because a closed state is served from its `state_ttl` cache. The
+bulkhead pays two lease round trips plus starting its lease-renewal thread on every
+call; prefer it for calls that take far longer than that. Measure where your service
+runs: these numbers are mostly the network round trip.
+
+A 60-second soak with 4 processes x 8 threads sharing one Redis breaker and a
+2,000 calls/s limiter (`python benchmarks/soak.py --processes 4 --threads 8 --duration 60
+--limit 2000 --redis-url ...`) admitted 1,996 calls/s across all processes, sent 0.36
+dependency calls per logical call through the outage phases, ended with the breaker
+closed in every process and had no stuck lease or hang.
 
 A closed shared breaker answers from its cached state (`state_ttl`) and sends successes
 in batches, so most calls make no store round trip. The async rows use an awaited

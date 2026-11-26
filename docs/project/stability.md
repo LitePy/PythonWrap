@@ -56,7 +56,7 @@ A provisional module graduates when all three hold:
 
 | Module | Target | Status |
 | --- | --- | --- |
-| `shared`, `coordination`, `quotas`, `stores` | 0.5.0 | Live CI in place; storage formats pinned by `tests/test_stability.py`; soak pending |
+| `shared`, `coordination`, `quotas`, `stores` | 0.5.0 | Live CI in place; storage formats pinned by `tests/test_stability.py`; 1-minute 4-process soak passed, 1-hour soak pending |
 | `http` | 0.5.0 | CI against the real requests and httpx packages; soak pending |
 | `celery` | 0.5.0 | CI against the real Celery package (no broker yet); soak pending |
 | `async_cache`, `web`, `exporters`, `observability` | 0.6.0 | Changed in 0.4.0b2 |
