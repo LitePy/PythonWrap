@@ -36,7 +36,7 @@ def signed_pickle_codec(secret: bytes) -> tuple[Callable[[Any], bytes], Callable
         signature, payload = data[:32], data[32:]
         if not hmac.compare_digest(signature, hmac.digest(secret, payload, hashlib.sha256)):
             raise InvalidSignature("cache entry signature is invalid")
-        return pickle.loads(payload)
+        return pickle.loads(payload)  # nosec B301 - payload authenticated by the HMAC above
 
     return dumps, loads
 

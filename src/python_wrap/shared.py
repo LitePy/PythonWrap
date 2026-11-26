@@ -123,7 +123,7 @@ return {admitted,state,gen,trial,wait,failures,
 """
 
 
-_BREAKER_SHA = hashlib.sha1(_BREAKER.encode()).hexdigest()
+_BREAKER_SHA = hashlib.sha1(_BREAKER.encode(), usedforsecurity=False).hexdigest()  # Redis script id
 
 
 def _no_script(exc: Exception) -> bool:

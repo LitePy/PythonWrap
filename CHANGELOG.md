@@ -16,6 +16,30 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
   span instead of opening a zero-length `pw.<event>` span per event. Pass
   `spans="notifications"` for the old behaviour. The breaker-state metric is now an
   observable gauge read at collection time for every breaker in the process.
+- Re-registering a named policy no longer resets its breaker: an open in-process breaker
+  stays open across `register()`/`load_from_mapping()` (also with new thresholds), and an
+  unchanged mapping keeps its generation. Call the breaker's `reset()` to close it.
+- Retry events carry a new `attempt_seconds` field; listeners that compare the whole
+  `fields` dict must allow it.
+
+### Security
+
+Review of the 0.4.0b2 additions (threat model: request-derived input reaching new
+in-memory tables, SQL built from configuration, names resolved from configuration,
+shared stores written by other processes). Fixed:
+
+- `guard_openai(limiter_key=...)` kept one limiter per key without a bound, so keys taken
+  from request data could grow memory without limit. At most 256 keys get their own
+  window; later keys share the base limiter.
+- `invalidate_tags` kept a token for every tag name ever invalidated. The table is now
+  bounded; when it is cleared a global epoch makes every older entry read as stale, so a
+  cleared token can never revive a stale cache entry.
+- `SqlResultStore` only accepts a plain identifier as table name, binds every value,
+  hashes call keys, and stores JSON by default (no pickle).
+- Policy mappings never import a dotted path: exception, predicate and backend names
+  resolve only through explicit registries. Write access to a `RedisSource` key is
+  control over every replica's resilience settings; protect it like configuration.
+- The breaker script hash is marked `usedforsecurity=False` (it is Redis's script id).
 
 ### Deprecated
 

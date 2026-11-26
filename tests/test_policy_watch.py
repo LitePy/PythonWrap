@@ -76,11 +76,11 @@ def test_watch_applies_changes_keeps_open_breaker_and_reports(tmp_path: Path) ->
         def boom() -> None:
             raise ConnectionError
 
-        assert admitted(call) == 2
+        # The limiter sits outside the breaker, so a rejected call still uses a slot.
         with pytest.raises(ConnectionError):
             boom()
         with pytest.raises(CircuitOpenError):
-            call()
+            call()  # both of the 2 slots are now used
 
         write(
             path,
@@ -92,7 +92,7 @@ def test_watch_applies_changes_keeps_open_breaker_and_reports(tmp_path: Path) ->
         with pytest.raises(CircuitOpenError):  # still open under the new thresholds
             call()
         breaker.reset()
-        assert admitted(call) == 5
+        assert admitted(call) == 4  # the new limit of 5, one used above; the old one gave 0
 
         path.write_text("{not json", encoding="utf-8")
         assert not watch.poll()

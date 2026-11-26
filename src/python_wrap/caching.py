@@ -530,6 +530,10 @@ class _LocalStore:
 # -- cache tags: one version token per tag; entries record the tokens they were written under
 _TAG_PREFIX = "python-wrap:tag:"
 _local_tags: dict[str, str] = {}
+_MAX_LOCAL_TAGS = 10_000
+# Bumped when _local_tags is cleared, so every entry written before reads as stale
+# (never as fresh, which a plain eviction could cause).
+_tag_epoch = [0]
 _tag_clients: dict[int, Any] = {}  # sync Redis clients of tagged shared caches
 _async_tag_clients: dict[int, Any] = {}  # redis.asyncio clients (amemoize)
 
@@ -541,11 +545,18 @@ def _decode(value: Any) -> str:
 def _tag_versions(names: list[str], client: Any) -> dict[str, str] | None:
     """Current token per tag (from Redis when shared); None if the store cannot answer."""
     if client is None:
-        return {n: _local_tags.get(n, "") for n in names}
+        return {n: f"{_tag_epoch[0]}:{_local_tags.get(n, '')}" for n in names}
     try:
         return {n: _decode(client.get(_TAG_PREFIX + digest(n))) for n in names}
     except Exception:  # an unknown version must read as a miss, never as a hit
         return None
+
+
+def _remember_local(name: str, token: str) -> None:
+    if len(_local_tags) >= _MAX_LOCAL_TAGS and name not in _local_tags:
+        _local_tags.clear()  # tag names may come from data: bound the memory
+        _tag_epoch[0] += 1
+    _local_tags[name] = token
 
 
 def invalidate_tags(*names: str, client: Any = None) -> None:
@@ -557,7 +568,7 @@ def invalidate_tags(*names: str, client: Any = None) -> None:
     """
     for name in names:
         token = uuid.uuid4().hex
-        _local_tags[name] = token
+        _remember_local(name, token)
         clients = {**_tag_clients, **({id(client): client} if client is not None else {})}
         for target in clients.values():
             target.set(_TAG_PREFIX + digest(name), token)
@@ -567,7 +578,7 @@ async def ainvalidate_tags(*names: str, client: Any = None) -> None:
     """`invalidate_tags` for ``redis.asyncio`` clients (amemoize with AsyncRedisStore)."""
     for name in names:
         token = uuid.uuid4().hex
-        _local_tags[name] = token
+        _remember_local(name, token)
         clients = {**_async_tag_clients, **({id(client): client} if client is not None else {})}
         for target in clients.values():
             await target.set(_TAG_PREFIX + digest(name), token)

@@ -449,7 +449,11 @@ def test_named_policy_shares_breaker_state_between_functions():
     registry.describe()
     with pytest.raises(CircuitOpenError):
         second()
-    registry.register("dependency", breaker={"failure_threshold": 1})
+    # Re-registering keeps an open breaker open (state carries across reloads).
+    registry.register("dependency", breaker={"failure_threshold": 2})
+    with pytest.raises(CircuitOpenError):
+        second()
+    registry._compiled["dependency"]._roles["breaker"][0].reset()
     assert second() == 7
 
 

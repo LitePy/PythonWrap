@@ -837,9 +837,9 @@ def test_events_emitted(fake_clock: FakeClock) -> None:
     ]
     assert seen[0].fields["attempt"] == 1 and seen[0].fields["next_delay"] == 2
     assert isinstance(seen[0].fields["exception"], ValueError)
-    assert seen[1].fields == {"attempts": 2}
+    assert seen[1].fields == {"attempts": 2, "attempt_seconds": seen[1].fields["attempt_seconds"]}
     assert seen[3].fields["attempts"] == 2
-    assert seen[4].function == "block" and seen[4].fields == {"attempts": 1}
+    assert seen[4].function == "block" and seen[4].fields["attempts"] == 1
 
 
 # ======================================================= budgets, results, async hooks
@@ -1067,7 +1067,7 @@ def test_retry_if_result_sync(fake_clock: FakeClock, events: list[_core.Event]) 
         "retry.succeeded",
     ]
     assert events[0].fields["exception"] is None
-    assert events[2].fields == {"attempts": 3}
+    assert events[2].fields["attempts"] == 3 and events[2].fields["attempt_seconds"] >= 0
 
 
 def test_retry_if_result_exhausted_returns_last_value(
@@ -1090,7 +1090,7 @@ def test_retry_if_result_exhausted_returns_last_value(
     assert [s.result for s in seen] == ["busy-1", "busy-2"]
     assert "returned 'busy-1'" in caplog.text
     assert [e.name for e in events][-1] == "retry.gave_up"
-    assert events[-1].fields == {"attempts": 3, "exception": None}
+    assert events[-1].fields["attempts"] == 3 and events[-1].fields["exception"] is None
     stats = retry_stats(status)
     assert stats is not None
     assert (stats.calls, stats.attempts_total, stats.retries, stats.gave_up) == (1, 3, 2, 1)

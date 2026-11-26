@@ -1638,6 +1638,9 @@ class _Runner:
         return last
 
 
+_MAX_LIMITER_KEYS = 256  # distinct limiter_key values; later ones share the base limiter
+
+
 @dataclasses.dataclass
 class _Admission:
     """What `GuardedClient._admit` reserved for one streamed call or runner step."""
@@ -1786,6 +1789,8 @@ class GuardedClient:
             return limiter
         key = str(self.limiter_key(request))
         found = self._limiters.get(key)
+        if found is None and len(self._limiters) >= _MAX_LIMITER_KEYS:
+            return limiter  # keys may come from requests: never grow without bound
         if found is None:
             found = self._limiters.setdefault(
                 key,
