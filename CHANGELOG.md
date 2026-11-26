@@ -22,7 +22,8 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
 ### Fixed
 
 - LLM retry ownership is now limited to the task or thread that established it. A copied
-  context in a new execution owner no longer suppresses that owner's retries.
+  context in a new execution owner no longer suppresses that owner's retries, and stored
+  retry scopes do not retain finished tasks.
 
 ## [0.4.0b2] - 2026-11-26
 

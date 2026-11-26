@@ -14,9 +14,11 @@ import asyncio
 import contextlib
 import contextvars
 import copy
+import gc
 import json
 import threading
 import warnings
+import weakref
 from collections.abc import AsyncIterator, Iterator
 from types import SimpleNamespace
 from typing import Any
@@ -573,6 +575,22 @@ def test_owner_scope_is_per_task_and_thread(fake_clock: FakeClock) -> None:
     with pytest.raises(Overloaded):
         owner()
     assert len(seen) == 2 * 3  # a new thread does not inherit the owner scope
+
+
+def test_copied_owner_context_does_not_retain_finished_task() -> None:
+    captured: dict[str, Any] = {}
+
+    @llm_retry(max_attempts=1, owns_retries=True)
+    async def owner() -> None:
+        task = asyncio.current_task()
+        assert task is not None
+        captured["task"] = weakref.ref(task)
+        captured["context"] = contextvars.copy_context()
+
+    asyncio.run(owner())
+    gc.collect()
+
+    assert captured["task"]() is None
 
 
 def test_llm_retry_settings_and_stats_survive_the_owner_wrapper() -> None:

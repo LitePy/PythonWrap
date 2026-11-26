@@ -41,6 +41,7 @@ import queue
 import threading
 import time
 import uuid
+import weakref
 from collections import OrderedDict
 from collections.abc import (
     AsyncIterable,
@@ -436,17 +437,18 @@ def llm_retry(
 
 #: Current retry scope and its task/thread identity. The scope is ignored when a copied
 #: context runs under a different identity.
-_RETRY_SCOPE: contextvars.ContextVar[tuple[str, object] | None] = contextvars.ContextVar(
-    "python_wrap_llm_retry_scope", default=None
+_RETRY_SCOPE: contextvars.ContextVar[tuple[str, weakref.ReferenceType[object]] | None] = (
+    contextvars.ContextVar("python_wrap_llm_retry_scope", default=None)
 )
 
 
-def _retry_identity() -> object:
+def _retry_owner() -> object:
     """Identify the task or thread that owns an LLM retry scope.
 
     Context variables can be explicitly copied into a new thread, and free-threaded
     Python may inherit them by default. A copied scope must not suppress retries in an
-    independent execution owner.
+    independent execution owner. Return the object itself only transiently; the stored
+    scope keeps a weak reference so a long-lived copied context cannot retain a task.
     """
     try:
         task = asyncio.current_task()
@@ -457,9 +459,13 @@ def _retry_identity() -> object:
     return threading.current_thread()
 
 
+def _retry_identity() -> weakref.ReferenceType[object]:
+    return weakref.ref(_retry_owner())
+
+
 def _active_retry_scope() -> str | None:
     scope = _RETRY_SCOPE.get()
-    if scope is None or scope[1] is not _retry_identity():
+    if scope is None or scope[1]() is not _retry_owner():
         return None
     return scope[0]
 
