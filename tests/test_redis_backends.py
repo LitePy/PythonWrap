@@ -417,3 +417,26 @@ def test_redis_failure_rate_needs_volume_and_share(redis_client):
     busy.reset()
     run(busy, 15, 5)
     assert busy.state.value == "open"
+
+
+def test_redis_tags_and_stampede_lease_across_wrappers(redis_client):
+    from python_wrap import invalidate_tags
+
+    store = RedisStore(redis_client, "tagged:", fail_open=False)
+    calls = []
+
+    def price(sku):
+        calls.append(sku)
+        time.sleep(0.05)
+        return len(calls)
+
+    lock = RedisLock(redis_client, "memo-locks:")
+    workers = [
+        memoize(store=store, ttl=60, lock=lock, tags=lambda sku: [f"sku:{sku}"])(price)
+        for _ in range(8)
+    ]
+    with ThreadPoolExecutor(8) as pool:
+        assert set(pool.map(lambda fn: fn("a1"), workers)) == {1}
+    assert calls == ["a1"]
+    invalidate_tags("sku:a1", client=redis_client)
+    assert workers[3]("a1") == 2

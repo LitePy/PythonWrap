@@ -21,6 +21,11 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
 
 ### Added
 
+- `memoize` and `amemoize` gain `lock=` (with `lock_ttl`, `lock_wait`): on a miss one
+  process computes under a shared lease while the others wait and read the store again;
+  stale refreshes take the same lease. `tags=` with `invalidate_tags()` /
+  `ainvalidate_tags()` drops every entry written with a tag through one version write per
+  tag, with no scan. `ttl_jitter=` spreads expiry of entries written together.
 - `SqlResultStore(engine)` keeps idempotency results in the application's own database
   (PostgreSQL, SQL Server, SQLite through SQLAlchemy), with `ddl()` for migrations and
   `purge_expired()` for a scheduled sweep. `idempotent(..., connection=...)` writes the

@@ -4354,9 +4354,11 @@ Every public name: `python_wrap.__all__` first, then names public only in a subm
   Constant: '0.4.0b1'
 - `python_wrap.agent_run`: `agent_run(*, max_steps: int | None = None, max_seconds: float | str | None = None, max_repeats: int | None = None, budget: Any = None, policy: ToolPolicy | None = None, run_id: str | None = None, name: str = 'agent_run') -> RunGuard`
   Shorthand for `RunGuard`: ``with agent_run(max_steps=20) as run: ...``.
+- `python_wrap.ainvalidate_tags`: `ainvalidate_tags(*names: str, client: Any = None) -> None`
+  `invalidate_tags` for ``redis.asyncio`` clients (amemoize with AsyncRedisStore).
 - `python_wrap.amap_iter`: `amap_iter(fn: Callable[[T], Awaitable[R]], items: Iterable[T] | AsyncIterable[T], *, limit: int, ordered: bool = True, return_exceptions: bool = False) -> AsyncGenerator[Any, None]`
   Apply `fn` to every item, at most `limit` at a time, yielding results as they come.
-- `python_wrap.amemoize`: `amemoize(*, ttl: float | None = None, key: Callable[..., Hashable] | None = None, store: AsyncCacheStore | None = None, cache_none: bool = True, copy_result: bool = False, singleflight: bool = True, stale_ttl: float | datetime.timedelta | None = None, cache_exceptions: type[BaseException] | tuple[type[BaseException], ...] = (), exception_ttl: float | datetime.timedelta | None = None, logger: _core.LoggerLike = None) -> Callable[[F], F]`
+- `python_wrap.amemoize`: `amemoize(*, ttl: float | None = None, key: Callable[..., Hashable] | None = None, store: AsyncCacheStore | None = None, cache_none: bool = True, copy_result: bool = False, singleflight: bool = True, stale_ttl: float | datetime.timedelta | None = None, cache_exceptions: type[BaseException] | tuple[type[BaseException], ...] = (), exception_ttl: float | datetime.timedelta | None = None, logger: _core.LoggerLike = None, lock: Any = None, lock_ttl: float = 30, lock_wait: float = 5, tags: Callable[..., Any] | None = None, ttl_jitter: float = 0.0) -> Callable[[F], F]`
   Cache the results of an ``async def`` function in an `AsyncCacheStore`.
 - `python_wrap.aprocess_batches`: `aprocess_batches(items: Iterable[Any], handler: Callable[[Any], Any], *, chunk_size: int = 500, classify: Callable[[Exception], str] = <lambda>, checkpoint: Any = None, on_progress: Callable[[int, int], Any] | None = None) -> BatchResult[Any, Any]`
   Await per-item processing with the same checkpoint and outcome semantics.
@@ -4452,6 +4454,8 @@ Every public name: `python_wrap.__all__` first, then names public only in a subm
   Set process-wide defaults for `traced_llm` and `traced_tool`, and emit OTel spans.
 - `python_wrap.invalidate`: `invalidate(instance: object, *names: str) -> int`
   Forget cached `cached_property` values of ``instance``.
+- `python_wrap.invalidate_tags`: `invalidate_tags(*names: str, client: Any = None) -> None`
+  Make every cached entry written with one of these tags miss on its next read.
 - `python_wrap.is_sensitive`: `is_sensitive(name: object, fragments: Iterable[str] | None = None, *, match: str = 'segment') -> bool`
   Return True when ``name`` looks like it holds a secret.
 - `python_wrap.limit_concurrency`: `limit_concurrency(n: int, /) -> Callable[[Callable[P, R]], Limited[P, R]]`
@@ -4482,7 +4486,7 @@ Every public name: `python_wrap.__all__` first, then names public only in a subm
   Guard an MCP tool-call path with a timeout, retries and a per-server breaker.
 - `python_wrap.measure_memory`: `measure_memory(func: Callable[..., Any] | None = None, /, *, logger: LoggerLike = None, level: int = 20, callback: Callable[[MemoryRecord], None] | None = None, exclusive: bool = True) -> Any`
   Measure the Python memory a call allocates, using `tracemalloc`.
-- `python_wrap.memoize`: `memoize(func: Callable[..., Any] | None = None, /, *, maxsize: int | None = None, ttl: float | datetime.timedelta | Callable[[Any], float | None] | None = None, stale_ttl: float | datetime.timedelta | None = None, typed: bool = False, key: Callable[..., Hashable] | None = None, cache_exceptions: type[BaseException] | tuple[type[BaseException], ...] = (), exception_ttl: float | datetime.timedelta | None = None, store: CacheStore | None = None, per_instance: bool = False, singleflight: bool = False, copy_result: bool = False, logger: _core.LoggerLike = None) -> Any`
+- `python_wrap.memoize`: `memoize(func: Callable[..., Any] | None = None, /, *, maxsize: int | None = None, ttl: float | datetime.timedelta | Callable[[Any], float | None] | None = None, stale_ttl: float | datetime.timedelta | None = None, typed: bool = False, key: Callable[..., Hashable] | None = None, cache_exceptions: type[BaseException] | tuple[type[BaseException], ...] = (), exception_ttl: float | datetime.timedelta | None = None, store: CacheStore | None = None, per_instance: bool = False, singleflight: bool = False, copy_result: bool = False, logger: _core.LoggerLike = None, lock: Any = None, lock_ttl: float = 30, lock_wait: float = 5, tags: Callable[..., Any] | None = None, ttl_jitter: float = 0.0) -> Any`
   Cache a function's results per argument values.
 - `python_wrap.message_contains`: `message_contains(*fragments: str, case_sensitive: bool = False) -> Predicate`
   Match any fragment in an exception's message (case-insensitive by default).

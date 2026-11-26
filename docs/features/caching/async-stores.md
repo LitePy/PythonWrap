@@ -94,6 +94,12 @@ By default errors from Redis are logged and treated as misses (`fail_open=True`)
 `fail_open=False` to raise. `clear()` scans only this store's prefix and deletes in
 batches with `UNLINK`.
 
+With several processes sharing the store, add `lock=AsyncRedisLock(client)` so only one
+process computes a missing entry, and `ttl_jitter` so entries do not expire together. Use
+`tags=` with `await ainvalidate_tags(...)` to expire related entries. The options are
+`lock`, `lock_ttl`, `lock_wait`, `tags` and `ttl_jitter`. See
+[shared caches](stores-and-credentials.md#many-processes-stampedes-tags-and-jitter).
+
 ## A synchronous store from async code
 
 `memoize(store=RedisStore(...))` on an `async def` function calls the store on the event
