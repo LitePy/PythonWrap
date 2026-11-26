@@ -21,6 +21,9 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
 
 ### Added
 
+- Shared Redis caches accept `signed_pickle_codec(secret)`, a project `cache_codec`
+  default and a `version=` namespace. Bad signatures produce `cache.rejected` misses;
+  implicit pickle now warns before a later default change to JSON.
 - Retry, HTTP retry and Celery countdowns accept `jitter="full"` or `"equal"`;
   doctor PW024 flags retries without backoff or jitter across worker processes.
 - Web adapters can trust a remaining-deadline header with `trust_deadline_header=True`;

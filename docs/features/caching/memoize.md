@@ -351,8 +351,8 @@ def price(sku: str) -> float:
 
 Keys are hashed by default and `clear()` escapes the namespace before scanning it.
 `cache_info().currsize` is **None** for `RedisStore`: statistics do not scan Redis.
-External deadlines use the live Unix wall clock. The adapter defaults to pickle for
-values, so only decode data from a trusted store or provide a safe application serializer.
+External deadlines use the live Unix wall clock. Implicit pickle now warns; pass
+`signed_pickle_codec(secret)` or `json_codec()` from `python_wrap.stores` for shared stores.
 
 Store methods are synchronous and a network-backed store can block an async event loop.
 Configure finite client timeouts and use a local cache for latency-sensitive async code.

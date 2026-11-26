@@ -234,7 +234,7 @@ Everything below is importable from `python_wrap` unless a module is shown. [Cho
 | **Validation** | `enforce_types`, `validate_args`, `check_type` | Check from annotations, with predicates, or with explicit types |
 | **State** | `transactional`, `Transaction`, `current_transaction` | Commit and rollback callbacks, usable as a (async) context manager |
 | | `revert_on_failure` | Restore an object's attributes if the call raises |
-| **Configuration** | `configure`, `configured`, `get_config`, `reset_config` | Project-wide defaults for logger, retry options and redaction |
+| **Configuration** | `configure`, `configured`, `get_config`, `reset_config` | Project-wide defaults for logger, retry options, cache codec and redaction |
 | | `policy`, `Policy` | Named, immutable decorator bundles applied in the recommended order |
 | **Testing** (`python_wrap.testing`) | `fast_mode`, `disable_retries`, `disable_rate_limits`, `disable_caching`, `overrides` | Skip waits, cap retries, switch limiters and caches off |
 | | `FakeClock`, `fake_clock`, `spy`, `spy_on`, `eventually` | Control time, record calls, wait for background work; pytest fixtures `pw_fake_clock`, `pw_fast_mode` |

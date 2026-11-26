@@ -17,6 +17,7 @@ from python_wrap.async_cache import (
     amemoize,
     json_codec,
 )
+from python_wrap.stores import RedisStore, signed_pickle_codec
 from python_wrap.testing import FakeClock, disable_caching
 
 
@@ -55,6 +56,35 @@ class FakeAsyncRedis:
         for k in list(self.data):
             if k.startswith(prefix):
                 yield k
+
+
+async def test_signed_pickle_rejects_tampering_before_unpickle(monkeypatch):
+    client = FakeAsyncRedis()
+    dumps, loads = signed_pickle_codec(b"a" * 32)
+    store = AsyncRedisStore(client, "signed:", dumps=dumps, loads=loads, version=2)
+    await store.set("key", ("safe",), None)
+    assert await store.get("key") == ("safe",)
+    key = store._key("key")
+    assert key.startswith("signed:v2:")
+    client.data[key] = b"invalid pickle"
+
+    def forbidden(*args):
+        raise AssertionError("unpickle must not run")
+
+    monkeypatch.setattr("pickle.loads", forbidden)
+    seen = []
+    with events.listening(seen.append):
+        assert await store.get("key") is None
+    assert [event.name for event in seen] == ["cache.rejected"]
+
+    class SyncClient:
+        def get(self, requested):
+            return client.data.get(requested)
+
+    sync_store = RedisStore(SyncClient(), "signed:", dumps=dumps, loads=loads, version=2)
+    with events.listening(seen.append):
+        assert sync_store.get("key") is None
+    assert seen[-1].name == "cache.rejected"
 
 
 async def test_hits_and_misses() -> None:

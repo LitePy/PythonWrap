@@ -12,9 +12,12 @@ install `redis`. Use a separate prefix for each cached function.
 ```python
 import redis
 from python_wrap import RedisStore, memoize
+from python_wrap.stores import signed_pickle_codec
 
 client = redis.Redis(socket_timeout=2, socket_connect_timeout=2)
-store = RedisStore(client, prefix="myapp:price:v1:", fail_open=False)
+dumps, loads = signed_pickle_codec(b"replace-with-a-secret-at-least-16-bytes")
+store = RedisStore(client, prefix="myapp:price:", version=1,
+                   dumps=dumps, loads=loads, fail_open=False)
 
 @memoize(store=store, ttl=300)
 def price(sku: str) -> float:
@@ -22,9 +25,12 @@ def price(sku: str) -> float:
 ```
 
 Keys are hashed by default. `key_format=` can provide an external string key when
-other code needs to seed or inspect entries. Values default to pickle; only use it
-with a store whose contents are trusted, or provide matching `dumps=` and `loads=`
-serializers. Entries are opaque tuples, so custom serializers must round-trip them.
+other code needs to seed or inspect entries. `version=` isolates a new deployment's
+entries. Implicit pickle is deprecated; pass `signed_pickle_codec(secret)` or
+`json_codec()` from `python_wrap.stores`. `configure(cache_codec=(dumps, loads))`
+sets the default for both sync and async Redis stores. Entries are opaque tuples,
+so custom serializers must round-trip them. Invalid signatures are misses and emit
+`cache.rejected` before anything is unpickled.
 
 `fail_open=True` (the default) logs a backend error and treats a read as a miss or a
 write as a no-op. Set it to `False` when persistence is part of correctness, especially

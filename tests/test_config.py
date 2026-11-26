@@ -43,6 +43,7 @@ def test_defaults_and_get_config_is_a_copy() -> None:
         "redact_extra": (),
         "backend_errors": None,
         "shared": None,
+        "cache_codec": None,
     }
     cfg["retry"]["delay"] = 5
     assert get_config()["retry"] == {}

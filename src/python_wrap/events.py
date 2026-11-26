@@ -56,6 +56,7 @@ EVENT_NAMES: Mapping[str, str] = MappingProxyType(
         "throttle.skipped": "A call was skipped by throttle. No fields.",
         "cache.hit": "A cached value was returned. No fields.",
         "cache.miss": "No cached value; the function ran. No fields.",
+        "cache.rejected": "A cache entry failed signature verification. Fields: reason (str).",
         "cache.evicted": "An entry left the cache. Fields: reason (str): 'lru' or 'ttl'.",
         "cache.stale": (
             "A stale value was served (stale-while-revalidate) and a background refresh "

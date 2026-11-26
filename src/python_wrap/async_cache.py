@@ -18,7 +18,6 @@ import concurrent.futures
 import copy
 import functools
 import inspect
-import json
 import math
 import pickle
 import re
@@ -30,8 +29,8 @@ from typing import Any, Protocol, TypeVar, runtime_checkable
 from python_wrap import _core, _fork
 from python_wrap._backend import BackendMonitor
 from python_wrap._runtime import stable_digest
-from python_wrap.stores import KEY_FORMAT
 from python_wrap.caching import CacheInfo, _await_shared, _make_key_builder, _shared_future
+from python_wrap.stores import KEY_FORMAT, InvalidSignature, json_codec
 
 __all__ = [
     "AsyncCacheStore",
@@ -146,31 +145,6 @@ class AsyncMemoryStore:
         return self.size()
 
 
-def json_codec() -> tuple[Callable[[Any], bytes], Callable[[bytes], Any]]:
-    """Return ``(dumps, loads)`` that store entries as JSON instead of pickle.
-
-    Use it with `AsyncRedisStore` when the Redis instance is not fully trusted, since
-    unpickling attacker-controlled bytes can execute code. Cached values must be
-    JSON-serialisable; tuples come back as lists.
-
-    Example:
-        ```python
-        from python_wrap.async_cache import json_codec
-
-        dumps, loads = json_codec()
-        assert loads(dumps([{"a": 1}, None])) == [{"a": 1}, None]
-        ```
-    """
-
-    def dumps(value: Any) -> bytes:
-        return json.dumps(value, separators=(",", ":")).encode("utf-8")
-
-    def loads(data: bytes) -> Any:
-        return json.loads(data)
-
-    return dumps, loads
-
-
 class AsyncRedisStore:
     """A namespaced `AsyncCacheStore` for ``redis.asyncio``-compatible clients.
 
@@ -200,16 +174,35 @@ class AsyncRedisStore:
         client: Any,
         prefix: str,
         *,
-        dumps: Callable[[Any], bytes] = pickle.dumps,
-        loads: Callable[[bytes], Any] = pickle.loads,
+        dumps: Callable[[Any], bytes] | None = None,
+        loads: Callable[[bytes], Any] | None = None,
         key_format: Callable[[Hashable], str] | None = None,
         fail_open: bool = True,
         retry_backend_after: float = 1.0,
+        version: int | None = None,
     ) -> None:
         if not prefix:
             raise ValueError("AsyncRedisStore needs a nonempty per-function prefix")
-        self.client, self.prefix = client, prefix
-        self.dumps, self.loads = dumps, loads
+        if version is not None and (
+            isinstance(version, bool) or not isinstance(version, int) or version < 1
+        ):
+            raise ValueError("version must be a positive integer")
+        if dumps is None and loads is None:
+            from python_wrap.config import get_config
+
+            codec = get_config().get("cache_codec")
+            if codec is None:
+                import warnings
+
+                warnings.warn(
+                    "implicit pickle cache codec is deprecated; pass a codec",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+                codec = (pickle.dumps, pickle.loads)
+            dumps, loads = codec
+        self.client, self.prefix = client, prefix + (f"v{version}:" if version else "")
+        self.dumps, self.loads = dumps or pickle.dumps, loads or pickle.loads
         self.key_format, self.fail_open = key_format, fail_open
         self._monitor = BackendMonitor(
             "cache", prefix, "allow" if fail_open else "raise", retry_backend_after
@@ -228,7 +221,13 @@ class AsyncRedisStore:
 
         async def read() -> Any:
             value = await self.client.get(self._key(key))
-            return None if value is None else self.loads(value)
+            if value is None:
+                return None
+            try:
+                return self.loads(value)
+            except InvalidSignature:
+                _core.emit("cache.rejected", self.prefix, reason="signature")
+                return None
 
         return await self._run(read)
 
