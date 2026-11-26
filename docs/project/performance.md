@@ -73,6 +73,12 @@ numbers show what the library adds around a store round trip, not the network
 | Bulkhead(8) (shared, async via thread) | - | 191,379 |
 | rate_limit (shared) | 2,960 | 3,315 |
 
+Against a real Redis, run `python benchmarks/run.py --filter redis --redis-url
+redis://localhost:6379/0` (needs the `redis` package): it adds a `(redis)` row for the
+shared breaker, bulkhead, rate limiter and a `memoize` hit on `RedisStore`. Those numbers
+depend on the network round trip, so measure them where your service runs; for several
+processes at once use `python benchmarks/soak.py --processes 4 --redis-url ...`.
+
 A closed shared breaker answers from its cached state (`state_ttl`) and sends successes
 in batches, so most calls make no store round trip. The async rows use an awaited
 `redis.asyncio` client; the "via thread" rows pass a sync client to async code, which
@@ -155,5 +161,4 @@ python benchmarks/run.py --json > bench.json
 ```
 
 Run it on an idle machine, with the power-saving mode off. For a stable comparison run it
-twice and compare the better numbers. Which hot spots are worth optimising is
-tracked in `benchmarks/FINDINGS.md` in the repository.
+twice and compare the better numbers.

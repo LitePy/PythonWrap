@@ -5,7 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from python_wrap import AuditTape, Redactor, ToolRegistry
+from python_wrap.agents import ToolRegistry
+from python_wrap.genai import AuditTape, Redactor
 from python_wrap.llm import Budget
 from python_wrap.llm_testing import FakeProvider
 from support.agent import AgentResult, run_agent

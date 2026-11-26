@@ -5,8 +5,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from python_wrap import AuditTape, Redactor, fallback_models, traced_llm
-from python_wrap.llm import Budget
+from python_wrap.genai import AuditTape, Redactor, traced_llm
+from python_wrap.llm import Budget, fallback_models
 from python_wrap.presets import llm_client
 from support.config import Settings
 

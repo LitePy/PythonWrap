@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from python_wrap import AuditTape, timeout, traced_llm
+from python_wrap import timeout
+from python_wrap.genai import AuditTape, traced_llm
 from python_wrap.llm_testing import FakeProvider, fake_llm
 
 from .config import PRICES, REQUEST_TIMEOUT_SECONDS

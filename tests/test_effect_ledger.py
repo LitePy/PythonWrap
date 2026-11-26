@@ -14,7 +14,8 @@ import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
-from python_wrap import (
+from python_wrap import TimeoutExpired
+from python_wrap.agents import (
     EffectConflict,
     EffectLedger,
     EffectRecord,
@@ -23,7 +24,6 @@ from python_wrap import (
     MemoryEffectStore,
     RedisEffectStore,
     SQLiteEffectStore,
-    TimeoutExpired,
     ToolRegistry,
     agent_run,
     tool,
@@ -231,7 +231,7 @@ def test_registry_call_passes_call_id() -> None:
 
 
 def test_tool_call_carries_call_id_to_approver() -> None:
-    from python_wrap import ToolCall, ToolPolicy
+    from python_wrap.agents import ToolCall, ToolPolicy
 
     seen: list[ToolCall] = []
 

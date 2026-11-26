@@ -43,6 +43,32 @@ backends), is **provisional**: it may change in a minor release, but every chang
 under **Breaking changes** in the CHANGELOG with a migration note. A provisional API
 graduates to stable core by being added to the table above (and to the stability test).
 
+### Graduation
+
+A provisional module graduates when all three hold:
+
+1. **Soak.** A multi-process soak (`benchmarks/soak.py --processes N --redis-url ...`)
+   ran for at least an hour against the real backend with no leak, no stuck lease and
+   breaker and limiter totals that add up across processes.
+2. **Live CI.** Its backends run in CI against the real service (Redis, PostgreSQL,
+   SQL Server through pymssql and pyodbc), not only against fakes.
+3. **One quiet minor release.** It went through one minor release with no breaking change.
+
+| Module | Target | Status |
+| --- | --- | --- |
+| `shared`, `coordination`, `quotas`, `stores` | 0.5.0 | Live CI in place; storage formats pinned by `tests/test_stability.py`; soak pending |
+| `http` | 0.5.0 | CI against the real requests and httpx packages; soak pending |
+| `celery` | 0.5.0 | CI against the real Celery package (no broker yet); soak pending |
+| `async_cache`, `web`, `exporters`, `observability` | 0.6.0 | Changed in 0.4.0b2 |
+
+The storage formats of the backends above are already frozen: a change to them fails the
+stability test and needs a migration note, even before the module graduates.
+
+## Support window
+
+After a new minor release, the previous minor release gets security fixes for six months.
+Bug fixes go to the current minor release only.
+
 ## Deprecation policy
 
 1. A deprecated API keeps working for **at least one minor release** (and at least three

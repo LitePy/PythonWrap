@@ -17,6 +17,27 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
   `spans="notifications"` for the old behaviour. The breaker-state metric is now an
   observable gauge read at collection time for every breaker in the process.
 
+### Deprecated
+
+- LLM, agent and MCP names (`Budget`, `guard_openai`, `RunGuard`, `AuditTape`,
+  `fake_llm` and 86 more) leave the top-level `python_wrap` namespace: import them from
+  `python_wrap.llm`, `python_wrap.agents`, `python_wrap.genai`, `python_wrap.adapters...`.
+  The old names still work with a `DeprecationWarning` and go in 0.6.0. `mcp_guard`
+  stays, since it shares its name with its module. `import python_wrap` now loads 45
+  modules instead of 57.
+
+### Changed
+
+- `concurrency` is split into `timeouts`, `ratelimit`, `debounce` (throttle and
+  debounce) and `singleflight`; `python_wrap.concurrency` re-exports every name, so
+  imports keep working. Code that patched a module global (`concurrency._HAS_SETITIMER`)
+  must patch the new module.
+- `docs/project/stability.md` publishes graduation criteria and target releases for the
+  provisional modules and a support window; `tests/test_stability.py` pins the storage
+  formats of the shared backends. `benchmarks/run.py --redis-url` measures shared layers
+  on a real Redis, and `benchmarks/soak.py --processes N --redis-url` soaks several
+  processes sharing one breaker and limiter.
+
 ### Fixed
 
 - Shared cache keys (`RedisStore`, `AsyncRedisStore`) and `idempotent`/`single_instance` call

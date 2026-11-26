@@ -25,7 +25,7 @@ from collections.abc import Callable, Iterator
 from types import SimpleNamespace
 from typing import Any
 
-from python_wrap import RunGuard, ToolRegistry
+from python_wrap.agents import RunGuard, ToolRegistry
 from python_wrap.llm import Budget, stream_timeout
 from python_wrap.presets import llm_client
 

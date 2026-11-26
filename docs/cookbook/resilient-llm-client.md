@@ -16,7 +16,7 @@ No provider SDK is imported by python-wrap: responses and errors are read by sha
 ## The code
 
 ```python
-from python_wrap import fake_llm
+from python_wrap.llm_testing import fake_llm
 from python_wrap.llm import Budget, BudgetExceeded, fallback_models, llm_cache
 from python_wrap.llm_testing import OverloadedError, RateLimitError
 from python_wrap.presets import llm_client

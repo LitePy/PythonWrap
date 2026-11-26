@@ -19,6 +19,7 @@ from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 import python_wrap
+import python_wrap.llm
 from python_wrap import _core
 from python_wrap.errors import RateLimitExceeded
 from python_wrap.llm import Budget, token_rate_limit
@@ -432,7 +433,7 @@ class TestSQLiteBudget:
 
         ask()  # 60 of 100 tokens
         ask()  # the check happens before the call, so this one still runs
-        with pytest.raises(python_wrap.BudgetExceeded):
+        with pytest.raises(python_wrap.llm.BudgetExceeded):
             ask()
 
 

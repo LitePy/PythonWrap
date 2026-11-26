@@ -32,7 +32,7 @@ from typing import Any, cast
 from python_wrap import _core
 from python_wrap._runtime import seconds as _parse_seconds
 from python_wrap.circuit import CircuitBreaker
-from python_wrap.concurrency import _current_token, checkpoint
+from python_wrap.timeouts import _current_token, checkpoint
 
 __all__ = ["MCPGuard", "mcp_breaker", "mcp_guard"]
 

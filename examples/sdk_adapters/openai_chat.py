@@ -23,7 +23,8 @@ from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
 
-from python_wrap import RunGuard, ToolRegistry, retry
+from python_wrap import retry
+from python_wrap.agents import RunGuard, ToolRegistry
 from python_wrap.llm import Budget
 from python_wrap.presets import llm_client
 

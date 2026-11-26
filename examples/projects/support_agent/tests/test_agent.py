@@ -9,14 +9,10 @@ from support.agent import run_agent
 from support.app import SupportApp
 
 from conftest import TICKET
-from python_wrap import (
-    ReplayMismatch,
-    RunBudgetExceeded,
-    StepLimitExceeded,
-    replay,
-)
+from python_wrap.agents import RunBudgetExceeded, StepLimitExceeded
 from python_wrap.chaos import chaos
 from python_wrap.doctor import explain
+from python_wrap.genai import ReplayMismatch, replay
 from python_wrap.llm import BudgetExceeded
 
 MakeApp = Callable[..., SupportApp]

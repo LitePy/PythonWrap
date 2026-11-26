@@ -10,16 +10,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from python_wrap import (
-    AuditTape,
-    ReplayMismatch,
-    genai,
-    replay,
-    retry,
-    traced_llm,
-    traced_tool,
-)
+from python_wrap import genai, retry
 from python_wrap.events import listening
+from python_wrap.genai import AuditTape, ReplayMismatch, replay, traced_llm, traced_tool
 from python_wrap.testing import fake_clock
 
 PRICES = {"demo-model": (3.0, 15.0)}  # USD per million input / output tokens

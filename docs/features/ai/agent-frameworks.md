@@ -36,7 +36,7 @@ claim (started) -> run the tool -> succeeded (result stored) | failed (error sto
 ```
 
 ```python
-from python_wrap import EffectLedger, agent_run, tool, with_call_id
+from python_wrap.agents import EffectLedger, agent_run, tool, with_call_id
 
 ledger = EffectLedger()
 charges = []
@@ -85,9 +85,7 @@ decides:
 | `"raise"` or `None` (or no hook) | Raise `EffectUnknown` with the record and a `reason`. |
 
 ```python
-from python_wrap import (
-    EffectLedger, EffectResolved, EffectUnknown, MemoryEffectStore, tool, with_call_id,
-)
+from python_wrap.agents import EffectLedger, EffectResolved, EffectUnknown, MemoryEffectStore, tool, with_call_id
 
 class FlakyStore(MemoryEffectStore):
     fail_next = False
@@ -149,7 +147,10 @@ and docstring so pydantic-ai builds the same schema:
 <!-- skip -->
 ```python
 from pydantic_ai import Agent, RunContext
-from python_wrap import AuditTape, Budget, EffectLedger, RunGuard, retry
+from python_wrap import retry
+from python_wrap.agents import EffectLedger, RunGuard
+from python_wrap.genai import AuditTape
+from python_wrap.llm import Budget
 from python_wrap.adapters.pydantic_ai import PythonWrapCapability
 
 cap = PythonWrapCapability(
@@ -204,7 +205,9 @@ hooks:
 <!-- skip -->
 ```python
 from agents import Agent, Runner
-from python_wrap import AuditTape, Budget, EffectLedger
+from python_wrap.agents import EffectLedger
+from python_wrap.genai import AuditTape
+from python_wrap.llm import Budget
 from python_wrap.adapters.openai_agents import AgentsGuard
 
 guard = AgentsGuard(

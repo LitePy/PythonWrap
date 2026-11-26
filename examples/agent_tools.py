@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 
-from python_wrap import (
+from python_wrap.agents import (
     ApprovalDenied,
     DryRun,
     LoopDetected,

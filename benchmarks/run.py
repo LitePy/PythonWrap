@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import functools
+import inspect
 import json
 import logging
 import platform
@@ -145,18 +146,47 @@ def _shared(name: str, build: Callable[[Any], Callable[[Any], Any]], answer: Any
     ]
 
 
+def _is_async(client: Any) -> bool:
+    return inspect.iscoroutinefunction(client.eval)
+
+
+def _redis_cases(url: str) -> list[Case]:
+    """Shared layers against a real Redis (``--redis-url``); needs the redis package.
+
+    Sync rows only: a redis.asyncio client is bound to one event loop, and the timer
+    starts a new loop per repeat.
+    """
+    import redis
+
+    from python_wrap.stores import RedisStore, json_codec
+
+    client = redis.Redis.from_url(url)
+    client.ping()
+    dumps, loads = json_codec()
+    store = RedisStore(client, "python-wrap:bench:", dumps=dumps, loads=loads)
+    rows = [
+        ("circuit_breaker", _shared_breaker),
+        ("Bulkhead(8)", _shared_bulkhead),
+        ("rate_limit", _shared_window),
+    ]
+    return [
+        *(Case(f"{name} (redis)", lambda fn, b=build: b(client)(fn), None) for name, build in rows),
+        Case("memoize (redis hit)", lambda fn: memoize(store=store, ttl=60)(fn), None),
+    ]
+
+
 def _shared_breaker(client: Any) -> Callable[[Any], Any]:
-    kind = AsyncRedisBreakerState if isinstance(client, _AsyncMemoryEval) else RedisBreakerState
+    kind = AsyncRedisBreakerState if _is_async(client) else RedisBreakerState
     return CircuitBreaker(name="bench", backend=kind(client), logger=LOG)
 
 
 def _shared_bulkhead(client: Any) -> Callable[[Any], Any]:
-    kind = AsyncRedisSemaphore if isinstance(client, _AsyncMemoryEval) else RedisSemaphore
+    kind = AsyncRedisSemaphore if _is_async(client) else RedisSemaphore
     return Bulkhead(8, name="bench", backend=kind(client))
 
 
 def _shared_window(client: Any) -> Callable[[Any], Any]:
-    kind = AsyncRedisWindow if isinstance(client, _AsyncMemoryEval) else RedisWindow
+    kind = AsyncRedisWindow if _is_async(client) else RedisWindow
     return shared_rate_limit(kind(client, "bench", calls=10**9, period=1))
 
 
@@ -318,9 +348,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--iterations", type=int, default=None, help="fixed calls per repeat (skip calibration)"
     )
+    p.add_argument("--redis-url", default=None, help="also measure shared layers on this Redis")
     args = p.parse_args(argv)
 
-    selected = [c for c in cases() if args.filter.lower() in c.name.lower()]
+    every = cases() + (_redis_cases(args.redis_url) if args.redis_url else [])
+    selected = [c for c in every if args.filter.lower() in c.name.lower()]
     if not selected:
         print(f"no decorator matches {args.filter!r}", file=sys.stderr)
         return 2

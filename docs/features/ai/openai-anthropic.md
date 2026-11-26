@@ -26,7 +26,7 @@ also work with fakes in your tests. Install the SDK you use yourself (the `opena
 ```python
 from openai import OpenAI
 
-from python_wrap import guard_openai
+from python_wrap.adapters.openai import guard_openai
 from python_wrap.llm import Budget, token_rate_limit
 
 client = guard_openai(
@@ -48,7 +48,7 @@ the real one.
 ```python
 from types import SimpleNamespace
 
-from python_wrap import guard_anthropic
+from python_wrap.adapters.anthropic import guard_anthropic
 from python_wrap.llm import Budget, BudgetExceeded
 from python_wrap.testing import fake_clock
 

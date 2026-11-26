@@ -153,7 +153,7 @@ class _WindowConfig:
         if self._monitor.mode != "local":
             return 0.0
         if self._local is None:
-            from python_wrap.concurrency import _SlidingWindow
+            from python_wrap.ratelimit import _SlidingWindow
 
             self._local = _SlidingWindow(((self.calls, self.period),))
         return float(self._local.acquire(key))

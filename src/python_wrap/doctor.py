@@ -166,7 +166,7 @@ def _layer(obj: Any, role: str | None = None) -> Layer:
 
 def _preemptive(use_signals: Any) -> bool:
     """True if a sync timeout with this ``use_signals`` setting can stop work here."""
-    from python_wrap.concurrency import _signals_usable
+    from python_wrap.timeouts import _signals_usable
 
     return use_signals is not False and _signals_usable()
 
@@ -328,7 +328,7 @@ def _check(
         layer.settings.get("sync") and _preemptive(layer.settings.get("use_signals"))
         for layer in timeouts
     ):
-        from python_wrap.concurrency import foreign_alarm_state
+        from python_wrap.timeouts import foreign_alarm_state
 
         conflict = foreign_alarm_state()
         if conflict is not None:

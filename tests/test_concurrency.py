@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from python_wrap import _core, concurrency
+from python_wrap import _core, concurrency, ratelimit, timeouts
 from python_wrap.concurrency import (
     RateLimiter,
     Timeout,
@@ -126,7 +126,7 @@ def test_timeout_signals_required_in_main_thread():
 
 
 def test_timeout_use_signals_unavailable(monkeypatch):
-    monkeypatch.setattr(concurrency, "_HAS_SETITIMER", False)
+    monkeypatch.setattr(timeouts, "_HAS_SETITIMER", False)
     with pytest.raises(RuntimeError):
         timeout(1, use_signals=True)
 
@@ -436,7 +436,7 @@ def test_rate_limit_per_key(fake_clock):
 
 
 def test_rate_limit_sweeps_stale_buckets(fake_clock, monkeypatch):
-    monkeypatch.setattr(concurrency, "_SWEEP_EVERY", 3)
+    monkeypatch.setattr(ratelimit, "_SWEEP_EVERY", 3)
     window = concurrency._SlidingWindow(((1, 1.0),))
     window.acquire("a")
     window.acquire("b")
@@ -1177,7 +1177,7 @@ def test_timeout_sync_block_needs_signals_and_main_thread(monkeypatch):
             pass
 
     assert isinstance(run_in_thread(in_thread)().exception(timeout=1), RuntimeError)
-    monkeypatch.setattr(concurrency, "_HAS_SETITIMER", False)
+    monkeypatch.setattr(timeouts, "_HAS_SETITIMER", False)
     with pytest.raises(RuntimeError), timeout(1):
         pass
 
@@ -1536,7 +1536,7 @@ def test_timeout_fallback_abandons_worker_of_timed_out_call():
 
 
 def test_timeout_fallback_workers_exit_when_idle(monkeypatch):
-    monkeypatch.setattr(concurrency, "_WORKER_IDLE_SECONDS", 0.02)
+    monkeypatch.setattr(timeouts, "_WORKER_IDLE_SECONDS", 0.02)
     first = _worker_thread()()
     second = _worker_thread()()  # the same worker is reused while it is idle
     assert first is second
@@ -1546,7 +1546,7 @@ def test_timeout_fallback_workers_exit_when_idle(monkeypatch):
 
 
 def test_timeout_fallback_keeps_a_bounded_idle_pool(monkeypatch):
-    monkeypatch.setattr(concurrency, "_MAX_IDLE_WORKERS", 2)
+    monkeypatch.setattr(timeouts, "_MAX_IDLE_WORKERS", 2)
     n = 6
     barrier = threading.Barrier(n)
 
@@ -1790,7 +1790,7 @@ async def test_singleflight_async_flight_outcome_races():
 
 def test_timeout_fallback_result_arriving_after_the_limit_is_a_timeout(monkeypatch, events):
     now = [100.0]  # the late-result check reads real time: fake it for this module only
-    monkeypatch.setattr(concurrency, "time", types.SimpleNamespace(monotonic=lambda: now[0]))
+    monkeypatch.setattr(timeouts, "time", types.SimpleNamespace(monotonic=lambda: now[0]))
 
     @timeout(1, use_signals=False)
     def late():

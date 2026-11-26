@@ -8,16 +8,16 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 
-from python_wrap import (
+from python_wrap import CircuitBreaker
+from python_wrap.doctor import Finding, doctor
+from python_wrap.llm import (
     Budget,
     BudgetExceeded,
-    CircuitBreaker,
     fallback_models,
     llm_cache,
     stream_timeout,
     token_rate_limit,
 )
-from python_wrap.doctor import Finding, doctor
 
 from .config import CHUNK_GAP_SECONDS, FIRST_TOKEN_SECONDS, PLANS, PRICES
 from .providers import Provider

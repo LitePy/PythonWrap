@@ -47,8 +47,8 @@ from typing import Any, ParamSpec, Protocol, TypeVar, cast, overload
 
 from python_wrap import _core
 from python_wrap._runtime import seconds as _parse_seconds
-from python_wrap.concurrency import CancelToken, _current_token
 from python_wrap.errors import PythonWrapError, TimeoutExpired
+from python_wrap.timeouts import CancelToken, _current_token
 
 __all__ = [
     "AgentError",
@@ -812,7 +812,7 @@ def agent_run(
 
     Example:
         ```python
-        from python_wrap import agent_run, tool, LoopDetected
+        from python_wrap.agents import agent_run, tool, LoopDetected
 
         @tool(read_only=True)
         def search(query: str) -> list[str]:
@@ -1326,7 +1326,7 @@ class EffectLedger:
 
     Example:
         ```python
-        from python_wrap import EffectLedger, agent_run, tool, with_call_id
+        from python_wrap.agents import EffectLedger, agent_run, tool, with_call_id
 
         ledger = EffectLedger()
         charges = []
@@ -2049,7 +2049,7 @@ def tool(
 
     Example:
         ```python
-        from python_wrap import agent_run, tool
+        from python_wrap.agents import agent_run, tool
 
         sent = []
 
@@ -2336,7 +2336,7 @@ class ToolRegistry:
 
     Example:
         ```python
-        from python_wrap import RunGuard, ToolNotAllowed, ToolPolicy, ToolRegistry
+        from python_wrap.agents import RunGuard, ToolNotAllowed, ToolPolicy, ToolRegistry
 
         tools = ToolRegistry(policy=ToolPolicy(deny=["drop_*"]), guard=RunGuard(max_steps=8))
 

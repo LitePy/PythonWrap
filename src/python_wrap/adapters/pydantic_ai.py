@@ -167,7 +167,7 @@ class PythonWrapCapability:
 
     Example:
         ```python
-        from python_wrap import EffectLedger
+        from python_wrap.agents import EffectLedger
         from python_wrap.adapters.pydantic_ai import PythonWrapCapability
 
         cap = PythonWrapCapability(timeout=10, ledger=EffectLedger(), max_repeats=2)
