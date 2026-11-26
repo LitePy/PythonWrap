@@ -132,5 +132,43 @@ timeouts should be shorter than the lease. A crash after the external effect but
 the result is stored can replay that effect. Use an external transaction, fencing protocol,
 or downstream idempotency key when either gap matters.
 
+## Results in your own database
+
+`SqlResultStore(engine)` keeps idempotency results in a table of your application's
+own database, through a SQLAlchemy `Engine`. It works the same on PostgreSQL, SQL Server
+and SQLite. The table is never created for you: `SqlResultStore.ddl("postgresql")`
+(or `"mssql"` or `"sqlite"`) returns the CREATE TABLE and CREATE INDEX statements, and
+you run them in a migration. Call `store.purge_expired()` from a scheduled job to delete
+expired rows.
+
+When the function writes to the same database, pass `connection=` with a callable that
+returns the SQLAlchemy `Connection` in use. The key is then recorded in your transaction,
+so the key and the write commit or roll back together. A retry after a crash runs once.
+Only sync functions are supported.
+
+<!-- skip -->
+```python
+import sqlalchemy
+from python_wrap import SqlResultStore, idempotent
+
+engine = sqlalchemy.create_engine("postgresql+psycopg://app@db/orders")
+store = SqlResultStore(engine)
+
+def place_order(conn, order_id: str, sku: str) -> str:
+    @idempotent(key=f"order:{order_id}", store=store, connection=lambda: conn)
+    def write() -> str:
+        conn.execute(sqlalchemy.text("INSERT INTO orders (id, sku) VALUES (:i, :s)"), {"i": order_id, "s": sku})
+        return order_id
+    return write()
+
+with engine.begin() as conn:
+    place_order(conn, "o-17", "widget")
+```
+
+SQLite needs one extra setup step. Python's sqlite3 driver does not emit BEGIN, which
+breaks savepoints. Use SQLAlchemy's documented recipe: a `connect` event that sets
+`dbapi_connection.isolation_level = None`, and a `begin` event that runs
+`conn.exec_driver_sql("BEGIN")`.
+
 See [coordination API](../../api/coordination.md), [idempotency API](../../api/idempotency.md),
 and [fork behavior](../../project/migration-0.3.md#forked-workers).

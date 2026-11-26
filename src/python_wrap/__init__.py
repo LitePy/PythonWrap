@@ -195,6 +195,7 @@ from .http import (
 )
 from .idempotency import (
     MemoryResultStore,
+    SqlResultStore,
     idempotent,
 )
 from .lifecycle import (
@@ -487,6 +488,7 @@ __all__ = [
     "SignalTimerConflictWarning",
     "Spend",
     "SqlAppLock",
+    "SqlResultStore",
     "StreamTimeout",
     "TapeRecord",
     "ThreadedStore",

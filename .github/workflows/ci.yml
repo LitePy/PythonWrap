@@ -307,6 +307,19 @@ jobs:
         run: >-
           uv run --frozen --with 'sqlalchemy>=2' --with 'psycopg[binary]>=3.1'
           --with 'pymssql>=2.3' pytest tests/test_sql_backends_live.py tests/test_transient_predicates.py
+          tests/test_sql_result_store.py
+      - name: Install the Microsoft ODBC driver for SQL Server
+        run: |
+          curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --dearmor -o /usr/share/keyrings/microsoft-prod.gpg
+          curl -fsSL "https://packages.microsoft.com/config/ubuntu/$(lsb_release -rs)/prod.list" | sudo tee /etc/apt/sources.list.d/mssql-release.list
+          sudo apt-get update
+          sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18 unixodbc
+      - name: SQL Server through pyodbc
+        env:
+          PW_MSSQL_URL: "mssql+pyodbc://sa:CiOnly-Passw0rd@127.0.0.1:1433/master?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes"
+        run: >-
+          uv run --frozen --with 'sqlalchemy>=2' --with 'pyodbc>=5'
+          pytest tests/test_sql_backends_live.py -k "not postgres"
 
   benchmarks:
     # Coarse overhead regression gate next to the specialist libraries, plus a short soak.

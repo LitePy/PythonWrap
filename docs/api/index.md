@@ -68,7 +68,7 @@ For explanations and examples, start from the matching [feature page](../feature
 | [policies](policies.md) | `PolicyRegistry`, `policies`, `resilient` |
 | [predicates](predicates.md) | `Predicate`, `in_cause_chain`, `sqlstate`, `message_contains` |
 | [coordination](coordination.md) | `Lease`, `LocalLease`, `RedisLock`, `RedisSemaphore`, `AsyncRedisLock`, `AsyncRedisSemaphore`, `PgAdvisoryLock`, `SqlAppLock`, `single_instance`, `AlreadyRunning`, `LeaseLost` |
-| [idempotency](idempotency.md) | `idempotent`, `MemoryResultStore` |
+| [idempotency](idempotency.md) | `idempotent`, `MemoryResultStore`, `SqlResultStore` |
 | [quotas](quotas.md) | `Quota`, `QuotaExhausted`, `RedisWindow`, `shared_rate_limit` |
 | [shared](shared.md) | `RedisBreakerState`, `AsyncRedisBreakerState`, `SharedBulkhead` (used by `Bulkhead(backend=...)`) |
 | [buffering](buffering.md) | `buffered`, `Buffered`, `AsyncBuffered`, `BufferStats` |

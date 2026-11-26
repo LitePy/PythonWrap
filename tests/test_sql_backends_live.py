@@ -29,6 +29,7 @@ from python_wrap import (
     single_instance,
     sqlserver_transient,
 )
+from python_wrap.idempotency import SqlResultStore, idempotent
 
 REQUIRED = os.environ.get("PW_REQUIRE_SQL") == "1"
 
@@ -151,3 +152,44 @@ def test_sqlserver_errors_are_classified(mssql_engine):
     finally:
         with mssql_engine.begin() as conn:
             conn.exec_driver_sql(f"DROP TABLE {table}")
+
+
+@pytest.fixture(params=["postgres", "mssql"])
+def result_table(request: Any) -> Iterator[tuple[Any, str]]:
+    engine = request.getfixturevalue("pg_engine" if request.param == "postgres" else "mssql_engine")
+    table = f"pw_idem_{uuid.uuid4().hex[:8]}"
+    dialect = "postgresql" if request.param == "postgres" else "mssql"
+    with engine.begin() as conn:
+        for statement in SqlResultStore.ddl(dialect, table):
+            conn.exec_driver_sql(statement)
+        conn.exec_driver_sql(f"CREATE TABLE {table}_orders (id int)")
+    yield engine, table
+    with engine.begin() as conn:
+        conn.exec_driver_sql(f"DROP TABLE {table}")
+        conn.exec_driver_sql(f"DROP TABLE {table}_orders")
+
+
+def test_sql_result_store_key_commits_with_the_write(result_table):
+    engine, table = result_table
+    store = SqlResultStore(engine, table)
+    store.set("plain", ({"n": 1},), 60)
+    assert store.get("plain") == ({"n": 1},)
+    current = {}
+
+    @idempotent(key="order-1", store=store, connection=lambda: current["conn"])
+    def place() -> str:
+        current["conn"].exec_driver_sql(f"INSERT INTO {table}_orders VALUES (1)")
+        return "placed"
+
+    with engine.connect() as conn:
+        current["conn"] = conn
+        with pytest.raises(RuntimeError), conn.begin():
+            place()
+            raise RuntimeError("rolled back")
+    for _ in range(2):
+        with engine.begin() as conn:
+            current["conn"] = conn
+            assert place() == "placed"
+    with engine.connect() as conn:
+        assert conn.exec_driver_sql(f"SELECT COUNT(*) FROM {table}_orders").scalar() == 1
+    assert store.purge_expired() == 0

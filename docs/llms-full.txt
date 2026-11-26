@@ -4308,6 +4308,8 @@ Every public name: `python_wrap.__all__` first, then names public only in a subm
   Tokens and dollars spent in one budget scope.
 - `python_wrap.SqlAppLock`: `SqlAppLock(engine: Any)`
   SQLAlchemy SQL Server session locks (pyodbc/pymssql); TTL is session lifetime.
+- `python_wrap.SqlResultStore`: `SqlResultStore(engine: Any, table: str = 'pw_idempotency', *, dumps: Callable[[Any], str] = dumps, loads: Callable[[str], Any] = loads)`
+  Idempotency results in a table of the application's own database (SQLAlchemy).
 - `python_wrap.Step`: `Step(index: int, kind: str, name: str, signature: str | None, at: float)`
   One step of an agent run (a tool call, an LLM call, or a custom kind).
 - `python_wrap.StepLimitExceeded`: `StepLimitExceeded(message: str, *, run_id: str, limit: int)`
@@ -4442,7 +4444,7 @@ Every public name: `python_wrap.__all__` first, then names public only in a subm
   Start a backup attempt when a call is slow, and return the first success.
 - `python_wrap.http_status`: `http_status(*codes: int) -> Callable[[Any], bool]`
   Build a ``retry_if_result`` predicate that matches HTTP status codes.
-- `python_wrap.idempotent`: `idempotent(*, key: str | Callable[..., Any] | None = None, ttl: float | str = '1d', store: Any = None, backend: Any = None, in_progress: str = 'raise', lease_ttl: float | str = 60, timeout: float | None = None) -> Callable[[F], F]`
+- `python_wrap.idempotent`: `idempotent(*, key: str | Callable[..., Any] | None = None, ttl: float | str = '1d', store: Any = None, backend: Any = None, in_progress: str = 'raise', lease_ttl: float | str = 60, timeout: float | None = None, connection: Callable[[], Any] | None = None) -> Callable[[F], F]`
   Run once per key within TTL; duplicates return the stored result.
 - `python_wrap.in_cause_chain`: `in_cause_chain(test: Callable[[Any], bool]) -> Predicate`
   Walk cause/context and driver .orig links, including cycles, once per exception.

@@ -21,6 +21,11 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
 
 ### Added
 
+- `SqlResultStore(engine)` keeps idempotency results in the application's own database
+  (PostgreSQL, SQL Server, SQLite through SQLAlchemy), with `ddl()` for migrations and
+  `purge_expired()` for a scheduled sweep. `idempotent(..., connection=...)` writes the
+  key row on the caller's connection, so the key and the function's own writes commit
+  or roll back together. CI now also runs the SQL Server backends through pyodbc.
 - Circuit breakers can open on a rate: `failure_rate` with `minimum_calls` over `window`,
   and `slow_call_duration` with `slow_call_rate` (a slow half-open trial re-opens).
   A non-default `failure_threshold` with `failure_rate` raises `ValueError`. Calls are
