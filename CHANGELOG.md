@@ -25,7 +25,7 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
   context in a new execution owner no longer suppresses that owner's retries, and stored
   retry scopes do not retain finished tasks.
 
-## [0.4.0b2] - 2026-11-26
+## [0.4.0] - 2026-11-26
 
 ### Breaking changes
 
@@ -926,8 +926,8 @@ Core:
 
 Initial release.
 
-[Unreleased]: https://github.com/LitePy/PythonWrap/compare/v0.4.0b2...HEAD
-[0.4.0b2]: https://github.com/LitePy/PythonWrap/compare/v0.4.0b1...v0.4.0b2
+[Unreleased]: https://github.com/LitePy/PythonWrap/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/LitePy/PythonWrap/compare/v0.4.0b2...v0.4.0
 [0.4.0b1]: https://github.com/LitePy/PythonWrap/compare/v0.3.0...v0.4.0b1
 [0.3.0]: https://github.com/LitePy/PythonWrap/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/LitePy/PythonWrap/compare/v0.1.0...v0.2.1
