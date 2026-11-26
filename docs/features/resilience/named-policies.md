@@ -72,6 +72,7 @@ Mappings refer to objects by name, never by import path. Exception names go in `
 (`"backend": "@default"`). Register your own names on the registry before the watch
 applies them:
 
+<!-- skip -->
 ```python
 policies.register_exception("vendor.Timeout", VendorTimeout)
 policies.register_predicate("vendor_transient", fn)
