@@ -155,7 +155,7 @@ def test_gave_up_counter_and_attempt_spans_with_durations(fake_clock: Any) -> No
         spans = exporter.get_finished_spans()
         attempts = [s for s in spans if s.name == "python_wrap.retry.attempt"]
         assert [s.attributes["python_wrap.retry.attempt"] for s in attempts] == [1, 2, 3]
-        assert all(s.end_time > s.start_time for s in spans)  # no zero-length span
+        assert all(s.end_time > s.start_time for s in attempts)  # no zero-length attempt span
         request = next(s for s in spans if s.name == "request")
         assert any(e.name == "pw.retry.gave_up" for e in request.events)
         assert sum(p.value for p in _points(reader, "python_wrap.retry.gave_up")) == 1

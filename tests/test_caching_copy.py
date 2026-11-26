@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 from conftest import FakeClock
-from python_wrap import memoize, singleflight
+from python_wrap import memoize
 from python_wrap.testing import disable_caching
 from test_caching_extras import DictStore
 
@@ -102,8 +102,7 @@ def test_sync_singleflight_waiters_are_isolated() -> None:
     release = threading.Event()
     calls = 0
 
-    @memoize(copy_result=True)
-    @singleflight
+    @memoize(copy_result=True, singleflight=True)
     def load() -> list[int]:
         nonlocal calls
         calls += 1
@@ -114,7 +113,13 @@ def test_sync_singleflight_waiters_are_isolated() -> None:
     # Holding the leader lets all subsequent calls overlap; joining a completed
     # cache hit is also valid, since both paths must deliver independent copies.
     results: list[list[int]] = []
-    threads = [threading.Thread(target=lambda: results.append(load())) for _ in range(4)]
+    callers = threading.Barrier(4)
+
+    def call() -> None:
+        callers.wait()
+        results.append(load())
+
+    threads = [threading.Thread(target=call) for _ in range(4)]
     for thread in threads:
         thread.start()
     assert entered.wait(2)

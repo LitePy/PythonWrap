@@ -19,6 +19,12 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
   stay alive and disrupt later invalidations. A synchronous shutdown callback that times out
   exhausts the remaining finite drain budget before another callback can start.
 
+### Fixed
+
+- LLM retry ownership is now limited to the task or thread that established it. A copied
+  context in a new execution owner no longer suppresses that owner's retries, and stored
+  retry scopes do not retain finished tasks.
+
 ## [0.4.0b2] - 2026-11-26
 
 ### Breaking changes
