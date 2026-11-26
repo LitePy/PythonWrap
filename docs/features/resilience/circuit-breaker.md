@@ -140,6 +140,30 @@ Both are reported under the breaker's name. See [Metrics](../observability/metri
 !!! note "One breaker per dependency"
     A breaker created by `@circuit_breaker(...)` belongs to that function alone. If several functions call the same service, share one `CircuitBreaker` instance, otherwise each learns separately that the service is down. A [policy](policies.md) with a `CircuitBreaker` also shares it across everything it decorates.
 
+## Failure rate and slow calls
+
+A count threshold does not scale with traffic. Five failures is an outage at 10 calls a minute and noise at 10,000. A rate does not change with the number of workers either. Slow calls can exhaust workers even when nothing fails, so the breaker can count those too.
+
+```python
+from python_wrap import CircuitBreaker
+
+breaker = CircuitBreaker(
+    name="search",
+    window=60,
+    failure_rate=0.5,
+    minimum_calls=20,
+    slow_call_duration=2.0,
+    slow_call_rate=0.8,
+)
+assert breaker.stats.failure_rate == 0.0
+```
+
+- `failure_rate` is a share from 0 to 1, not 0. The breaker opens when at least `minimum_calls` (default `10`) calls were seen in the last `window` seconds and failures / calls >= `failure_rate`. It needs `window=`. Combining `failure_rate` with a non-default `failure_threshold` raises `ValueError`.
+- `slow_call_duration` (seconds) and `slow_call_rate` (share) go together. A call that takes at least `slow_call_duration` counts as slow, whether it succeeds or fails. The breaker opens when slow calls / calls >= `slow_call_rate`, after `minimum_calls`. It needs `window=`. A slow half-open trial re-opens the breaker.
+- Calls are counted in ten time slots per window, so old calls leave the window one slot at a time.
+- `breaker.stats.failure_rate` and `breaker.stats.slow_rate` give the shares in the current window. They are `None` for a breaker without these options. The `circuit.state_changed` event gains `failure_rate` and `slow_rate` fields for such breakers.
+- Shared state works the same way. `RedisBreakerState`, `AsyncRedisBreakerState` and `SQLiteBreakerState` keep per-slot counters for calls, failures and slow calls.
+
 ## See also
 
 - [Retry](retry.md), [Fallback](fallback.md), [Policies](policies.md)

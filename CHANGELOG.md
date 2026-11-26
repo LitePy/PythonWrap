@@ -21,6 +21,11 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
 
 ### Added
 
+- Circuit breakers can open on a rate: `failure_rate` with `minimum_calls` over `window`,
+  and `slow_call_duration` with `slow_call_rate` (a slow half-open trial re-opens).
+  A non-default `failure_threshold` with `failure_rate` raises `ValueError`. Calls are
+  counted in ten time slots per window, locally and in the Redis and SQLite backends.
+  `CircuitStats` and the `circuit.state_changed` event add `failure_rate` and `slow_rate`.
 - `RedisBreakerState` and `AsyncRedisBreakerState` cache a closed state for `state_ttl`
   seconds (default 1.0): calls are admitted with no store round trip and successes are
   sent in batches (`flush_interval`, `flush_every`); failures, trials and admin calls

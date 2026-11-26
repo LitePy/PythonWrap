@@ -4126,7 +4126,7 @@ Every public name: `python_wrap.__all__` first, then names public only in a subm
   A cassette file is unreadable, truncated or in an unknown format.
 - `python_wrap.CassetteMiss`: `CassetteMiss(message: str, *, method: str, url: str, key: str)`
   A request has no (unused) recording, and the cassette is not recording.
-- `python_wrap.CircuitBreaker`: `CircuitBreaker(*, failure_threshold: int = 5, recovery_timeout: float = 30.0, half_open_max_calls: int = 1, success_threshold: int = 1, on: ExceptionTypes = Exception, exclude: ExceptionTypes = (), on_state_change: StateChangeListener | None = None, name: str | None = None, logger: LoggerLike = None, window: float | None = None, backend: Any = None, on_backend_error: str | None = None, retry_backend_after: float = 1.0)`
+- `python_wrap.CircuitBreaker`: `CircuitBreaker(*, failure_threshold: int = 5, recovery_timeout: float = 30.0, half_open_max_calls: int = 1, success_threshold: int = 1, on: ExceptionTypes = Exception, exclude: ExceptionTypes = (), on_state_change: StateChangeListener | None = None, name: str | None = None, logger: LoggerLike = None, window: float | None = None, backend: Any = None, on_backend_error: str | None = None, retry_backend_after: float = 1.0, failure_rate: float | None = None, minimum_calls: int = 10, slow_call_duration: float | None = None, slow_call_rate: float | None = None)`
   Stop calling a failing dependency until it has had time to recover.
 - `python_wrap.CircuitOpenError`: `CircuitOpenError(message: str, *, retry_after: float)`
   The circuit breaker is open, so the call was not attempted.
@@ -4134,7 +4134,7 @@ Every public name: `python_wrap.__all__` first, then names public only in a subm
   Type alias: python_wrap.circuit.CircuitProtected
 - `python_wrap.CircuitState`
   The three states of a circuit breaker.
-- `python_wrap.CircuitStats`: `CircuitStats(name: str, state: CircuitState, failures: int, successes: int, rejected: int, consecutive_failures: int, opened_at: float | None)`
+- `python_wrap.CircuitStats`: `CircuitStats(name: str, state: CircuitState, failures: int, successes: int, rejected: int, consecutive_failures: int, opened_at: float | None, failure_rate: float | None = None, slow_rate: float | None = None)`
   A point-in-time snapshot of a `CircuitBreaker`, from its ``.stats`` property.
 - `python_wrap.ContextFilter`: `ContextFilter(defaults: Mapping[str, Any] | None = None, *, as_attrs: bool = True)`
   Inject log_context into arbitrary application records, attached to handlers.
@@ -4384,7 +4384,7 @@ Every public name: `python_wrap.__all__` first, then names public only in a subm
   Check argument types with ``isinstance``.
 - `python_wrap.checkpoint`: `checkpoint() -> None`
   Raise `TimeoutExpired` if the enclosing sync `timeout` has fired; else do nothing.
-- `python_wrap.circuit_breaker`: `circuit_breaker(func: Callable[..., Any] | None = None, /, *, failure_threshold: int = 5, recovery_timeout: float = 30.0, half_open_max_calls: int = 1, success_threshold: int = 1, on: ExceptionTypes = Exception, exclude: ExceptionTypes = (), on_state_change: StateChangeListener | None = None, name: str | None = None, logger: LoggerLike = None) -> Any`
+- `python_wrap.circuit_breaker`: `circuit_breaker(func: Callable[..., Any] | None = None, /, *, failure_threshold: int = 5, recovery_timeout: float = 30.0, half_open_max_calls: int = 1, success_threshold: int = 1, on: ExceptionTypes = Exception, exclude: ExceptionTypes = (), on_state_change: StateChangeListener | None = None, name: str | None = None, logger: LoggerLike = None, window: float | None = None, failure_rate: float | None = None, minimum_calls: int = 10, slow_call_duration: float | None = None, slow_call_rate: float | None = None) -> Any`
   Decorate a function with its own dedicated `CircuitBreaker`.
 - `python_wrap.compose`: `compose(*decorators: Callable[[Any], Any]) -> Callable[[F], F]`
   Combine decorators into one, applied as if stacked from top to bottom.

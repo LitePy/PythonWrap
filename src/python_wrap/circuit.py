@@ -58,6 +58,10 @@ class CircuitStats:
         consecutive_failures: Counted failures since the last success.
         opened_at: ``_core.monotonic()`` time at which the circuit last opened, or
             ``None`` while it is closed.
+        failure_rate: Share of calls in ``window`` that failed, for a breaker with
+            ``failure_rate`` or ``slow_call_rate``; otherwise ``None``.
+        slow_rate: Share of calls in ``window`` slower than ``slow_call_duration``
+            (same condition).
     """
 
     name: str
@@ -67,6 +71,8 @@ class CircuitStats:
     rejected: int
     consecutive_failures: int
     opened_at: float | None
+    failure_rate: float | None = None
+    slow_rate: float | None = None
 
 
 class CircuitBreaker:
@@ -100,6 +106,14 @@ class CircuitBreaker:
         name: Name used in log messages, errors and events.
         logger: Logger (or name) for state transitions.
         window: Count failures inside this many seconds instead of consecutive failures.
+        failure_rate: Open when this share (0 to 1) of the calls in ``window`` failed,
+            once ``minimum_calls`` calls were seen. Needs ``window``; replaces
+            ``failure_threshold`` (a non-default threshold with it raises ValueError).
+        minimum_calls: Calls in ``window`` needed before a rate can open the breaker.
+        slow_call_duration: Seconds after which a call counts as slow, success or not.
+        slow_call_rate: Open when this share of the calls in ``window`` was slow (after
+            ``minimum_calls``). Needs ``window`` and ``slow_call_duration``. A slow
+            half-open trial re-opens the breaker.
         backend: Shared state such as `python_wrap.shared.RedisBreakerState`.
         on_backend_error: What a store error does: ``"raise"`` (default), ``"local"``
             (use this process's own breaker until the store answers) or ``"allow"``
@@ -161,7 +175,30 @@ class CircuitBreaker:
         backend: Any = None,
         on_backend_error: str | None = None,
         retry_backend_after: float = 1.0,
+        failure_rate: float | None = None,
+        minimum_calls: int = 10,
+        slow_call_duration: float | None = None,
+        slow_call_rate: float | None = None,
     ) -> None:
+        if failure_rate is not None and failure_threshold != 5:
+            raise ValueError("set failure_threshold or failure_rate, not both")
+        for label, rate in (("failure_rate", failure_rate), ("slow_call_rate", slow_call_rate)):
+            if rate is not None and (not math.isfinite(rate) or not 0 < rate <= 1):
+                raise ValueError(f"{label} must be in (0, 1], got {rate!r}")
+        if (slow_call_duration is None) != (slow_call_rate is None):
+            raise ValueError("slow_call_duration and slow_call_rate go together")
+        if slow_call_duration is not None and (
+            not math.isfinite(slow_call_duration) or slow_call_duration <= 0
+        ):
+            raise ValueError("slow_call_duration must be positive")
+        if (failure_rate is not None or slow_call_rate is not None) and window is None:
+            raise ValueError("failure_rate and slow_call_rate need window=")
+        if (
+            isinstance(minimum_calls, bool)
+            or not isinstance(minimum_calls, int)
+            or minimum_calls < 1
+        ):
+            raise ValueError(f"minimum_calls must be >= 1, got {minimum_calls!r}")
         if (
             isinstance(failure_threshold, bool)
             or not isinstance(failure_threshold, int)
@@ -197,6 +234,10 @@ class CircuitBreaker:
             )
         )
         self._failure_times: deque[float] = deque()
+        self.failure_rate, self.minimum_calls = failure_rate, minimum_calls
+        self.slow_call_duration, self.slow_call_rate = slow_call_duration, slow_call_rate
+        self._rated = failure_rate is not None or slow_call_rate is not None
+        self._slots: deque[list[int]] = deque()  # [slot, calls, failures, slow] in window
         self.failure_threshold = failure_threshold
         self.recovery_timeout = recovery_timeout
         self.half_open_max_calls = half_open_max_calls
@@ -228,6 +269,7 @@ class CircuitBreaker:
             self._failures = self._trials = self._trial_successes = 0
             self._total_failures = self._total_successes = self._total_rejected = 0
             self._failure_times.clear()
+            self._slots.clear()
             self._generation += 1
 
     # -- introspection -------------------------------------------------------------
@@ -265,6 +307,11 @@ class CircuitBreaker:
                 rejected=data["total_rejected"],
                 consecutive_failures=data["failures"],
                 opened_at=None if data["state"] == "closed" else data["opened"] / 1000,
+                **self._rates(
+                    data.get("window_calls", 0),
+                    data.get("window_failures", 0),
+                    data.get("window_slow", 0),
+                ),
             )
         with self._lock:
             self._maybe_half_open()
@@ -276,6 +323,7 @@ class CircuitBreaker:
                 rejected=self._total_rejected,
                 consecutive_failures=self._failures,
                 opened_at=None if self._state is CircuitState.CLOSED else self._opened_at,
+                **self._rates(*self._window_totals()),
             )
         self._notify()
         return snapshot
@@ -288,6 +336,7 @@ class CircuitBreaker:
     def _local_reset(self) -> None:
         with self._lock:
             self._failure_times.clear()
+            self._slots.clear()
             if self._state is not CircuitState.CLOSED:
                 self._log.info("circuit %s reset to closed", self.name)
                 self._set_state(CircuitState.CLOSED)
@@ -311,7 +360,7 @@ class CircuitBreaker:
         self._notify()
 
     def _try(
-        self, operation: str, generation: int = 0, trial: bool = False
+        self, operation: str, generation: int = 0, trial: bool = False, slow: bool = False
     ) -> dict[str, Any] | None:
         """Backend result, or None when this call must use the local state (or be bypassed)."""
         if self._monitor is None:
@@ -323,18 +372,20 @@ class CircuitBreaker:
                 f"circuit {self.name} has an async backend; use the async form of this call"
             )
         return self._monitor.call(
-            operation, lambda: self._remote(operation, generation, trial), lambda: None
+            operation, lambda: self._remote(operation, generation, trial, slow), lambda: None
         )
 
     async def _atry(
-        self, operation: str, generation: int = 0, trial: bool = False
+        self, operation: str, generation: int = 0, trial: bool = False, slow: bool = False
     ) -> dict[str, Any] | None:
         """`_try` for an async backend: the store round trip is awaited."""
         if self._monitor is None:
             return None
 
         async def run() -> dict[str, Any]:
-            return self._observe(await self.backend.operate(self, operation, generation, trial))
+            extra = {"slow": True} if slow else {}  # backends without slow-call support still work
+            data = await self.backend.operate(self, operation, generation, trial, **extra)
+            return self._observe(data)
 
         return await self._monitor.acall(operation, run, lambda: None)
 
@@ -355,14 +406,24 @@ class CircuitBreaker:
     def _bypass(self) -> bool:
         return self._monitor is not None and self._monitor.mode == "allow"
 
-    def _remote(self, operation: str, generation: int = 0, trial: bool = False) -> dict[str, Any]:
-        return self._observe(self.backend.operate(self, operation, generation, trial))
+    def _remote(
+        self, operation: str, generation: int = 0, trial: bool = False, slow: bool = False
+    ) -> dict[str, Any]:
+        extra = {"slow": True} if slow else {}  # backends without slow-call support still work
+        return self._observe(self.backend.operate(self, operation, generation, trial, **extra))
 
     def _observe(self, data: dict[str, Any]) -> dict[str, Any]:
         """Record a backend answer and report the transition it made, if any."""
         self._last = data
         if data["old"] != data["state"]:
-            _core.emit("circuit.state_changed", self.name, old=data["old"], new=data["state"])
+            rates = self._rates(
+                data.get("window_calls", 0),
+                data.get("window_failures", 0),
+                data.get("window_slow", 0),
+            )
+            _core.emit(
+                "circuit.state_changed", self.name, old=data["old"], new=data["state"], **rates
+            )
             if self.on_state_change:
                 try:
                     self.on_state_change(
@@ -372,7 +433,46 @@ class CircuitBreaker:
                     self._log.exception("circuit listener failed")
         return data
 
+    # -- failure and slow-call rates ------------------------------------------------
+    def _rates(self, calls: int, failures: int, slow: int) -> dict[str, float | None]:
+        if not self._rated:
+            return {}
+        return {
+            "failure_rate": failures / calls if calls else 0.0,
+            "slow_rate": slow / calls if calls else 0.0,
+        }
+
+    def _trips(self, calls: int, failures: int, slow: int) -> bool:
+        if calls < self.minimum_calls:
+            return False
+        if self.failure_rate is not None and failures >= self.failure_rate * calls:
+            return True
+        return self.slow_call_rate is not None and slow >= self.slow_call_rate * calls
+
+    def _slow(self, started: float | None) -> bool:
+        return started is not None and _core.monotonic() - started >= self.slow_call_duration  # type: ignore[operator]
+
     # -- internals (call with the lock held) ---------------------------------------
+    def _window_totals(
+        self, failed: int = 0, slow: int = 0, add: bool = False
+    ) -> tuple[int, int, int]:
+        """Calls, failures and slow calls in ``window``, in ten slots; ``add`` records one."""
+        if not self._rated:
+            return 0, 0, 0
+        slot = math.floor(_core.monotonic() / (self.window / 10))  # type: ignore[operator]
+        while self._slots and self._slots[0][0] <= slot - 10:
+            self._slots.popleft()
+        if add:
+            if not self._slots or self._slots[-1][0] != slot:
+                self._slots.append([slot, 0, 0, 0])
+            last = self._slots[-1]
+            last[1], last[2], last[3] = last[1] + 1, last[2] + failed, last[3] + slow
+        return (
+            sum(s[1] for s in self._slots),
+            sum(s[2] for s in self._slots),
+            sum(s[3] for s in self._slots),
+        )
+
     def _set_state(self, new: CircuitState) -> None:
         old = self._state
         self._state = new
@@ -410,8 +510,9 @@ class CircuitBreaker:
             return
         with self._lock:
             pending, self._pending = self._pending, []
+            rates = self._rates(*self._window_totals())
         for old, new in pending:
-            _core.emit("circuit.state_changed", self.name, old=old, new=new)
+            _core.emit("circuit.state_changed", self.name, old=old, new=new, **rates)
             listener = self.on_state_change
             if listener is None:
                 continue
@@ -462,23 +563,27 @@ class CircuitBreaker:
             raise error
         return admitted
 
-    def _success(self, generation: int, trial: bool) -> None:
-        if self._try("success", generation, trial) is None and not self._bypass():
-            self._local_success(generation, trial)
+    def _success(self, generation: int, trial: bool, slow: bool = False) -> None:
+        if self._try("success", generation, trial, slow) is None and not self._bypass():
+            self._local_success(generation, trial, slow)
 
-    async def _asuccess(self, generation: int, trial: bool) -> None:
-        if await self._atry("success", generation, trial) is None and not self._bypass():
-            self._local_success(generation, trial)
+    async def _asuccess(self, generation: int, trial: bool, slow: bool = False) -> None:
+        if await self._atry("success", generation, trial, slow) is None and not self._bypass():
+            self._local_success(generation, trial, slow)
 
-    def _local_success(self, generation: int, trial: bool) -> None:
+    def _local_success(self, generation: int, trial: bool, slow: bool = False) -> None:
         with self._lock:
             self._total_successes += 1
             if generation != self._generation:
                 return
-            if trial:
+            if trial and slow and self.slow_call_rate is not None:
+                self._trials = max(self._trials - 1, 0)
+                self._open()
+            elif trial:
                 self._trials = max(self._trials - 1, 0)
                 self._trial_successes += 1
                 if self._trial_successes >= self.success_threshold:
+                    self._slots.clear()
                     self._set_state(CircuitState.CLOSED)
                     self._trials = 0
                     self._trial_successes = 0
@@ -491,18 +596,23 @@ class CircuitBreaker:
             if self.window is None or trial:
                 self._failures = 0
                 self._failure_times.clear()
+            if self._rated and not trial and self._trips(*self._window_totals(0, slow, True)):
+                self._open()
         self._notify()
 
-    def _failure(self, generation: int, trial: bool) -> None:
-        if self._try("failure", generation, trial) is None and not self._bypass():
-            self._local_failure(generation, trial)
+    def _failure(self, generation: int, trial: bool, slow: bool = False) -> None:
+        if self._try("failure", generation, trial, slow) is None and not self._bypass():
+            self._local_failure(generation, trial, slow)
 
-    def _local_failure(self, generation: int, trial: bool) -> None:
+    def _local_failure(self, generation: int, trial: bool, slow: bool = False) -> None:
         with self._lock:
             self._total_failures += 1
             if generation != self._generation:
                 return
-            if self.window is None:
+            rated = self._rated and not trial and self._trips(*self._window_totals(1, slow, True))
+            if self.failure_rate is not None:
+                self._failures = self._window_totals()[1]
+            elif self.window is None:
                 self._failures += 1
             else:
                 now = _core.monotonic()
@@ -510,7 +620,8 @@ class CircuitBreaker:
                     self._failure_times.popleft()
                 self._failure_times.append(now)
                 self._failures = len(self._failure_times)
-            if trial or self._failures >= self.failure_threshold:
+            counted = self.failure_rate is None and self._failures >= self.failure_threshold
+            if trial or rated or counted:
                 self._open()
         self._notify()
 
@@ -533,18 +644,20 @@ class CircuitBreaker:
     def _counted(self, exc: BaseException) -> bool:
         return isinstance(exc, self.on) and not isinstance(exc, self.exclude)
 
-    def _settle(self, generation: int, trial: bool, exc: BaseException) -> None:
+    def _settle(self, generation: int, trial: bool, exc: BaseException, slow: bool = False) -> None:
         """Book a call that raised ``exc``: a failure, or uncounted."""
         if self._counted(exc):
-            self._failure(generation, trial)
+            self._failure(generation, trial, slow)
         else:
             self._release(generation, trial)
 
-    async def _asettle(self, generation: int, trial: bool, exc: BaseException) -> None:
+    async def _asettle(
+        self, generation: int, trial: bool, exc: BaseException, slow: bool = False
+    ) -> None:
         if not self._counted(exc):
             return await self._arelease(generation, trial)
-        if await self._atry("failure", generation, trial) is None and not self._bypass():
-            self._local_failure(generation, trial)
+        if await self._atry("failure", generation, trial, slow) is None and not self._bypass():
+            self._local_failure(generation, trial, slow)
 
     def _offload(self, name: str, *args: Any) -> asyncio.Task[Any]:
         """Run a backend step as a task: awaited natively, or in a worker thread."""
@@ -583,15 +696,16 @@ class CircuitBreaker:
         if self._async_backend:
             raise TypeError(f"circuit {self.name} has an async backend; it protects async def only")
         generation, trial = self._acquire()
+        started = None if self.slow_call_duration is None else _core.monotonic()
         try:
             result = func(*args, **kwargs)
         except BaseException as exc:
             try:
-                self._settle(generation, trial, exc)
+                self._settle(generation, trial, exc, self._slow(started))
             except Exception:
                 self._log.exception("circuit outcome bookkeeping failed; preserving original error")
             raise
-        self._success(generation, trial)
+        self._success(generation, trial, self._slow(started))
         return result
 
     async def _acall(self, func: Callable[..., Any], args: Any, kwargs: Any) -> Any:
@@ -611,11 +725,13 @@ class CircuitBreaker:
                 raise
         else:
             generation, trial = self._acquire()
+        started = None if self.slow_call_duration is None else _core.monotonic()
         try:
             result = await func(*args, **kwargs)
         except BaseException as exc:
+            slow = self._slow(started)
             if self.backend is not None:
-                settlement = self._offload("_settle", generation, trial, exc)
+                settlement = self._offload("_settle", generation, trial, exc, slow)
                 _, error, cancelled = await _drain(settlement)
                 if cancelled:
                     raise asyncio.CancelledError from None
@@ -626,21 +742,22 @@ class CircuitBreaker:
                     )
             else:
                 try:
-                    self._settle(generation, trial, exc)
+                    self._settle(generation, trial, exc, slow)
                 except Exception:
                     self._log.exception(
                         "circuit outcome bookkeeping failed; preserving original error"
                     )
             raise
+        slow = self._slow(started)
         if self.backend is not None:
-            success = self._offload("_success", generation, trial)
+            success = self._offload("_success", generation, trial, slow)
             _, error, cancelled = await _drain(success)
             if cancelled:
                 raise asyncio.CancelledError
             if error is not None:
                 raise error
         else:
-            self._success(generation, trial)
+            self._success(generation, trial, slow)
         return result
 
     def __call__(self, func: F) -> F:
@@ -727,6 +844,11 @@ def circuit_breaker(
     on_state_change: StateChangeListener | None = ...,
     name: str | None = ...,
     logger: LoggerLike = ...,
+    window: float | None = ...,
+    failure_rate: float | None = ...,
+    minimum_calls: int = ...,
+    slow_call_duration: float | None = ...,
+    slow_call_rate: float | None = ...,
 ) -> CircuitProtected[P, R]: ...
 @overload
 def circuit_breaker(
@@ -742,6 +864,11 @@ def circuit_breaker(
     on_state_change: StateChangeListener | None = ...,
     name: str | None = ...,
     logger: LoggerLike = ...,
+    window: float | None = ...,
+    failure_rate: float | None = ...,
+    minimum_calls: int = ...,
+    slow_call_duration: float | None = ...,
+    slow_call_rate: float | None = ...,
 ) -> Callable[[Callable[P, R]], CircuitProtected[P, R]]: ...
 def circuit_breaker(
     func: Callable[..., Any] | None = None,
@@ -756,6 +883,11 @@ def circuit_breaker(
     on_state_change: StateChangeListener | None = None,
     name: str | None = None,
     logger: LoggerLike = None,
+    window: float | None = None,
+    failure_rate: float | None = None,
+    minimum_calls: int = 10,
+    slow_call_duration: float | None = None,
+    slow_call_rate: float | None = None,
 ) -> Any:
     """Decorate a function with its own dedicated `CircuitBreaker`.
 
@@ -774,6 +906,11 @@ def circuit_breaker(
         on_state_change: Listener called with ``(breaker, old_state, new_state)``.
         name: Name for log messages, errors and events (defaults to the function's qualified name).
         logger: Logger (or name) for state transitions.
+        window: Count failures inside this many seconds (see `CircuitBreaker`).
+        failure_rate: Open at this failed share of calls in ``window``.
+        minimum_calls: Calls in ``window`` needed before a rate can open the breaker.
+        slow_call_duration: Seconds after which a call counts as slow.
+        slow_call_rate: Open at this slow share of calls in ``window``.
 
     Returns:
         The wrapped function, or a decorator when ``func`` is omitted.
@@ -797,6 +934,11 @@ def circuit_breaker(
             on_state_change=on_state_change,
             name=name or _core.qualname(f),
             logger=logger,
+            window=window,
+            failure_rate=failure_rate,
+            minimum_calls=minimum_calls,
+            slow_call_duration=slow_call_duration,
+            slow_call_rate=slow_call_rate,
         )
         wrapped: Any = breaker(f)
         wrapped.breaker = breaker

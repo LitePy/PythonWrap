@@ -29,16 +29,41 @@ _BREAKER = """
 local t=redis.call('TIME'); local now=t[1]*1000+math.floor(t[2]/1000)
 local op=ARGV[1]; local threshold=tonumber(ARGV[2]); local window=tonumber(ARGV[3])
 local reset=tonumber(ARGV[4]); local halfmax=tonumber(ARGV[5]); local target=tonumber(ARGV[6])
+local n=tonumber(ARGV[10] or '1'); local frate=tonumber(ARGV[11] or '0')
+local srate=tonumber(ARGV[12] or '0'); local minc=tonumber(ARGV[13] or '1')
+local slow=tonumber(ARGV[14] or '0'); local rated=frate>0 or srate>0
 local gen=tonumber(redis.call('HGET',KEYS[1],'gen') or '0')
 local state=redis.call('HGET',KEYS[1],'state') or 'closed'; local old=state
 local opened=tonumber(redis.call('HGET',KEYS[1],'opened') or '0')
 local failures=tonumber(redis.call('HGET',KEYS[1],'failures') or '0')
 local trials=tonumber(redis.call('HGET',KEYS[1],'trials') or '0')
 local successes=tonumber(redis.call('HGET',KEYS[1],'successes') or '0')
-local admitted=1; local trial=0; local wait=0
+local admitted=1; local trial=0; local wait=0; local trip=false
+local wc,wf,ws=0,0,0
+-- Calls, failures and slow calls in window, in ten slots of one hash (KEYS[3]).
+local function slots(ac,af,as)
+ local width=math.max(1,math.floor(window/10)); local epoch=math.floor(now/width)
+ if ac>0 then redis.call('HINCRBY',KEYS[3],'c:'..epoch,ac)
+  if af>0 then redis.call('HINCRBY',KEYS[3],'f:'..epoch,af) end
+  if as>0 then redis.call('HINCRBY',KEYS[3],'s:'..epoch,as) end
+  redis.call('PEXPIRE',KEYS[3],window*2) end
+ local c,f,s=0,0,0
+ local all=redis.call('HGETALL',KEYS[3])
+ for i=1,#all,2 do
+  local field=all[i]; local e=tonumber(string.sub(field,3))
+  if e<=epoch-10 then redis.call('HDEL',KEYS[3],field)
+  else local v=tonumber(all[i+1]); local k=string.sub(field,1,1)
+   if k=='c' then c=c+v elseif k=='f' then f=f+v else s=s+v end end
+ end
+ return c,f,s
+end
+local function trips()
+ if wc<minc then return false end
+ return (frate>0 and wf>=frate*wc) or (srate>0 and ws>=srate*wc)
+end
 if op=='reset' then
  state='closed'; failures=0; trials=0; successes=0; opened=0; gen=gen+1
- redis.call('DEL',KEYS[2])
+ redis.call('DEL',KEYS[2],KEYS[3])
  redis.call('HSET',KEYS[1],'total_failures',0,'total_successes',0,'total_rejected',0)
 elseif op=='force_open' then state='open'; opened=now; trials=0; gen=gen+1
 else
@@ -57,32 +82,44 @@ else
    redis.call('HINCRBY',KEYS[1],'total_rejected',1)
   elseif state=='half_open' then trial=1; trials=trials+1 end
  elseif (op=='success' or op=='failure' or op=='neutral') and tonumber(ARGV[7])==gen then
-  if tonumber(ARGV[8])==1 then trials=math.max(0,trials-1) end
+  local is_trial=tonumber(ARGV[8])==1
+  if is_trial then trials=math.max(0,trials-1) end
   if op=='success' then
-   redis.call('HINCRBY',KEYS[1],'total_successes',tonumber(ARGV[10] or '1'))
+   redis.call('HINCRBY',KEYS[1],'total_successes',n)
    if state=='half_open' then
-    successes=successes+1
-    if successes>=target then state='closed'; gen=gen+1; failures=0; redis.call('DEL',KEYS[2]) end
-   elseif window==0 then failures=0 end
+    if slow==1 and srate>0 then trip=true
+    else
+     successes=successes+n
+     if successes>=target then state='closed'; gen=gen+1; failures=0
+      redis.call('DEL',KEYS[2],KEYS[3]) end
+    end
+   else
+    if window==0 then failures=0 end
+    if rated and not is_trial then wc,wf,ws=slots(n,0,slow*n); trip=trips() end
+   end
   elseif op=='failure' then
    redis.call('HINCRBY',KEYS[1],'total_failures',1)
-   if window>0 then
+   if rated and not is_trial and state~='half_open' then
+    wc,wf,ws=slots(1,1,slow); trip=trips()
+   end
+   if frate>0 then failures=wf
+   elseif window>0 then
     redis.call('ZREMRANGEBYSCORE',KEYS[2],'-inf',now-window)
     redis.call('ZADD',KEYS[2],now,ARGV[9]); failures=redis.call('ZCARD',KEYS[2])
     redis.call('PEXPIRE',KEYS[2],window)
    else failures=failures+1 end
-   if state=='half_open' or failures>=threshold then
-    state='open'; opened=now; trials=0; successes=0; gen=gen+1
-   end
+   if state=='half_open' or (frate==0 and failures>=threshold) then trip=true end
   end
+  if trip then state='open'; opened=now; trials=0; successes=0; gen=gen+1 end
  end
 end
+if rated and wc==0 then wc,wf,ws=slots(0,0,0) end
 redis.call('HSET',KEYS[1],'state',state,'gen',gen,'opened',opened,'failures',failures,
            'trials',trials,'successes',successes)
 return {admitted,state,gen,trial,wait,failures,
  redis.call('HGET',KEYS[1],'total_failures') or '0',
  redis.call('HGET',KEYS[1],'total_successes') or '0',
- redis.call('HGET',KEYS[1],'total_rejected') or '0',opened,old}
+ redis.call('HGET',KEYS[1],'total_rejected') or '0',opened,old,wc,wf,ws}
 """
 
 
@@ -219,9 +256,11 @@ class RedisBreakerState:
     def _reset_after_fork(self) -> None:
         self._cache.clear()
 
-    def _local(self, breaker: Any, operation: str, trial: bool) -> tuple[Any, int, int]:
+    def _local(
+        self, breaker: Any, operation: str, trial: bool, slow: bool = False
+    ) -> tuple[Any, int, int]:
         """``(answer or None, successes to flush, their generation)`` from the cache."""
-        if self.state_ttl == 0 or trial:
+        if self.state_ttl == 0 or trial or slow:  # a slow call can open a rated breaker
             return None, 0, 0
         now = _core.monotonic()
         with self._lock:
@@ -267,9 +306,14 @@ class RedisBreakerState:
             return self.client.eval(_BREAKER, *args)
 
     def operate(
-        self, breaker: Any, operation: str, generation: int = 0, trial: bool = False
+        self,
+        breaker: Any,
+        operation: str,
+        generation: int = 0,
+        trial: bool = False,
+        slow: bool = False,
     ) -> dict[str, Any]:
-        data, flush, flush_gen = self._local(breaker, operation, trial)
+        data, flush, flush_gen = self._local(breaker, operation, trial, slow)
         if flush:
             self._remember(
                 breaker,
@@ -277,17 +321,24 @@ class RedisBreakerState:
             )
         if data is not None:
             return data  # type: ignore[no-any-return]
-        row = self._call(self._args(breaker, operation, generation, trial))
+        row = self._call(self._args(breaker, operation, generation, trial, 1, slow))
         return self._remember(breaker, self._parse(row))
 
     def _args(
-        self, breaker: Any, operation: str, generation: int, trial: bool, count: int = 1
+        self,
+        breaker: Any,
+        operation: str,
+        generation: int,
+        trial: bool,
+        count: int = 1,
+        slow: bool = False,
     ) -> tuple[Any, ...]:
         key = self.prefix + "{" + digest(breaker.name) + "}"
         return (
-            2,
+            3,
             key,
             key + ":failures",
+            key + ":slots",
             operation,
             breaker.failure_threshold,
             0 if breaker.window is None else max(1, math.ceil(breaker.window * 1000)),
@@ -298,6 +349,10 @@ class RedisBreakerState:
             int(trial),
             uuid.uuid4().hex,
             count,
+            getattr(breaker, "failure_rate", None) or 0,
+            getattr(breaker, "slow_call_rate", None) or 0,
+            getattr(breaker, "minimum_calls", 1),
+            int(slow),
         )
 
     @staticmethod
@@ -314,7 +369,11 @@ class RedisBreakerState:
             "total_rejected",
             "opened",
             "old",
+            "window_calls",
+            "window_failures",
+            "window_slow",
         )
+        row = [*row, *[0] * (len(keys) - len(row))]  # scripts before 0.4.0b2 sent 11 values
         values = [value.decode() if isinstance(value, bytes) else value for value in row]
         data = dict(zip(keys, values, strict=True))
         for name in keys:
@@ -343,15 +402,20 @@ class AsyncRedisBreakerState(RedisBreakerState):
             return await self.client.eval(_BREAKER, *args)
 
     async def operate(  # type: ignore[override]
-        self, breaker: Any, operation: str, generation: int = 0, trial: bool = False
+        self,
+        breaker: Any,
+        operation: str,
+        generation: int = 0,
+        trial: bool = False,
+        slow: bool = False,
     ) -> dict[str, Any]:
-        data, flush, flush_gen = self._local(breaker, operation, trial)
+        data, flush, flush_gen = self._local(breaker, operation, trial, slow)
         if flush:
             row = await self._acall(self._args(breaker, "success", flush_gen, False, flush))
             self._remember(breaker, self._parse(row))
         if data is not None:
             return data  # type: ignore[no-any-return]
-        row = await self._acall(self._args(breaker, operation, generation, trial))
+        row = await self._acall(self._args(breaker, operation, generation, trial, 1, slow))
         return self._remember(breaker, self._parse(row))
 
 

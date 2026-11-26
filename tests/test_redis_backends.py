@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import socket
@@ -393,3 +394,26 @@ def test_breaker_state_uses_evalsha_and_reloads_on_noscript(redis_client):
     breaker = CircuitBreaker(name="sha", backend=RedisBreakerState(client, state_ttl=0))
     assert breaker.call(lambda: 1) == 1  # NOSCRIPT, then EVAL loads it
     assert breaker.call(lambda: 2) == 2  # EVALSHA hits
+
+
+def test_redis_failure_rate_needs_volume_and_share(redis_client):
+    def run(breaker, failures, successes):
+        for ok in [True] * successes + [False] * failures:
+            with contextlib.suppress(ConnectionError):
+                breaker.call((lambda: 1) if ok else _raise)
+
+    def _raise():
+        raise ConnectionError
+
+    options = {"failure_rate": 0.5, "minimum_calls": 20, "window": 10}
+    quiet = CircuitBreaker(
+        name="rate-quiet", backend=RedisBreakerState(redis_client, state_ttl=0), **options
+    )
+    quiet.reset()
+    run(quiet, 5, 95)
+    assert quiet.state.value == "closed"
+    assert quiet.stats.failure_rate == pytest.approx(0.05)
+    busy = CircuitBreaker(name="rate-busy", backend=RedisBreakerState(redis_client), **options)
+    busy.reset()
+    run(busy, 15, 5)
+    assert busy.state.value == "open"

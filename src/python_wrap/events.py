@@ -42,7 +42,8 @@ EVENT_NAMES: Mapping[str, str] = MappingProxyType(
         "timeout.expired": "A call exceeded its time limit. Fields: seconds (float, the limit).",
         "circuit.state_changed": (
             "A circuit breaker moved between states. function is the breaker name. "
-            "Fields: old (str), new (str): 'closed', 'open' or 'half_open'."
+            "Fields: old (str), new (str): 'closed', 'open' or 'half_open'; a breaker "
+            "with failure_rate or slow_call_rate adds failure_rate and slow_rate (float)."
         ),
         "circuit.rejected": (
             "A call was refused because the circuit is open. Fields: retry_after (float seconds)."

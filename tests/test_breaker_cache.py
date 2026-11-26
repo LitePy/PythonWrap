@@ -24,8 +24,8 @@ class Counting:
 
     def eval(self, script: str, numkeys: int, *args: Any) -> list[Any]:
         self.commands += 1
-        if args[2] == "success":
-            self.success_counts.append(args[-1])
+        if args[3] == "success":  # args: 3 keys, then ARGV (op first, count tenth)
+            self.success_counts.append(args[12])
         return self.answer
 
 
