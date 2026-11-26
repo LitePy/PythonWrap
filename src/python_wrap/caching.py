@@ -534,8 +534,47 @@ _MAX_LOCAL_TAGS = 10_000
 # Bumped when _local_tags is cleared, so every entry written before reads as stale
 # (never as fresh, which a plain eviction could cause).
 _tag_epoch = [0]
-_tag_clients: dict[int, Any] = {}  # sync Redis clients of tagged shared caches
-_async_tag_clients: dict[int, Any] = {}  # redis.asyncio clients (amemoize)
+# Weak on purpose: a client nothing else holds can no longer write through a store, so
+# it needs no invalidation. A strong registry kept every client alive for the whole
+# process, and one closed client made invalidate_tags fail for every tag.
+_tag_clients: weakref.WeakValueDictionary[int, Any] = weakref.WeakValueDictionary()
+_async_tag_clients: weakref.WeakValueDictionary[int, Any] = weakref.WeakValueDictionary()
+_tag_store_owners: weakref.WeakValueDictionary[int, Any] = weakref.WeakValueDictionary()
+_async_tag_store_owners: weakref.WeakValueDictionary[int, Any] = weakref.WeakValueDictionary()
+_tag_registry_lock = threading.RLock()
+
+
+def _register_tag_client(
+    registry: weakref.WeakValueDictionary[int, Any],
+    owner_registry: weakref.WeakValueDictionary[int, Any],
+    client: Any,
+    owner: Any,
+) -> None:
+    try:
+        with _tag_registry_lock:
+            registry[id(client)] = client
+    except TypeError:
+        # Track the store instead when a compatible client disallows weak references.
+        # The memoized wrapper owns that store and it owns the client.
+        with _tag_registry_lock:
+            owner_registry[id(owner)] = owner
+
+
+def _tag_client_targets(
+    registry: weakref.WeakValueDictionary[int, Any],
+    owner_registry: weakref.WeakValueDictionary[int, Any],
+    client: Any,
+) -> list[Any]:
+    with _tag_registry_lock:
+        targets = dict(registry.items())
+        owners = list(owner_registry.values())
+    for owner in owners:
+        target = getattr(owner, "client", None)
+        if target is not None:
+            targets[id(target)] = target
+    if client is not None:
+        targets[id(client)] = client
+    return list(targets.values())
 
 
 def _decode(value: Any) -> str:
@@ -569,8 +608,7 @@ def invalidate_tags(*names: str, client: Any = None) -> None:
     for name in names:
         token = uuid.uuid4().hex
         _remember_local(name, token)
-        clients = {**_tag_clients, **({id(client): client} if client is not None else {})}
-        for target in clients.values():
+        for target in _tag_client_targets(_tag_clients, _tag_store_owners, client):
             target.set(_TAG_PREFIX + digest(name), token)
 
 
@@ -579,8 +617,7 @@ async def ainvalidate_tags(*names: str, client: Any = None) -> None:
     for name in names:
         token = uuid.uuid4().hex
         _remember_local(name, token)
-        clients = {**_async_tag_clients, **({id(client): client} if client is not None else {})}
-        for target in clients.values():
+        for target in _tag_client_targets(_async_tag_clients, _async_tag_store_owners, client):
             await target.set(_TAG_PREFIX + digest(name), token)
 
 
@@ -764,7 +801,7 @@ def memoize(
     lock_backend = lock  # the name `lock` is reused below for the cache's own mutex
     tag_client = getattr(store, "client", None) if tags is not None else None
     if tag_client is not None:
-        _tag_clients[id(tag_client)] = tag_client
+        _register_tag_client(_tag_clients, _tag_store_owners, tag_client, store)
     if maxsize is not None and maxsize < 1:
         raise ValueError("maxsize must be a positive integer or None")
     if store is not None:

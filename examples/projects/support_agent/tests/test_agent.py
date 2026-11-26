@@ -18,6 +18,14 @@ from python_wrap.llm import BudgetExceeded
 MakeApp = Callable[..., SupportApp]
 
 
+@pytest.fixture
+def signals_usable_for_layout(monkeypatch: pytest.MonkeyPatch) -> None:
+    import importlib
+
+    doctor_module = importlib.import_module("python_wrap.doctor")
+    monkeypatch.setattr(doctor_module, "_preemptive", lambda use_signals: use_signals is not False)
+
+
 def test_happy_path_refunds_and_emails(make_app: MakeApp) -> None:
     app = make_app()
     result = app.handle(TICKET, run_id="t-1")
@@ -117,7 +125,7 @@ def test_both_models_rate_limited_retries_after_retry_after(make_app: MakeApp, c
     assert len(app.payments.refunds) == 1
 
 
-def test_doctor_is_happy_with_the_stack(make_app: MakeApp) -> None:
+def test_doctor_is_happy_with_the_stack(make_app: MakeApp, signals_usable_for_layout: None) -> None:
     app = make_app()
     llm_report = explain(app.ask)
     assert llm_report.ok and llm_report.findings == (), str(llm_report)

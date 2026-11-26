@@ -3294,6 +3294,17 @@ pydantic-ai = [
 ]
 
 [package.dev-dependencies]
+core-test = [
+    { name = "hypothesis", version = "6.168.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "hypothesis", version = "6.170.12", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "mypy" },
+    { name = "opentelemetry-api" },
+    { name = "opentelemetry-sdk" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "pytest-cov" },
+    { name = "ruff" },
+]
 dev = [
     { name = "hypothesis", version = "6.168.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "hypothesis", version = "6.170.12", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
@@ -3330,6 +3341,16 @@ requires-dist = [
 provides-extras = ["anthropic", "langchain", "openai", "openai-agents", "pydantic-ai"]
 
 [package.metadata.requires-dev]
+core-test = [
+    { name = "hypothesis", specifier = ">=6.100" },
+    { name = "mypy", specifier = ">=2.4.1" },
+    { name = "opentelemetry-api", specifier = ">=1.45.2" },
+    { name = "opentelemetry-sdk", specifier = ">=1.45.1" },
+    { name = "pytest", specifier = ">=9.2.0" },
+    { name = "pytest-asyncio", specifier = ">=1.4.1.post1" },
+    { name = "pytest-cov", specifier = ">=6.0" },
+    { name = "ruff", specifier = ">=0.17.4" },
+]
 dev = [
     { name = "hypothesis", specifier = ">=6.100" },
     { name = "langchain-core", specifier = ">=0.3,<2" },

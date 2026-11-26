@@ -216,7 +216,7 @@ def _step(
     if capacity > 0:
         grown = capacity if level is None else level + max(now - stamp, 0.0) * rate
         level = min(capacity, grown)
-        stamp = now
+        stamp = max(stamp, now)
     result = 0.0
     if op == "reserve":
         assert level is not None
@@ -240,7 +240,7 @@ def _step(
     elif op == "observe":
         if a >= 0:
             level = a if level is None else min(level, a)
-            stamp = now
+            stamp = max(stamp, now)
         if b > 0:
             blocked = max(blocked, now + b)
         result = max(blocked - now, 0.0)
@@ -263,7 +263,7 @@ local stamp=tonumber(h[2]) or now
 local blocked=tonumber(h[3]) or 0
 if cap>0 then
  if level==nil then level=cap else level=math.min(cap, level+math.max(now-stamp,0)*rate) end
- stamp=now
+ stamp=math.max(stamp,now)
 end
 local result=0
 if op=='reserve' then
@@ -278,7 +278,7 @@ elseif op=='level' then result=level
 elseif op=='observe' then
  if a>=0 then
   if level==nil then level=a else level=math.min(level,a) end
-  stamp=now
+  stamp=math.max(stamp,now)
  end
  if b>0 then blocked=math.max(blocked, now+b) end
  result=math.max(blocked-now,0)
@@ -534,8 +534,8 @@ class SQLiteTokenWindow(SharedTokenWindow):
         return self._file.path
 
     def _once(self, op: str, a: float, b: float, capacity: float, rate: float) -> float:
-        now = _core.wall_time()
         with self._file.connection() as conn:
+            now = _core.wall_time()
             row = conn.execute(
                 "SELECT level, stamp, blocked FROM windows WHERE name=?", (self.name,)
             ).fetchone()

@@ -36,10 +36,12 @@ from python_wrap.caching import (
     _TAG_PREFIX,
     CacheInfo,
     _async_tag_clients,
+    _async_tag_store_owners,
     _await_shared,
     _decode,
     _exception_types,
     _make_key_builder,
+    _register_tag_client,
     _shared_future,
     _tag_versions,
     _ttl_seconds,
@@ -513,11 +515,11 @@ def amemoize(
     tag_client: Any = getattr(store, "client", None) if tags is not None else None
     tag_async = tag_client is not None and _core.is_async(tag_client.get)
     if tag_async:
-        _async_tag_clients[id(tag_client)] = tag_client
+        _register_tag_client(_async_tag_clients, _async_tag_store_owners, tag_client, store)
     elif tag_client is not None:
-        from python_wrap.caching import _tag_clients
+        from python_wrap.caching import _tag_clients, _tag_store_owners
 
-        _tag_clients[id(tag_client)] = tag_client
+        _register_tag_client(_tag_clients, _tag_store_owners, tag_client, store)
 
     async def versions(names: list[str]) -> dict[str, str] | None:
         if not tag_async:

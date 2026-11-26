@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from python_wrap import memoize
 from python_wrap.observability import Telemetry
 
@@ -128,9 +130,7 @@ def _points(reader, name):
     ]
 
 
-def test_gave_up_counter_and_attempt_spans_with_durations():
-    import time
-
+def test_gave_up_counter_and_attempt_spans_with_durations(fake_clock: Any) -> None:
     import pytest
 
     from python_wrap import retry
@@ -140,7 +140,7 @@ def test_gave_up_counter_and_attempt_spans_with_durations():
 
     @retry(max_attempts=3, delay=0)
     def flaky():
-        time.sleep(0.002)
+        fake_clock.advance(0.002)
         raise ConnectionError
 
     handle = enable(

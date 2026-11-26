@@ -1,4 +1,4 @@
-# Continuous integration after changes land on main.
+# Continuous integration for pull requests and changes pushed to main.
 #
 # Jobs: lint (seconds), the test matrix, free-threaded Python with the stress suite, mypy,
 # a packaging check, live Redis, PostgreSQL and SQL Server backends, a framework version
@@ -13,7 +13,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'fix/**']
+  pull_request:
+  workflow_dispatch:
 
 # A force-push should not leave the previous run burning minutes on a dead commit.
 concurrency:
@@ -42,7 +44,7 @@ jobs:
           cache-dependency-glob: "uv.lock"
           python-version: "3.13"
 
-      - run: uv sync --group dev --frozen
+      - run: uv sync --no-default-groups --group core-test --frozen
 
       - name: ruff check
         run: uv run --no-sync ruff check src tests scripts/check_installed.py
@@ -107,7 +109,7 @@ jobs:
           cache-dependency-glob: "uv.lock"
           python-version: "3.14t"
 
-      - run: uv sync --group dev --frozen
+      - run: uv sync --no-default-groups --group core-test --frozen
 
       - name: The GIL must really be off
         run: uv run --no-sync python -c "import sys; assert not sys._is_gil_enabled()"
@@ -310,7 +312,7 @@ jobs:
           tests/test_sql_result_store.py
       - name: Install the Microsoft ODBC driver for SQL Server
         run: |
-          curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --dearmor -o /usr/share/keyrings/microsoft-prod.gpg
+          curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --batch --yes --dearmor -o /usr/share/keyrings/microsoft-prod.gpg
           curl -fsSL "https://packages.microsoft.com/config/ubuntu/$(lsb_release -rs)/prod.list" | sudo tee /etc/apt/sources.list.d/mssql-release.list
           sudo apt-get update
           sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18 unixodbc

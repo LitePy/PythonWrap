@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import gc
+import json
 import threading
 import time
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import pytest
 
 from python_wrap import ainvalidate_tags, amemoize, invalidate_tags, memoize
-from python_wrap.async_cache import AsyncMemoryStore
+from python_wrap.async_cache import AsyncMemoryStore, AsyncRedisStore
 from python_wrap.coordination import LocalLease
+from python_wrap.stores import RedisStore
 from python_wrap.testing import fake_clock
 
 
@@ -43,6 +47,80 @@ class DictStore:
 
     def __len__(self) -> int:
         return len(self.data)
+
+
+class SyncRedis:
+    def __init__(self) -> None:
+        self.data: dict[str, bytes] = {}
+        self.set_calls = 0
+        self.closed = False
+
+    def get(self, key: str) -> bytes | None:
+        return self.data.get(key)
+
+    def set(self, key: str, value: bytes, **_: Any) -> bool:
+        if self.closed:
+            raise RuntimeError("client is closed")
+        self.set_calls += 1
+        self.data[key] = value
+        return True
+
+    def delete(self, *keys: str) -> int:
+        return sum(self.data.pop(key, None) is not None for key in keys)
+
+    def scan_iter(self, **_: Any) -> Any:
+        return iter(self.data)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class AsyncRedis:
+    def __init__(self) -> None:
+        self.data: dict[str, bytes] = {}
+        self.set_calls = 0
+        self.closed = False
+
+    async def get(self, key: str) -> bytes | None:
+        return self.data.get(key)
+
+    async def set(self, key: str, value: bytes, **_: Any) -> bool:
+        if self.closed:
+            raise RuntimeError("client is closed")
+        self.set_calls += 1
+        self.data[key] = value
+        return True
+
+    async def delete(self, *keys: str) -> int:
+        return sum(self.data.pop(key, None) is not None for key in keys)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class SlottedRedis:
+    __slots__ = ("closed", "data", "set_calls")
+
+    def __init__(self) -> None:
+        self.data: dict[str, bytes] = {}
+        self.set_calls = 0
+        self.closed = False
+
+    def get(self, key: str) -> bytes | None:
+        return self.data.get(key)
+
+    def set(self, key: str, value: bytes, **_: Any) -> bool:
+        if self.closed:
+            raise RuntimeError("client is closed")
+        self.set_calls += 1
+        self.data[key] = value
+        return True
+
+    def delete(self, *keys: str) -> int:
+        return sum(self.data.pop(key, None) is not None for key in keys)
+
+    def scan_iter(self, **_: Any) -> Any:
+        return iter(self.data)
 
 
 def test_twenty_workers_missing_one_key_compute_once() -> None:
@@ -89,6 +167,70 @@ def test_invalidate_tags_makes_tagged_entries_miss() -> None:
     assert orders(7) == 3  # recomputed
     assert orders(8) == 2  # other tags untouched
     assert calls == [7, 8, 7]
+
+
+def test_redis_tag_registry_is_weak_and_explicit_client_is_deduplicated() -> None:
+    client = SyncRedis()
+    client_ref = weakref.ref(client)
+    store = RedisStore(client, "cache:", dumps=json.dumps, loads=json.loads)
+    calls: list[int] = []
+
+    @memoize(store=store, tags=lambda: ["t"])
+    def value() -> int:
+        calls.append(1)
+        return len(calls)
+
+    assert value() == 1
+    client.set_calls = 0
+    invalidate_tags("t", client=client)
+    assert client.set_calls == 1
+    assert value() == 2
+
+    client.close()
+    del value, store, client
+    gc.collect()
+    assert client_ref() is None
+    invalidate_tags("after-gc")
+
+
+def test_async_redis_tag_registry_is_weak_and_explicit_client_is_deduplicated() -> None:
+    client = AsyncRedis()
+    client_ref = weakref.ref(client)
+    store = AsyncRedisStore(client, "cache:", dumps=json.dumps, loads=json.loads)
+    calls: list[int] = []
+
+    @amemoize(store=store, tags=lambda: ["t"])
+    async def value() -> int:
+        calls.append(1)
+        return len(calls)
+
+    async def check(cache: Any, redis: AsyncRedis) -> None:
+        assert await cache() == 1
+        redis.set_calls = 0
+        await ainvalidate_tags("t", client=redis)
+        assert redis.set_calls == 1
+        assert await cache() == 2
+
+    asyncio.run(check(value, client))
+    client.close()
+    del value, store, client
+    gc.collect()
+    assert client_ref() is None
+    asyncio.run(ainvalidate_tags("after-gc"))
+
+
+def test_tagged_slotted_redis_client_uses_weak_store_owner() -> None:
+    client = SlottedRedis()
+    store = RedisStore(client, "slotted:", dumps=json.dumps, loads=json.loads)
+
+    @memoize(store=store, tags=lambda: ["slotted-tag"])
+    def value() -> int:
+        return 1
+
+    assert value() == 1
+    client.set_calls = 0
+    invalidate_tags("slotted-tag")
+    assert client.set_calls == 1
 
 
 def test_invalidation_during_compute_leaves_entry_stale() -> None:

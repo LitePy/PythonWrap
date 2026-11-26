@@ -154,6 +154,10 @@ async def _await_value(awaitable: Awaitable[Any]) -> Any:
 def _call_in_thread(fn: Callable[[], Any], remaining: float | None) -> bool:
     """Run ``fn`` (awaiting an awaitable result) in a daemon thread; False on timeout."""
     outcome: list[BaseException] = []
+    deadline = None if remaining is None else time.monotonic() + remaining
+
+    if deadline is not None and _remaining(deadline) == 0:
+        return False
 
     def target() -> None:
         try:
@@ -165,7 +169,11 @@ def _call_in_thread(fn: Callable[[], Any], remaining: float | None) -> bool:
 
     thread = threading.Thread(target=target, name="python-wrap-shutdown", daemon=True)
     thread.start()
-    thread.join(remaining)
+    while thread.is_alive():
+        left = _remaining(deadline)
+        if left == 0:
+            break
+        thread.join(left)
     if thread.is_alive():
         return False
     if outcome:
@@ -411,6 +419,10 @@ class ShutdownManager:
                 reports.append(
                     self._record(item.name, "ok" if finished else "timeout", None, began)
                 )
+                if item.kind == "callable" and left is not None and not finished:
+                    # `_call_in_thread` can return just after the deadline while a
+                    # coarse clock still reports a sliver left. Count it as spent.
+                    deadline = time.monotonic()
         return self._finish_strict(self._complete(reports, start), strict)
 
     def _run_sync(self, item: _Item, remaining: float | None) -> bool:
