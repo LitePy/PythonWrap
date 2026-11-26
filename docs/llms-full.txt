@@ -5115,6 +5115,16 @@ Every public name: `python_wrap.__all__` first, then names public only in a subm
   OpenTelemetry GenAI semantic-convention attributes for a ``genai.*`` event.
 - `python_wrap.observability.sentry_breadcrumbs`: `sentry_breadcrumbs(*, sentry: Any = None, prefixes: tuple[str, ...] = ('retry.', 'circuit.', 'timeout.', 'bulkhead.', 'rate_limit.')) -> Breadcrumbs | None`
   Record python-wrap events as Sentry breadcrumbs, so an error report shows its retries.
+- `python_wrap.policies.EnvSource`: `EnvSource(prefix: str = 'PW_POLICY_')`
+  ``PW_POLICY_<NAME>={JSON}`` environment variables (re-read on every poll).
+- `python_wrap.policies.FileSource`: `FileSource(path: str | os.PathLike[str])`
+  A JSON file holding ``{"name": {settings}, ...}``.
+- `python_wrap.policies.PolicySource`
+  Type alias: python_wrap.policies.PolicySource
+- `python_wrap.policies.RedisSource`: `RedisSource(client: Any, key: str = 'python-wrap:policies')`
+  One Redis string key holding the JSON mapping, shared by every replica.
+- `python_wrap.policies.Watch`: `Watch(registry: PolicyRegistry, source: PolicySource, interval: float)`
+  A running `PolicyRegistry.watch`; ``stop()`` ends it. Does not survive a fork.
 - `python_wrap.policy.ROLES`
   Constant: ('observe', 'validate', 'fallback', 'cache', 'limiter', 'bulkhead', 'breaker', 'retry', 'timeout', 'guard')
 - `python_wrap.predicates`

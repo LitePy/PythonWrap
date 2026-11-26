@@ -267,6 +267,37 @@ class CircuitBreaker:
         _fork.register(self)
         _BREAKERS.add(self)
 
+    def _adopt(self, old: CircuitBreaker) -> None:
+        """Carry ``old``'s in-process state into this breaker (a policy reload).
+
+        An open breaker stays open with the new thresholds. Shared breakers need
+        nothing: their state lives in the backend under the same name.
+        """
+        if self.backend is not None or old.backend is not None:
+            return
+        with old._lock:
+            snapshot = (
+                old._state,
+                old._failures,
+                old._opened_at,
+                deque(old._failure_times),
+                deque(list(slot) for slot in old._slots),
+                old._total_failures,
+                old._total_successes,
+                old._total_rejected,
+            )
+        with self._lock:
+            (
+                self._state,
+                self._failures,
+                self._opened_at,
+                self._failure_times,
+                self._slots,
+                self._total_failures,
+                self._total_successes,
+                self._total_rejected,
+            ) = snapshot
+
     def _reset_after_fork(self) -> None:
         # Shared backends remain authoritative; never reset their state from a child.
         self._pending.clear()

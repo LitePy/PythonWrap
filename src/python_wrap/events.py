@@ -139,6 +139,13 @@ EVENT_NAMES: Mapping[str, str] = MappingProxyType(
             "raised. function is the backend name. Fields: backend (str kind), operation "
             "(str), error (str, the exception class). The call then follows on_backend_error."
         ),
+        "config.changed": (
+            "A named policy was (re)loaded. function is the policy name. Fields: generation (int)."
+        ),
+        "config.rejected": (
+            "A watched policy source could not be read or validated; the current policies "
+            "stay. function is 'policies'. Fields: error (str, the exception class)."
+        ),
         "backend.recovered": (
             "A shared backend answered again after backend.error. Fields: backend (str)."
         ),

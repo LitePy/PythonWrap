@@ -28,6 +28,13 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
 
 ### Added
 
+- Policies can change at runtime: `policies.watch(source, interval=30)` with
+  `EnvSource`, `FileSource` or `RedisSource` validates and applies changed mappings,
+  emits `config.changed` / `config.rejected`, and keeps an open breaker open across a
+  reload. Mappings refer to exceptions, predicates and backends by name
+  (`"builtins.ConnectionError"`, `"db_transient"`, `"@default"`) through explicit
+  `register_exception` / `register_predicate` / `register_backend` registries; nothing
+  is imported by dotted path. Health reports include policy generations.
 - `guard_openai` guards `embeddings.create` (charging input tokens) and takes
   `limiter_key=` for one token window per deployment. Contract tests cover
   `AzureOpenAI`/`AsyncAzureOpenAI`, including a content-filter 400 that is not retried.
