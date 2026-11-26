@@ -49,6 +49,7 @@ dependencies = []
 # Not needed by python-wrap itself (the adapters read the SDKs by shape); these pin
 # SDK versions the adapters' contract tests run against.
 openai = ["openai>=1.40"]
+langchain = ["langchain-core>=0.3,<2"]
 anthropic = ["anthropic>=0.40"]
 pydantic-ai = ["pydantic-ai-slim>=2.0"]
 openai-agents = ["openai-agents>=0.24"]
@@ -70,6 +71,7 @@ dev = [
     "mypy>=2.4.1",
     "opentelemetry-api>=1.45.2",
     "opentelemetry-sdk>=1.45.1",
+    "langchain-core>=0.3,<2",
 ]
 docs = [
     "mkdocs-material>=9.5",

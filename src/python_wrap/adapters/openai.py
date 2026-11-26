@@ -5,6 +5,7 @@ shaped like one) in a proxy with the same call surface:
 
 - ``guarded.chat.completions.create(...)``
 - ``guarded.responses.create(...)``
+- ``guarded.embeddings.create(...)`` (charges input tokens; embeddings report no output)
 
 Each call goes through tracing (optional), the `Budget`, python-wrap's retry loop (the
 SDK's own retries are switched off with `no_sdk_retries`, so attempts never multiply),
@@ -13,8 +14,10 @@ your per-attempt ``policy`` and the `TokenRateLimiter`, which is lowered to the
 ``stream=True`` the result is a `ResumableStream`: reopened when it fails before any
 output, `StreamInterrupted` after. Chat streams get
 ``stream_options={"include_usage": True}`` (unless you pass ``stream_options``) so
-their usage can be charged. Every other attribute (``models``, ``embeddings``,
-``files``...) is the original client's, unguarded.
+their usage can be charged. Every other attribute (``models``,
+``files``...) is the original client's, unguarded. ``AzureOpenAI`` and
+``AsyncAzureOpenAI`` clients work the same way; their ``model`` argument is the
+deployment name, so map deployments in `Budget` ``prices=`` by deployment name.
 
 The ``openai`` package is never imported here.
 """
@@ -37,6 +40,7 @@ class GuardedOpenAI(GuardedClient):
         chat: ``chat.completions.create`` is guarded; other attributes pass through.
         responses: ``responses.create`` is guarded; ``retrieve``/``delete``... pass
             through.
+        embeddings: ``embeddings.create`` is guarded (budget, limiter, retries).
     """
 
     def __init__(self, client: Any, **options: Any) -> None:
@@ -45,6 +49,7 @@ class GuardedOpenAI(GuardedClient):
             self, ("chat",), completions=_Endpoint(self, ("chat", "completions"), "chat")
         )
         self.responses = _Endpoint(self, ("responses",), "responses")
+        self.embeddings = _Endpoint(self, ("embeddings",), "embeddings")
 
     def _primary(self) -> _Endpoint:
         return self.chat.completions  # type: ignore[no-any-return]
@@ -66,6 +71,7 @@ def guard_openai(
     chunk_gap: float | None = None,
     total: float | None = None,
     is_async: bool | None = None,
+    limiter_key: Callable[[Mapping[str, Any]], str] | None = None,
 ) -> GuardedOpenAI:
     """Wrap an OpenAI SDK client so every call is retried, budgeted and rate limited once.
 
@@ -92,6 +98,9 @@ def guard_openai(
         chunk_gap: Stall limit between stream events.
         total: Limit for a whole stream.
         is_async: Force sync/async; detected from the client class name otherwise.
+        limiter_key: ``limiter_key(kwargs) -> str`` gives each value its own token
+            window with ``limiter``'s settings, e.g. ``lambda kw: kw["model"]`` for one
+            window per Azure deployment (quotas there are per deployment and region).
 
     Returns:
         A `GuardedOpenAI`.
@@ -156,4 +165,5 @@ def guard_openai(
         chunk_gap=chunk_gap,
         total=total,
         is_async=is_async,
+        limiter_key=limiter_key,
     )

@@ -579,7 +579,16 @@ def read_usage(response: Any) -> Usage | None:
         return response
     raw = _field(response, "usage")
     if raw is None:
-        return None
+        raw = _field(response, "usage_metadata")  # LangChain AIMessage
+        if raw is None:
+            return None
+        meta = _field(response, "response_metadata")
+        model = _field(meta, "model_name") or _field(meta, "model")
+        inputs, outputs = _count(raw, "input_tokens"), _count(raw, "output_tokens")
+        if inputs is None and outputs is None:
+            return None
+        # LangChain's input_tokens already include cache reads.
+        return Usage(inputs or 0, outputs or 0, model if isinstance(model, str) and model else None)
     inputs = _count(raw, "input_tokens", "prompt_tokens")
     outputs = _count(raw, "output_tokens", "completion_tokens")
     if inputs is None and outputs is None:

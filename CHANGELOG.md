@@ -28,6 +28,14 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
 
 ### Added
 
+- `guard_openai` guards `embeddings.create` (charging input tokens) and takes
+  `limiter_key=` for one token window per deployment. Contract tests cover
+  `AzureOpenAI`/`AsyncAzureOpenAI`, including a content-filter 400 that is not retried.
+- LangChain adapter: `guard_chat_model()` rebuilds a chat model with `max_retries=0`
+  and runs `invoke`/`ainvoke` through the budget, retry loop, policy and token limiter;
+  `stream`/`astream` are resume-safe. `PythonWrapCallback` observes calls and emits
+  `genai.llm_call`. `read_usage` understands LangChain `usage_metadata`. New
+  `langchain` extra.
 - OpenTelemetry export reaches parity with the Prometheus exporter from one shared
   table (`observability.COUNTERS`): gave-up, budget-exhausted, rate-limit rejected,
   backend-error and store-error counters, plus a component health gauge. Opt-in

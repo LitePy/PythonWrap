@@ -370,6 +370,8 @@ class _Tracker:
             self.committed = True
             self.text_parts.append(event)
             return event
+        if _field(event, "usage_metadata") is not None or _field(event, "type") == "AIMessageChunk":
+            return self._langchain(event)
         kind = _field(event, "type")
         if isinstance(kind, str):
             return self._typed(kind, event)
@@ -490,6 +492,24 @@ class _Tracker:
             if _field(choice, "finish_reason") is not None:
                 self.finish_all()
         return "".join(added)
+
+    def _langchain(self, chunk: Any) -> str:
+        """A LangChain ``AIMessageChunk``: text in ``content``, usage on the last chunk."""
+        usage = _field(chunk, "usage_metadata")
+        if usage is not None:
+            self.usage.update(_usage_fields(usage))
+        meta = _field(chunk, "response_metadata")
+        name = _field(meta, "model_name") or _field(meta, "model")
+        if isinstance(name, str) and name:
+            self.model = name
+        content = _field(chunk, "content")
+        if _field(chunk, "tool_call_chunks"):
+            self.committed = True
+        if isinstance(content, str) and content:
+            self.committed = True
+            self.text_parts.append(content)
+            return content
+        return ""
 
     # -- results ---------------------------------------------------------------
     @property
@@ -1450,7 +1470,7 @@ class _Endpoint:
         try:
             result, headers = self._send(args, kwargs)
         except BaseException as exc:
-            guard._failed(cost, exc)
+            guard._failed(cost, exc, kwargs)
             raise
         guard._settled(cost, result, headers, kwargs)
         return result
@@ -1461,7 +1481,7 @@ class _Endpoint:
         try:
             result, headers = await self._asend(args, kwargs)
         except BaseException as exc:
-            guard._failed(cost, exc)
+            guard._failed(cost, exc, kwargs)
             raise
         guard._settled(cost, result, headers, kwargs)
         return result
@@ -1477,18 +1497,18 @@ class _Endpoint:
         try:
             stream, headers = self._send(args, kwargs)
         except BaseException as exc:
-            self._guard._seed_error(exc)
+            self._guard._seed_error(exc, kwargs)
             raise
-        self._guard._seed(headers)
+        self._guard._seed(headers, kwargs)
         return stream
 
     async def _aopen(self, args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> Any:
         try:
             stream, headers = await self._asend(args, kwargs)
         except BaseException as exc:
-            self._guard._seed_error(exc)
+            self._guard._seed_error(exc, kwargs)
             raise
-        self._guard._seed(headers)
+        self._guard._seed(headers, kwargs)
         return stream
 
     def _stream(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> ResumableStream[Any]:
@@ -1624,6 +1644,7 @@ class _Admission:
 
     scope: str | None
     cost: int
+    request: Mapping[str, Any] | None = None
 
 
 class GuardedClient:
@@ -1665,7 +1686,12 @@ class GuardedClient:
         chunk_gap: float | None = None,
         total: float | None = None,
         is_async: bool | None = None,
+        limiter_key: Callable[[Mapping[str, Any]], str] | None = None,
     ) -> None:
+        if limiter_key is not None and getattr(limiter, "_store", None) is not None:
+            # shortcut: per-key windows are in-process only; upgrade when a shared token
+            # window can be cloned under a new name.
+            raise ValueError("limiter_key needs an in-process TokenRateLimiter (no store=)")
         if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 1:
             raise ValueError(f"attempts must be an integer >= 1, got {attempts!r}")
         if retry is not None and ("max_attempts" in retry or "owns_retries" in retry):
@@ -1681,6 +1707,8 @@ class GuardedClient:
                 # a client without its own retry loop (a fake, a thin wrapper): use as is
         self.system = system
         self.budget, self.limiter, self.policy = budget, limiter, policy
+        self.limiter_key = limiter_key
+        self._limiters: dict[str, TokenRateLimiter] = {}
         self.attempts = attempts if owns_retries else 1
         self.owns_retries = owns_retries
         self._retry_options = dict(retry or {})
@@ -1737,28 +1765,48 @@ class GuardedClient:
 
     def _reserve(self, args: tuple[Any, ...], kwargs: Mapping[str, Any], label: str) -> int:
         cost = self._estimate(args, kwargs)
-        if self.limiter is not None and not _core.overrides.disable_rate_limits:
-            self.limiter.acquire(cost, label=label)
+        limiter = self._limiting(kwargs)
+        if limiter is not None:
+            limiter.acquire(cost, label=label)
         return cost
 
     async def _areserve(self, args: tuple[Any, ...], kwargs: Mapping[str, Any], label: str) -> int:
         cost = self._estimate(args, kwargs)
-        if self.limiter is not None and not _core.overrides.disable_rate_limits:
-            await self.limiter.aacquire(cost, label=label)
+        limiter = self._limiting(kwargs)
+        if limiter is not None:
+            await limiter.aacquire(cost, label=label)
         return cost
 
-    def _limiting(self) -> TokenRateLimiter | None:
-        if self.limiter is None or _core.overrides.disable_rate_limits:
+    def _limiting(self, request: Mapping[str, Any] | None = None) -> TokenRateLimiter | None:
+        """The limiter for this request: one window per ``limiter_key`` value, if set."""
+        limiter = self.limiter
+        if limiter is None or _core.overrides.disable_rate_limits:
             return None
-        return self.limiter
+        if self.limiter_key is None or request is None:
+            return limiter
+        key = str(self.limiter_key(request))
+        found = self._limiters.get(key)
+        if found is None:
+            found = self._limiters.setdefault(
+                key,
+                TokenRateLimiter(
+                    limiter.tokens_per_minute,
+                    estimate=limiter._estimate,
+                    usage=limiter.usage,
+                    block=limiter.block,
+                    max_wait=limiter.max_wait,
+                    name=f"{limiter.name}:{key}",
+                ),
+            )
+        return found
 
-    def _seed(self, headers: Any) -> None:
-        limiter = self._limiting()
+    def _seed(self, headers: Any, request: Mapping[str, Any] | None = None) -> None:
+        limiter = self._limiting(request)
         if limiter is not None:
             seed_limiter(limiter, headers)
 
-    def _seed_error(self, exc: BaseException) -> None:
-        limiter = self._limiting()
+    def _seed_error(self, exc: BaseException, request: Mapping[str, Any] | None = None) -> None:
+        limiter = self._limiting(request)
         if limiter is None:
             return
         status = _int(_field(exc, "status_code")) or _int(
@@ -1767,14 +1815,16 @@ class GuardedClient:
         hint = llm_retry_after(exc) if status == 429 else None
         seed_limiter(limiter, _headers_of(exc), retry_after=hint)
 
-    def _failed(self, cost: int, exc: BaseException) -> None:
-        limiter = self._limiting()
+    def _failed(
+        self, cost: int, exc: BaseException, request: Mapping[str, Any] | None = None
+    ) -> None:
+        limiter = self._limiting(request)
         if limiter is not None:
             limiter.settle(cost, 0)
-            self._seed_error(exc)
+            self._seed_error(exc, request)
 
     def _settled(self, cost: int, result: Any, headers: Any, kwargs: Mapping[str, Any]) -> None:
-        limiter = self._limiting()
+        limiter = self._limiting(kwargs)
         if limiter is not None:
             usage = read_usage(result)
             limiter.settle(cost, cost if usage is None else usage.total_tokens)
@@ -1794,20 +1844,20 @@ class GuardedClient:
 
     def _admit(self, args: tuple[Any, ...], kwargs: Mapping[str, Any], label: str) -> _Admission:
         scope = self._scope(args, kwargs, label)
-        return _Admission(scope, self._reserve(args, kwargs, label))
+        return _Admission(scope, self._reserve(args, kwargs, label), kwargs)
 
     async def _aadmit(
         self, args: tuple[Any, ...], kwargs: Mapping[str, Any], label: str
     ) -> _Admission:
         scope = self._scope(args, kwargs, label)
-        return _Admission(scope, await self._areserve(args, kwargs, label))
+        return _Admission(scope, await self._areserve(args, kwargs, label), kwargs)
 
     def _release(self, admission: _Admission, error: BaseException | None = None) -> None:
         """Refund a reservation whose call produced nothing."""
         if error is not None:
-            self._failed(admission.cost, error)
+            self._failed(admission.cost, error, admission.request)
         else:
-            limiter = self._limiting()
+            limiter = self._limiting(admission.request)
             if limiter is not None:
                 limiter.settle(admission.cost, 0)
 
@@ -1816,7 +1866,7 @@ class GuardedClient:
         usage = read_usage(response)
         if self.budget is not None and admission.scope is not None:
             self.budget._add(admission.scope, usage)
-        limiter = self._limiting()
+        limiter = self._limiting(admission.request)
         if limiter is not None:
             limiter.settle(admission.cost, admission.cost if usage is None else usage.total_tokens)
         if self.cache_guard is not None:

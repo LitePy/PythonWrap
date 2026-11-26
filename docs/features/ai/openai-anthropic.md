@@ -3,7 +3,7 @@
 `guard_openai` and `guard_anthropic` put python-wrap around the official OpenAI and
 Anthropic Python SDK clients without changing how you call them. The guarded client
 has the same call surface (`chat.completions.create`, `responses.create`,
-`messages.create`, `messages.stream`, `beta.messages.tool_runner`) and every call goes
+`embeddings.create`, `messages.create`, `messages.stream`, `beta.messages.tool_runner`) and every call goes
 through one retry loop, a spend `Budget`, a token rate limit that follows the provider's
 rate-limit headers, and streams that are reopened only when that is safe.
 
@@ -198,7 +198,10 @@ Usage is read from the real response objects: OpenAI `usage.prompt_tokens` /
 (Responses), Anthropic `usage.input_tokens` / `output_tokens` plus
 `cache_read_input_tokens` and `cache_creation_input_tokens`.
 
-Attributes the guard does not wrap (`models`, `embeddings`, `files`,
+`embeddings.create` gets the same layers: budget, token limiter and retries. It is
+charged input tokens only, since embeddings report no output tokens.
+
+Attributes the guard does not wrap (`models`, `files`,
 `messages.count_tokens`, `messages.batches`...) are the original client's, with its own
 SDK retries. `guarded.raw` is the client you passed, `guarded.client` the copy calls go
 through, and `guarded.doctor()` lints the per-call stack.
@@ -369,6 +372,44 @@ with warnings.catch_warnings(record=True) as caught:
 assert guard.volatile == ("uuid",)
 assert [w.category for w in caught] == [PromptCacheWarning, PromptCacheWarning]
 assert guard.stats().hit_rate == 0.0
+```
+
+## Azure-hosted OpenAI clients
+
+`guard_openai` accepts `openai.AzureOpenAI` and `openai.AsyncAzureOpenAI`. Async is
+detected from the class name, as for `AsyncOpenAI`.
+
+Tested with the real SDK over a mock transport: async detection, the copy with
+`max_retries=0`, reading `x-ratelimit-remaining-tokens` from the raw response, a
+content-filter 400 that is raised after one attempt (not retried), and embeddings
+charged on every call.
+
+Not tested: Azure-specific rate-limit headers beyond `x-ratelimit-remaining-tokens`,
+Entra ID token refresh, and regional failover.
+
+On Azure, `model=` is the deployment name. Quotas are per deployment and region, so
+pass `limiter_key` to keep one token window per deployment. Each key gets the shared
+limiter's settings. `limiter_key` works with in-process limiters only: a
+`TokenRateLimiter` with `store=` raises `ValueError`.
+
+`Budget(prices=...)` matches model names by prefix. A deployment name usually does not
+start with the model name, so key prices by deployment name. Prices are dollars per
+million input and output tokens.
+
+<!-- skip -->
+```python
+from openai import AzureOpenAI
+
+from python_wrap.adapters import guard_openai
+from python_wrap.llm import Budget, TokenRateLimiter
+
+client = guard_openai(
+    AzureOpenAI(azure_endpoint="https://example.invalid", api_version="2024-06-01"),
+    budget=Budget(usd=50, per="day", prices={"chat-east": (2.5, 10.0), "embed-east": (0.02, 0.0)}),
+    limiter=TokenRateLimiter(tokens_per_minute=80_000),
+    limiter_key=lambda kwargs: kwargs["model"],
+)
+client.embeddings.create(model="embed-east", input=["first document"])
 ```
 
 ## Doctor checks

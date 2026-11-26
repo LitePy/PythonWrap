@@ -1581,7 +1581,7 @@ Source: https://pythonwrap.readthedocs.io/features/ai/openai-anthropic/
 `guard_openai` and `guard_anthropic` put python-wrap around the official OpenAI and
 Anthropic Python SDK clients without changing how you call them. The guarded client
 has the same call surface (`chat.completions.create`, `responses.create`,
-`messages.create`, `messages.stream`, `beta.messages.tool_runner`) and every call goes
+`embeddings.create`, `messages.create`, `messages.stream`, `beta.messages.tool_runner`) and every call goes
 through one retry loop, a spend `Budget`, a token rate limit that follows the provider's
 rate-limit headers, and streams that are reopened only when that is safe.
 
@@ -1776,7 +1776,10 @@ Usage is read from the real response objects: OpenAI `usage.prompt_tokens` /
 (Responses), Anthropic `usage.input_tokens` / `output_tokens` plus
 `cache_read_input_tokens` and `cache_creation_input_tokens`.
 
-Attributes the guard does not wrap (`models`, `embeddings`, `files`,
+`embeddings.create` gets the same layers: budget, token limiter and retries. It is
+charged input tokens only, since embeddings report no output tokens.
+
+Attributes the guard does not wrap (`models`, `files`,
 `messages.count_tokens`, `messages.batches`...) are the original client's, with its own
 SDK retries. `guarded.raw` is the client you passed, `guarded.client` the copy calls go
 through, and `guarded.doctor()` lints the per-call stack.
@@ -1949,6 +1952,44 @@ assert [w.category for w in caught] == [PromptCacheWarning, PromptCacheWarning]
 assert guard.stats().hit_rate == 0.0
 ```
 
+### Azure-hosted OpenAI clients
+
+`guard_openai` accepts `openai.AzureOpenAI` and `openai.AsyncAzureOpenAI`. Async is
+detected from the class name, as for `AsyncOpenAI`.
+
+Tested with the real SDK over a mock transport: async detection, the copy with
+`max_retries=0`, reading `x-ratelimit-remaining-tokens` from the raw response, a
+content-filter 400 that is raised after one attempt (not retried), and embeddings
+charged on every call.
+
+Not tested: Azure-specific rate-limit headers beyond `x-ratelimit-remaining-tokens`,
+Entra ID token refresh, and regional failover.
+
+On Azure, `model=` is the deployment name. Quotas are per deployment and region, so
+pass `limiter_key` to keep one token window per deployment. Each key gets the shared
+limiter's settings. `limiter_key` works with in-process limiters only: a
+`TokenRateLimiter` with `store=` raises `ValueError`.
+
+`Budget(prices=...)` matches model names by prefix. A deployment name usually does not
+start with the model name, so key prices by deployment name. Prices are dollars per
+million input and output tokens.
+
+<!-- skip -->
+```python
+from openai import AzureOpenAI
+
+from python_wrap.adapters import guard_openai
+from python_wrap.llm import Budget, TokenRateLimiter
+
+client = guard_openai(
+    AzureOpenAI(azure_endpoint="https://example.invalid", api_version="2024-06-01"),
+    budget=Budget(usd=50, per="day", prices={"chat-east": (2.5, 10.0), "embed-east": (0.02, 0.0)}),
+    limiter=TokenRateLimiter(tokens_per_minute=80_000),
+    limiter_key=lambda kwargs: kwargs["model"],
+)
+client.embeddings.create(model="embed-east", input=["first document"])
+```
+
 ### Doctor checks
 
 | Code | Severity | Problem |
@@ -1973,6 +2014,144 @@ The adapters are tested three ways:
 
 See [`examples/sdk_adapters/guarded_clients.py`](https://github.com/LitePy/PythonWrap/blob/main/examples/sdk_adapters/guarded_clients.py)
 for both guards, streaming and the cache guard together, offline.
+
+---
+
+Source: https://pythonwrap.readthedocs.io/features/ai/langchain/
+
+## LangChain chat models
+
+`guard_chat_model` puts python-wrap around a LangChain chat model without changing how
+you call it. The guarded model has the same `invoke`, `ainvoke`, `stream` and `astream`
+calls. Every call goes through one retry loop, a spend `Budget`, a token rate limit that
+follows the provider's rate-limit headers, and streams that are reopened only when that
+is safe.
+
+python-wrap never imports LangChain. Install the extra, which pins the `langchain-core`
+versions the adapter is tested against:
+
+```bash
+pip install "python-wrap[langchain]"
+```
+
+| Problem | Tool |
+| --- | --- |
+| python-wrap retries x LangChain and SDK retries | `guard_chat_model(model, ...)`, `without_retries(model)` |
+| LangChain builds the SDK client, so `guard_openai` cannot be used | `guard_chat_model(model, ...)` |
+| A chain or model you cannot wrap still needs observing | `PythonWrapCallback()` |
+
+### Why not a plain retry
+
+LangChain chat models retry by themselves. `max_retries` on the model and
+`.with_retry()` on a runnable both add attempts on top of the provider SDK's own
+retries. A python-wrap retry around them multiplies those attempts, and its
+`RetryBudget` never sees the waits.
+
+`guard_chat_model` removes the extra layers. It rebuilds the model from the fields you
+set plus `max_retries=0`, so the provider client is created without SDK retries and
+python-wrap owns the retry loop. The original model is unchanged.
+
+### Quick start
+
+<!-- skip -->
+```python
+from langchain_openai import ChatOpenAI
+from python_wrap.adapters import guard_chat_model
+from python_wrap.llm import Budget, TokenRateLimiter
+
+model = guard_chat_model(
+    ChatOpenAI(model="gpt-4o-mini", include_response_headers=True, stream_usage=True),
+    budget=Budget(tokens=200_000, per="day"),
+    limiter=TokenRateLimiter(tokens_per_minute=90_000),
+    attempts=4,
+)
+reply = model.invoke("Summarise the release notes")
+```
+
+`include_response_headers=True` lets the limiter read the provider's rate-limit headers
+from `response_metadata["headers"]`. `stream_usage=True` makes a stream report its usage
+on the last chunk, so the budget can be charged.
+
+### Options
+
+`guard_chat_model(model, *, budget=None, limiter=None, policy=None, attempts=4,
+retry=None, trace=False, first_token=None, chunk_gap=None, total=None)` takes:
+
+| Option | Does |
+| --- | --- |
+| `budget=` | A `Budget`. Checked before each call and charged once, with the final `usage_metadata`. |
+| `limiter=` | A `TokenRateLimiter`. Reserves an estimate per attempt and settles with the real usage. |
+| `policy=` | Your per-attempt decorator, for example a timeout or a circuit breaker. Keep retries out of it. |
+| `attempts=` | How many attempts the python-wrap retry loop makes. |
+| `retry=` | Extra retry options, such as `delay`. See [Retry](../resilience/retry.md). |
+| `trace=` | Emits one `genai.llm_call` event per call. See [observability](observability.md). |
+| `first_token=`, `chunk_gap=`, `total=` | Stream timing limits, used by the stream wrapper. |
+
+The guard returns a `GuardedChatModel`. A `.with_retry()` wrapper raises `ValueError`
+because it would add its own retries. Unwrap it first and pass the model it wraps.
+
+### What a guarded call goes through
+
+Outermost first, for every `invoke` and `ainvoke`:
+
+1. **Tracing** (`trace=`): one `genai.llm_call` event per call.
+2. **`budget=`**: refused with `BudgetExceeded` before the request when the scope is
+   spent. Charged once afterwards with the final `usage_metadata`, so a retried call
+   costs what the answer cost, not each attempt.
+3. **Retries**: python-wrap's retry loop, `attempts=` attempts with the `retry=`
+   options.
+4. **`policy=`**: your per-attempt decorator, run once per attempt.
+5. **`limiter=`**: reserves an estimate per attempt, settles with the real usage and
+   refunds a failed attempt. When the provider's headers carry the remaining tokens,
+   the bucket is lowered to match.
+
+The SDK client of the rebuilt model makes one HTTP request per attempt. The two layers
+never retry the same request.
+
+### Rebuilding the model
+
+`guard_chat_model` also accepts a `bind_tools(...)` binding around a model. The model
+under it is rebuilt, and the binding is kept.
+
+If you only need the rebuild, call `without_retries(model)`. It returns the same model
+with `max_retries=0` and no python-wrap layers.
+
+Only `invoke`, `ainvoke`, `stream` and `astream` are guarded. Every other attribute,
+such as `batch` or `bind_tools`, belongs to the retry-free model and is not guarded.
+Use the guarded model for the calls that must be counted and retried.
+
+### Streams
+
+`stream` and `astream` return a resumable stream. It is reopened on a transient error
+only before any chunk was handed out. After that, a failure raises
+`StreamInterrupted`, because opening the stream again would repeat text or tool calls.
+
+The usage on the last chunk's `usage_metadata` is charged when the stream ends, even
+when it is interrupted. Use `first_token=`, `chunk_gap=` and `total=` to bound how long
+the stream may stall. See [SDK clients](openai-anthropic.md#streams-that-never-replay-a-tool-call)
+for the stream rules, which are the same here.
+
+### Observe without wrapping
+
+When the model cannot be wrapped, for example inside a chain you do not build, add
+`PythonWrapCallback` to the callbacks. It only observes: tokens, latency, model and
+errors go into the `genai.llm_call` event. It captures no content and never changes a
+call.
+
+<!-- skip -->
+```python
+from python_wrap.adapters import PythonWrapCallback
+
+result = chain.invoke(x, config={"callbacks": [PythonWrapCallback()]})
+```
+
+`PythonWrapCallback(name="langchain")` sets the name the event carries. Use the default
+unless you run several chains and need to tell them apart.
+
+### Testing
+
+The adapter is tested against langchain-core's real `BaseChatModel`. Two 429 responses
+followed by a success make three provider calls, and the budget is charged once.
 
 ---
 
@@ -4438,7 +4617,7 @@ Every public name: `python_wrap.__all__` first, then names public only in a subm
   Return a copy of the current configuration.
 - `python_wrap.guard_anthropic`: `guard_anthropic(client: Any, *, budget: Budget | None = None, limiter: TokenRateLimiter | None = None, policy: Callable[[Callable[..., Any]], Callable[..., Any]] | None = None, attempts: int = 4, retry: Mapping[str, Any] | None = None, owns_retries: bool = True, trace: bool | Mapping[str, Any] = False, cache_guard: CacheGuard | None = None, read_headers: bool = True, first_token: float | None = None, chunk_gap: float | None = None, total: float | None = None, is_async: bool | None = None) -> GuardedAnthropic`
   Wrap an Anthropic SDK client so every call is retried, budgeted and rate limited once.
-- `python_wrap.guard_openai`: `guard_openai(client: Any, *, budget: Budget | None = None, limiter: TokenRateLimiter | None = None, policy: Callable[[Callable[..., Any]], Callable[..., Any]] | None = None, attempts: int = 4, retry: Mapping[str, Any] | None = None, owns_retries: bool = True, trace: bool | Mapping[str, Any] = False, cache_guard: CacheGuard | None = None, read_headers: bool = True, first_token: float | None = None, chunk_gap: float | None = None, total: float | None = None, is_async: bool | None = None) -> GuardedOpenAI`
+- `python_wrap.guard_openai`: `guard_openai(client: Any, *, budget: Budget | None = None, limiter: TokenRateLimiter | None = None, policy: Callable[[Callable[..., Any]], Callable[..., Any]] | None = None, attempts: int = 4, retry: Mapping[str, Any] | None = None, owns_retries: bool = True, trace: bool | Mapping[str, Any] = False, cache_guard: CacheGuard | None = None, read_headers: bool = True, first_token: float | None = None, chunk_gap: float | None = None, total: float | None = None, is_async: bool | None = None, limiter_key: Callable[[Mapping[str, Any]], str] | None = None) -> GuardedOpenAI`
   Wrap an OpenAI SDK client so every call is retried, budgeted and rate limited once.
 - `python_wrap.health`
   Constant: <python_wrap.health.HealthRegistry object>
@@ -4614,14 +4793,20 @@ Every public name: `python_wrap.__all__` first, then names public only in a subm
   What a `CacheGuard` has seen.
 - `python_wrap.adapters.GuardedAnthropic`: `GuardedAnthropic(client: Any, **options: Any)`
   The proxy `guard_anthropic` returns; see `GuardedClient` for the layers.
-- `python_wrap.adapters.GuardedClient`: `GuardedClient(client: Any, *, system: str, budget: Budget | None = None, limiter: TokenRateLimiter | None = None, policy: Callable[[Callable[..., Any]], Callable[..., Any]] | None = None, attempts: int = 4, retry: Mapping[str, Any] | None = None, owns_retries: bool = True, trace: bool | Mapping[str, Any] = False, cache_guard: CacheGuard | None = None, read_headers: bool = True, first_token: float | None = None, chunk_gap: float | None = None, total: float | None = None, is_async: bool | None = None)`
+- `python_wrap.adapters.GuardedChatModel`: `GuardedChatModel(model: Any, **options: Any)`
+  The wrapper `guard_chat_model` returns.
+- `python_wrap.adapters.GuardedClient`: `GuardedClient(client: Any, *, system: str, budget: Budget | None = None, limiter: TokenRateLimiter | None = None, policy: Callable[[Callable[..., Any]], Callable[..., Any]] | None = None, attempts: int = 4, retry: Mapping[str, Any] | None = None, owns_retries: bool = True, trace: bool | Mapping[str, Any] = False, cache_guard: CacheGuard | None = None, read_headers: bool = True, first_token: float | None = None, chunk_gap: float | None = None, total: float | None = None, is_async: bool | None = None, limiter_key: Callable[[Mapping[str, Any]], str] | None = None)`
   The proxy `guard_openai` and `guard_anthropic` return.
 - `python_wrap.adapters.GuardedOpenAI`: `GuardedOpenAI(client: Any, **options: Any)`
   The proxy `guard_openai` returns; see `GuardedClient` for the layers.
 - `python_wrap.adapters.PromptCacheWarning`
   Prompt caching looks ineffective (`CacheGuard`).
+- `python_wrap.adapters.PythonWrapCallback`: `PythonWrapCallback(name: str = 'langchain')`
+  A LangChain callback handler that observes calls and emits ``genai.llm_call``.
 - `python_wrap.adapters.StreamedToolCall`: `StreamedToolCall(id: str | None, name: str | None, arguments: str, index: int)`
   A tool call assembled from stream events.
+- `python_wrap.adapters.guard_chat_model`: `guard_chat_model(model: Any, *, budget: Budget | None = None, limiter: TokenRateLimiter | None = None, policy: Callable[[Callable[..., Any]], Callable[..., Any]] | None = None, attempts: int = 4, retry: Mapping[str, Any] | None = None, trace: bool | Mapping[str, Any] = False, first_token: float | None = None, chunk_gap: float | None = None, total: float | None = None) -> GuardedChatModel`
+  Wrap a LangChain chat model so each call is retried, budgeted and limited once.
 - `python_wrap.adapters.sdk_max_retries`: `sdk_max_retries(client: Any) -> int | None`
   The ``max_retries`` an SDK client (or a guard around one) is set to, or None.
 - `python_wrap.adapters.seed_limiter`: `seed_limiter(limiter: TokenRateLimiter, headers: Any = None, *, retry_after: float | None = None) -> None`
