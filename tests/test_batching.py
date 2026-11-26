@@ -429,12 +429,18 @@ def test_sync_leader_timing_out_after_a_flush_started_waits_for_it():
 def test_sync_duplicates_share_a_result():
     calls = []
 
-    @batch_calls(max_size=2, max_wait=10, key=str.lower)
+    @batch_calls(max_size=3, max_wait=1, key=str.lower)
     def load(names: list[str]) -> dict[str, int]:
         calls.append(list(names))
         return {n.lower(): len(calls) for n in names}
 
-    results, _ = run_threads(3, lambda i: load(["A", "a", "b"][i]))
+    callers = threading.Barrier(3)
+
+    def call(i: int) -> int:
+        callers.wait()
+        return load(["A", "a", "b"][i])
+
+    results, _ = run_threads(3, call)
     assert results == [1, 1, 1]
     assert len(calls) == 1
     assert sorted(n.lower() for n in calls[0]) == ["a", "b"]

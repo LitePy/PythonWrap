@@ -400,10 +400,10 @@ def llm_retry(
 
             @functools.wraps(func)
             async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
-                state = _RETRY_SCOPE.get()
+                state = _active_retry_scope()
                 if single(state):
                     return await afunc(*args, **kwargs)
-                token = _RETRY_SCOPE.set(state if state == "owner" else mark)
+                token = _RETRY_SCOPE.set((state if state == "owner" else mark, _retry_identity()))
                 try:
                     return await looped(*args, **kwargs)
                 finally:
@@ -414,10 +414,10 @@ def llm_retry(
 
             @functools.wraps(func)
             def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
-                state = _RETRY_SCOPE.get()
+                state = _active_retry_scope()
                 if single(state):
                     return func(*args, **kwargs)
-                token = _RETRY_SCOPE.set(state if state == "owner" else mark)
+                token = _RETRY_SCOPE.set((state if state == "owner" else mark, _retry_identity()))
                 try:
                     return looped(*args, **kwargs)
                 finally:
@@ -434,11 +434,34 @@ def llm_retry(
     return decorate
 
 
-#: None outside any `llm_retry`, ``"loop"`` inside one, ``"owner"`` inside an
-#: ``owns_retries=True`` one (where nested retries make a single attempt).
-_RETRY_SCOPE: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+#: Current retry scope and its task/thread identity. The scope is ignored when a copied
+#: context runs under a different identity.
+_RETRY_SCOPE: contextvars.ContextVar[tuple[str, object] | None] = contextvars.ContextVar(
     "python_wrap_llm_retry_scope", default=None
 )
+
+
+def _retry_identity() -> object:
+    """Identify the task or thread that owns an LLM retry scope.
+
+    Context variables can be explicitly copied into a new thread, and free-threaded
+    Python may inherit them by default. A copied scope must not suppress retries in an
+    independent execution owner.
+    """
+    try:
+        task = asyncio.current_task()
+    except RuntimeError:
+        task = None
+    if task is not None:
+        return task
+    return threading.current_thread()
+
+
+def _active_retry_scope() -> str | None:
+    scope = _RETRY_SCOPE.get()
+    if scope is None or scope[1] is not _retry_identity():
+        return None
+    return scope[0]
 
 
 def _sdk_retries(client: Any) -> int | None:

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import copy
 import json
 import threading
@@ -561,7 +562,10 @@ def test_owner_scope_is_per_task_and_thread(fake_clock: FakeClock) -> None:
 
     @llm_retry(max_attempts=2, delay=1, jitter=0, owns_retries=True)
     def owner() -> None:
-        thread = threading.Thread(target=in_thread)
+        # Model Python versions/configurations where a new thread inherits the
+        # parent's ContextVars. The copied scope belongs to the parent thread only.
+        context = contextvars.copy_context()
+        thread = threading.Thread(target=lambda: context.run(in_thread))
         thread.start()
         thread.join()
         raise Overloaded
