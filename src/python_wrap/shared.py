@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import hashlib
 import math
 import threading
 import uuid
@@ -58,7 +59,7 @@ else
  elseif (op=='success' or op=='failure' or op=='neutral') and tonumber(ARGV[7])==gen then
   if tonumber(ARGV[8])==1 then trials=math.max(0,trials-1) end
   if op=='success' then
-   redis.call('HINCRBY',KEYS[1],'total_successes',1)
+   redis.call('HINCRBY',KEYS[1],'total_successes',tonumber(ARGV[10] or '1'))
    if state=='half_open' then
     successes=successes+1
     if successes>=target then state='closed'; gen=gen+1; failures=0; redis.call('DEL',KEYS[2]) end
@@ -83,6 +84,15 @@ return {admitted,state,gen,trial,wait,failures,
  redis.call('HGET',KEYS[1],'total_successes') or '0',
  redis.call('HGET',KEYS[1],'total_rejected') or '0',opened,old}
 """
+
+
+_BREAKER_SHA = hashlib.sha1(_BREAKER.encode()).hexdigest()
+
+
+def _no_script(exc: Exception) -> bool:
+    """True for Redis's NOSCRIPT reply (redis-py: NoScriptError, "No matching script")."""
+    text = str(exc)
+    return type(exc).__name__ == "NoScriptError" or "NOSCRIPT" in text or "No matching" in text
 
 
 _BUDGET = """
@@ -163,25 +173,118 @@ class RedisBreakerState:
     """Atomic Redis breaker state, window failures and bounded half-open trial leases.
 
     Use the same name and settings in every process. Keys share a Redis Cluster hash
-    tag. Backend errors propagate; they are never interpreted as a healthy dependency.
-    Half-open reservations expire after recovery_timeout (minimum one second), so a
-    crashed probing worker cannot permanently consume the trial slot.
+    tag. Backend errors reach the breaker, which applies its ``on_backend_error``; they
+    are never read as a healthy dependency. Half-open reservations expire after
+    recovery_timeout (minimum one second), so a crashed probing worker cannot
+    permanently consume the trial slot.
+
+    A closed state read from the store is trusted for ``state_ttl`` seconds: during that
+    time calls are admitted without a round trip, successes are counted locally and sent
+    in one batch every ``flush_interval`` seconds or ``flush_every`` calls, and the
+    breaker's ``state``/``stats`` come from the cached answer. Failures, half-open trials
+    and admin calls always go to the store. The trade: a process may keep admitting calls
+    for up to ``state_ttl`` after another process opened the breaker. ``state_ttl=0``
+    sends every call to the store. The script runs with ``EVALSHA`` and is loaded again
+    on ``NOSCRIPT``.
     """
 
-    def __init__(self, client: Any, prefix: str = "python-wrap:breaker:") -> None:
+    def __init__(
+        self,
+        client: Any,
+        prefix: str = "python-wrap:breaker:",
+        *,
+        state_ttl: float = 1.0,
+        flush_interval: float = 1.0,
+        flush_every: int = 1000,
+    ) -> None:
         if not prefix:
             raise ValueError("prefix must not be empty")
+        if not math.isfinite(state_ttl) or state_ttl < 0:
+            raise ValueError("state_ttl must be >= 0")
+        if not math.isfinite(flush_interval) or flush_interval < 0:
+            raise ValueError("flush_interval must be >= 0")
+        if isinstance(flush_every, bool) or not isinstance(flush_every, int) or flush_every < 1:
+            raise ValueError("flush_every must be a positive integer")
         self.client, self.prefix = client, prefix
+        self.state_ttl, self.flush_interval, self.flush_every = (
+            state_ttl,
+            flush_interval,
+            flush_every,
+        )
+        # breaker name -> [last closed answer, read at, pending successes, last flush]
+        self._cache: dict[str, list[Any]] = {}
+        self._lock = _fork.ForkSafeLock()
+        _fork.register(self)
+
+    def _reset_after_fork(self) -> None:
+        self._cache.clear()
+
+    def _local(self, breaker: Any, operation: str, trial: bool) -> tuple[Any, int, int]:
+        """``(answer or None, successes to flush, their generation)`` from the cache."""
+        if self.state_ttl == 0 or trial:
+            return None, 0, 0
+        now = _core.monotonic()
+        with self._lock:
+            entry = self._cache.get(breaker.name)
+            if entry is None:
+                return None, 0, 0
+            data, read_at, pending, flushed = entry
+            generation = data["generation"]
+            if operation in {"failure", "reset", "force_open"} or now - read_at >= self.state_ttl:
+                # The store answers; a failure (or a refresh) carries batched successes first.
+                entry[2], entry[3] = 0, now
+                return None, 0 if operation in {"reset", "force_open"} else pending, generation
+            if operation == "success":
+                pending += 1
+                if pending >= self.flush_every or now - flushed >= self.flush_interval:
+                    entry[2], entry[3] = 0, now
+                    return dict(data, old=data["state"]), pending, generation
+                entry[2] = pending
+            answer = dict(data, admitted=1, trial=0, wait=0, old=data["state"])
+            answer["total_successes"] = data["total_successes"] + entry[2]
+            return answer, 0, 0
+
+    def _remember(self, breaker: Any, data: dict[str, Any]) -> dict[str, Any]:
+        if self.state_ttl:
+            with self._lock:
+                if data["state"] == "closed":
+                    old = self._cache.get(breaker.name)
+                    pending, flushed = (old[2], old[3]) if old else (0, _core.monotonic())
+                    self._cache[breaker.name] = [data, _core.monotonic(), pending, flushed]
+                else:
+                    self._cache.pop(breaker.name, None)
+        return data
+
+    def _call(self, args: tuple[Any, ...]) -> Any:
+        evalsha = getattr(self.client, "evalsha", None)
+        if evalsha is None:
+            return self.client.eval(_BREAKER, *args)
+        try:
+            return evalsha(_BREAKER_SHA, *args)
+        except Exception as exc:
+            if not _no_script(exc):
+                raise
+            return self.client.eval(_BREAKER, *args)
 
     def operate(
         self, breaker: Any, operation: str, generation: int = 0, trial: bool = False
     ) -> dict[str, Any]:
-        return self._parse(self.client.eval(*self._args(breaker, operation, generation, trial)))
+        data, flush, flush_gen = self._local(breaker, operation, trial)
+        if flush:
+            self._remember(
+                breaker,
+                self._parse(self._call(self._args(breaker, "success", flush_gen, False, flush))),
+            )
+        if data is not None:
+            return data  # type: ignore[no-any-return]
+        row = self._call(self._args(breaker, operation, generation, trial))
+        return self._remember(breaker, self._parse(row))
 
-    def _args(self, breaker: Any, operation: str, generation: int, trial: bool) -> tuple[Any, ...]:
+    def _args(
+        self, breaker: Any, operation: str, generation: int, trial: bool, count: int = 1
+    ) -> tuple[Any, ...]:
         key = self.prefix + "{" + digest(breaker.name) + "}"
         return (
-            _BREAKER,
             2,
             key,
             key + ":failures",
@@ -194,6 +297,7 @@ class RedisBreakerState:
             generation,
             int(trial),
             uuid.uuid4().hex,
+            count,
         )
 
     @staticmethod
@@ -227,12 +331,28 @@ class AsyncRedisBreakerState(RedisBreakerState):
     ``stats`` report the last state the store returned in this process.
     """
 
+    async def _acall(self, args: tuple[Any, ...]) -> Any:
+        evalsha = getattr(self.client, "evalsha", None)
+        if evalsha is None:
+            return await self.client.eval(_BREAKER, *args)
+        try:
+            return await evalsha(_BREAKER_SHA, *args)
+        except Exception as exc:
+            if not _no_script(exc):
+                raise
+            return await self.client.eval(_BREAKER, *args)
+
     async def operate(  # type: ignore[override]
         self, breaker: Any, operation: str, generation: int = 0, trial: bool = False
     ) -> dict[str, Any]:
-        return self._parse(
-            await self.client.eval(*self._args(breaker, operation, generation, trial))
-        )
+        data, flush, flush_gen = self._local(breaker, operation, trial)
+        if flush:
+            row = await self._acall(self._args(breaker, "success", flush_gen, False, flush))
+            self._remember(breaker, self._parse(row))
+        if data is not None:
+            return data  # type: ignore[no-any-return]
+        row = await self._acall(self._args(breaker, operation, generation, trial))
+        return self._remember(breaker, self._parse(row))
 
 
 class SharedBulkhead:

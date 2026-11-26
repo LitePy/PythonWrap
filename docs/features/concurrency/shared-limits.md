@@ -91,6 +91,14 @@ reservations have bounded lifetimes so a crashed probing worker cannot hold a sl
 forever. Late results from an older breaker generation are ignored. `.force_open()`
 and `.reset()` support maintenance and tests. See [circuit breaker](../resilience/circuit-breaker.md).
 
+A closed state read from Redis is trusted for `state_ttl` seconds (default 1.0). Calls
+are then admitted without a round trip, and successes are counted locally and sent in
+one batch every `flush_interval` seconds or `flush_every` calls. Failures, half-open
+trials, `reset()` and `force_open()` always go to Redis; a failure first sends the
+batched successes, so consecutive-failure counting stays exact. The trade: after one
+process opens the breaker, another may admit calls for up to `state_ttl`. Use
+`RedisBreakerState(client, state_ttl=0)` for one round trip per call.
+
 ## Shared bulkheads
 
 <!-- skip -->

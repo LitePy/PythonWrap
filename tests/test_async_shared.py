@@ -59,7 +59,7 @@ def test_breaker_and_bulkhead_on_async_backends_never_use_threads(no_threads: No
         return sum([await call() for _ in range(1000)])
 
     assert asyncio.run(main()) == 1000
-    assert breaker_client.calls == 2000  # admit + success, each awaited
+    assert breaker_client.calls < 10  # closed state cached, successes batched (gap 4)
     assert lease_client.calls == 2000  # acquire + release
     assert breaker.state is CircuitState.CLOSED  # last answer seen from the store
 

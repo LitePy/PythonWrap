@@ -61,6 +61,23 @@ Measured on an Apple M2 Pro (10 cores, 16 GB), macOS, CPython 3.14.7, full run
 | batch_calls (max_size=1) | - | 2,678 | - | 48.4x |
 | retry+timeout+circuit_breaker | 10,914 | 2,520 | 542.6x | 45.5x |
 
+Shared backends, measured with an in-memory stand-in for the Redis client, so the
+numbers show what the library adds around a store round trip, not the network
+(`python benchmarks/run.py --filter shared`, CPython 3.11 on the same machine):
+
+| Decorator | sync ns/call | async ns/call |
+| --- | ---: | ---: |
+| circuit_breaker (shared) | 2,878 | 85,428 |
+| circuit_breaker (shared, async via thread) | - | 145,410 |
+| Bulkhead(8) (shared) | 36,109 | 117,264 |
+| Bulkhead(8) (shared, async via thread) | - | 191,379 |
+| rate_limit (shared) | 2,960 | 3,315 |
+
+A closed shared breaker answers from its cached state (`state_ttl`) and sends successes
+in batches, so most calls make no store round trip. The async rows use an awaited
+`redis.asyncio` client; the "via thread" rows pass a sync client to async code, which
+costs a worker thread per store operation.
+
 The "x bare" factors look dramatic because the bare function is nearly free. Read the
 nanosecond columns: 2,000 ns is two microseconds, a thousandth of a typical 2 ms
 HTTP request.

@@ -258,7 +258,7 @@ def _settings(name, **kw):
 
 @pytest.mark.parametrize("window", [None, 1000.0])
 def test_matches_redis_state_machine(redis_client, state, window):
-    redis = RedisBreakerState(redis_client, prefix=f"parity{window}:")
+    redis = RedisBreakerState(redis_client, prefix=f"parity{window}:", state_ttl=0)
     ops = [
         ("state", 0, False),
         ("admit", 0, False),
@@ -289,7 +289,7 @@ def test_matches_redis_state_machine(redis_client, state, window):
 
 
 def test_matches_redis_half_open_cycle(redis_client, state):
-    redis = RedisBreakerState(redis_client, prefix="parity-half:")
+    redis = RedisBreakerState(redis_client, prefix="parity-half:", state_ttl=0)
     breaker = SimpleNamespace(**_settings("half", recovery_timeout=0.05, window=None))
     for backend in (state, redis):
         backend.operate(breaker, "force_open")

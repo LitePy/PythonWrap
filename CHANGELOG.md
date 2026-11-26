@@ -21,6 +21,12 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
 
 ### Added
 
+- `RedisBreakerState` and `AsyncRedisBreakerState` cache a closed state for `state_ttl`
+  seconds (default 1.0): calls are admitted with no store round trip and successes are
+  sent in batches (`flush_interval`, `flush_every`); failures, trials and admin calls
+  still go to the store at once. A process may admit calls for up to `state_ttl` after
+  another process opened the breaker; `state_ttl=0` restores one round trip per call.
+  The script runs with `EVALSHA` and reloads on `NOSCRIPT`.
 - Async-native shared backends: `AsyncRedisBreakerState`, `AsyncRedisLock` and
   `AsyncRedisSemaphore` reuse the sync Lua scripts and keys, so sync and async processes
   share state, and are awaited on the event loop instead of a worker thread. Breakers,

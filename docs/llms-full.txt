@@ -4066,7 +4066,7 @@ Every public name: `python_wrap.__all__` first, then names public only in a subm
   An in-process LRU `AsyncCacheStore` that respects ttl on read.
 - `python_wrap.AsyncPeriodic`: `AsyncPeriodic(func: Callable[P, Coroutine[Any, Any, R]], *config: Any)`
   An ``async def`` function that runs as a task on the current loop; see `periodic`.
-- `python_wrap.AsyncRedisBreakerState`: `AsyncRedisBreakerState(client: Any, prefix: str = 'python-wrap:breaker:')`
+- `python_wrap.AsyncRedisBreakerState`: `AsyncRedisBreakerState(client: Any, prefix: str = 'python-wrap:breaker:', *, state_ttl: float = 1.0, flush_interval: float = 1.0, flush_every: int = 1000)`
   `RedisBreakerState` for ``redis.asyncio`` clients: ``operate`` is awaited.
 - `python_wrap.AsyncRedisLock`: `AsyncRedisLock(client: Any, prefix: str = 'python-wrap:lease:')`
   `RedisLock` for ``redis.asyncio`` clients: every round trip is awaited, not threaded.
@@ -4236,7 +4236,7 @@ Every public name: `python_wrap.__all__` first, then names public only in a subm
   Forwards requests to a real transport and records each exchange in a `Cassette`.
 - `python_wrap.Redactor`: `Redactor(*, fragments: Iterable[str] | None = None, patterns: Iterable[str | re.Pattern[str]] = (), max_chars: int = 2000, max_items: int = 100, max_depth: int = 12, builtin: bool = True, mask: str = '***')`
   Scrub values before they reach logs, traces or an audit tape.
-- `python_wrap.RedisBreakerState`: `RedisBreakerState(client: Any, prefix: str = 'python-wrap:breaker:')`
+- `python_wrap.RedisBreakerState`: `RedisBreakerState(client: Any, prefix: str = 'python-wrap:breaker:', *, state_ttl: float = 1.0, flush_interval: float = 1.0, flush_every: int = 1000)`
   Atomic Redis breaker state, window failures and bounded half-open trial leases.
 - `python_wrap.RedisBudgetBackend`: `RedisBudgetBackend(client: Any, prefix: str = 'python-wrap:budget')`
   A `BudgetBackend` on Redis, so every worker process shares one budget.

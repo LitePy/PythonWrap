@@ -357,7 +357,7 @@ def test_async_and_sync_processes_share_breaker_and_lease_state(redis_client):
     from python_wrap.shared import AsyncRedisBreakerState
 
     sync_breaker = CircuitBreaker(
-        name="mixed", failure_threshold=1, backend=RedisBreakerState(redis_client)
+        name="mixed", failure_threshold=1, backend=RedisBreakerState(redis_client, state_ttl=0)
     )
     async_breaker = CircuitBreaker(
         name="mixed",
@@ -381,3 +381,15 @@ def test_async_and_sync_processes_share_breaker_and_lease_state(redis_client):
                 pass
 
     asyncio.run(contend())
+
+
+def test_breaker_state_uses_evalsha_and_reloads_on_noscript(redis_client):
+    class ShaClient(Client):
+        def evalsha(self, sha, count, *args):
+            return self.execute("EVALSHA", sha, count, *args)
+
+    client = ShaClient(redis_client.path)
+    client.execute("SCRIPT", "FLUSH")
+    breaker = CircuitBreaker(name="sha", backend=RedisBreakerState(client, state_ttl=0))
+    assert breaker.call(lambda: 1) == 1  # NOSCRIPT, then EVAL loads it
+    assert breaker.call(lambda: 2) == 2  # EVALSHA hits
