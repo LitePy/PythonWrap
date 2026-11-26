@@ -206,6 +206,7 @@ nav:
   - AI & agents:
       - LLM calls: features/ai/llm-calls.md
       - OpenAI and Anthropic SDK clients: features/ai/openai-anthropic.md
+      - LangChain: features/ai/langchain.md
       - Testing agents: features/ai/testing-agents.md
       - Shared limits and cassettes: features/ai/shared-limits-and-cassettes.md
       - AI observability and audit: features/ai/observability.md

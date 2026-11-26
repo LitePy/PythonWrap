@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import socket
@@ -337,3 +338,105 @@ def test_redis_checkpoint_and_switch_source_roundtrip(redis_client):
     assert source("feature") is False
     redis_client.set("sw:feature", "on")
     assert source("feature") is True
+
+
+class AsyncClient:
+    """Awaitable ``eval`` over the sync test client, as ``redis.asyncio`` exposes it."""
+
+    def __init__(self, sync):
+        self.sync = sync
+
+    async def eval(self, *args):
+        return self.sync.eval(*args)
+
+
+def test_async_and_sync_processes_share_breaker_and_lease_state(redis_client):
+    import asyncio
+
+    from python_wrap import Lease
+    from python_wrap.coordination import AlreadyRunning, AsyncRedisLock
+    from python_wrap.shared import AsyncRedisBreakerState
+
+    sync_breaker = CircuitBreaker(
+        name="mixed", failure_threshold=1, backend=RedisBreakerState(redis_client, state_ttl=0)
+    )
+    async_breaker = CircuitBreaker(
+        name="mixed",
+        failure_threshold=1,
+        backend=AsyncRedisBreakerState(AsyncClient(redis_client)),
+    )
+    sync_breaker.reset()
+
+    @async_breaker
+    async def boom():
+        raise ValueError
+
+    with pytest.raises(ValueError):
+        asyncio.run(boom())
+    with pytest.raises(CircuitOpenError):
+        sync_breaker.call(lambda: None)
+
+    async def contend():
+        async with Lease("mixed-job", backend=AsyncRedisLock(AsyncClient(redis_client)), ttl=5):
+            with pytest.raises(AlreadyRunning), Lease("mixed-job", backend=RedisLock(redis_client)):
+                pass
+
+    asyncio.run(contend())
+
+
+def test_breaker_state_uses_evalsha_and_reloads_on_noscript(redis_client):
+    class ShaClient(Client):
+        def evalsha(self, sha, count, *args):
+            return self.execute("EVALSHA", sha, count, *args)
+
+    client = ShaClient(redis_client.path)
+    client.execute("SCRIPT", "FLUSH")
+    breaker = CircuitBreaker(name="sha", backend=RedisBreakerState(client, state_ttl=0))
+    assert breaker.call(lambda: 1) == 1  # NOSCRIPT, then EVAL loads it
+    assert breaker.call(lambda: 2) == 2  # EVALSHA hits
+
+
+def test_redis_failure_rate_needs_volume_and_share(redis_client):
+    def run(breaker, failures, successes):
+        for ok in [True] * successes + [False] * failures:
+            with contextlib.suppress(ConnectionError):
+                breaker.call((lambda: 1) if ok else _raise)
+
+    def _raise():
+        raise ConnectionError
+
+    options = {"failure_rate": 0.5, "minimum_calls": 20, "window": 10}
+    quiet = CircuitBreaker(
+        name="rate-quiet", backend=RedisBreakerState(redis_client, state_ttl=0), **options
+    )
+    quiet.reset()
+    run(quiet, 5, 95)
+    assert quiet.state.value == "closed"
+    assert quiet.stats.failure_rate == pytest.approx(0.05)
+    busy = CircuitBreaker(name="rate-busy", backend=RedisBreakerState(redis_client), **options)
+    busy.reset()
+    run(busy, 15, 5)
+    assert busy.state.value == "open"
+
+
+def test_redis_tags_and_stampede_lease_across_wrappers(redis_client):
+    from python_wrap import invalidate_tags
+
+    store = RedisStore(redis_client, "tagged:", fail_open=False)
+    calls = []
+
+    def price(sku):
+        calls.append(sku)
+        time.sleep(0.05)
+        return len(calls)
+
+    lock = RedisLock(redis_client, "memo-locks:")
+    workers = [
+        memoize(store=store, ttl=60, lock=lock, tags=lambda sku: [f"sku:{sku}"])(price)
+        for _ in range(8)
+    ]
+    with ThreadPoolExecutor(8) as pool:
+        assert set(pool.map(lambda fn: fn("a1"), workers)) == {1}
+    assert calls == ["a1"]
+    invalidate_tags("sku:a1", client=redis_client)
+    assert workers[3]("a1") == 2

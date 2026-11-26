@@ -47,24 +47,63 @@ if telemetry is not None:
     telemetry.close()
 ```
 
-Use a recent OpenTelemetry API with synchronous gauges for meter support. Event spans
-are named `pw.<event-name>` and mark **notifications**, not the duration of an operation.
+Options that control what is recorded:
+
+- `spans="events"` (default) adds each event as a span event named `pw.<event>` on the
+  current span.
+- `spans="notifications"` opens and closes a zero-length `pw.<event>` span per event, as
+  earlier betas did.
+- `spans="off"` adds nothing.
+- `attempt_spans=True` opens one `python_wrap.retry.attempt` span per retry attempt, with
+  its real duration. Attributes are `python_wrap.retry.attempt` (the attempt number) and
+  `python_wrap.retry.outcome` (`retry`, `gave_up` or `success`).
+- `wait_spans=True` opens one `python_wrap.rate_limit.wait` span per rate-limiter wait.
+- `naming="legacy"` (default) keeps the `pw_*` metric names. `naming="otel"` uses
+  OpenTelemetry-style names with units.
+
+Attempt and wait spans are opt-in to control volume. Retry events also carry
+`attempt_seconds`.
+
+Breaking change in this beta: the default span behaviour changed from notification spans
+to span events. Use `spans="notifications"` to get the old spans.
+
+<!-- skip -->
+```python
+from python_wrap.observability import enable
+
+telemetry = enable(naming="otel", attempt_spans=True, wait_spans=True)
+```
+
 For an actual operation-duration span, keep `@trace(otel=True)` around that operation.
 
-| Instrument | Source |
-| --- | --- |
-| `pw_retry_retries_total` | A failed attempt scheduled another retry. |
-| `pw_cache_hits_total`, `pw_cache_misses_total` | Cache events. |
-| `pw_bulkhead_rejected_total` | Rejected bulkhead calls. |
-| `pw_breaker_rejected_total` | Open-circuit rejection events. |
-| `pw_timeouts_total` | Expired timeout events. |
-| `pw_limiter_wait_seconds` | Recorded limiter wait durations. |
-| `pw_breaker_state` | Closed=0, half-open=1, open=2 on state-change events. |
+| Event or state | Type | Legacy name | OpenTelemetry name |
+| --- | --- | --- | --- |
+| Retry scheduled | counter | `pw_retry_retries_total` | `python_wrap.retry.retries` |
+| Gave up | counter | `pw_retry_gave_up_total` | `python_wrap.retry.gave_up` |
+| Retry budget exhausted | counter | `pw_retry_budget_exhausted_total` | `python_wrap.retry.budget_exhausted` |
+| Cache hit | counter | `pw_cache_hits_total` | `python_wrap.cache.hits` |
+| Cache miss | counter | `pw_cache_misses_total` | `python_wrap.cache.misses` |
+| Bulkhead rejected | counter | `pw_bulkhead_rejected_total` | `python_wrap.bulkhead.rejected` |
+| Breaker rejected | counter | `pw_breaker_rejected_total` | `python_wrap.circuit.rejected` |
+| Rate limit rejected | counter | `pw_rate_limit_rejected_total` | `python_wrap.rate_limit.rejected` |
+| Timeout | counter | `pw_timeouts_total` | `python_wrap.timeouts` |
+| Backend error | counter | `pw_backend_errors_total` | `python_wrap.backend.errors` |
+| Token-window store error | counter | `pw_rate_limit_store_errors_total` | `python_wrap.rate_limit.store_errors` |
+| Limiter wait (seconds) | histogram | `pw_limiter_wait_seconds` | `python_wrap.rate_limit.wait` |
+| Breaker state (0 closed, 1 half-open, 2 open) | observable gauge | `pw_breaker_state` | `python_wrap.circuit.state` |
+| Component health | observable gauge | `pw_health_up` | `python_wrap.health.up` |
+
+The gauges are read at each collection, so a meter provider must be set for them. Breaker
+state covers every breaker in the process. With a shared breaker, each process reports the
+shared state (within the backend's `state_ttl`), not only the process that saw the change.
+Health gauges carry a `component` attribute from the health registry. Pass
+`registry=False` to leave it out.
 
 Only the function/dependency name is a label. `max_functions` bounds observed names;
-additional names become `_other`. Request ids, user ids, cache keys, arguments and
-exception messages are never labels. With no subscription, existing event emission
-keeps its cheap disabled path.
+additional names become `_other`.
+Service attributes such as `service.name` come from the provider's resource. Request ids,
+user ids, cache keys, arguments and exception messages are never labels. With no
+subscription, existing event emission keeps its cheap disabled path.
 
 ## Sentry breadcrumbs
 

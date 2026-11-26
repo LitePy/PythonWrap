@@ -24,11 +24,32 @@ When omitted, a key is derived from the function and its bound arguments; use an
 key for service objects or arguments that cannot be serialized deterministically.
 
 `Lease` is also a sync/async context manager. Each context is single-use, cannot be
-entered concurrently, and must not cross a fork. Backend I/O in async lease operations
-runs in a worker thread. Cancellation cleanup waits for already-started client I/O to
-settle and releases an acquired token; clients therefore need finite I/O timeouts. By default a heartbeat renews
-the lease while the function runs. A lost lease raises `LeaseLost` on otherwise successful
-completion; an existing function exception or cancellation is preserved.
+entered concurrently, and must not cross a fork. Sync backends run async lease I/O in a
+worker thread. An async backend such as `AsyncRedisLock` awaits every round trip (acquire,
+heartbeat renewal, release and `check_async`) on the event loop, with no thread. Using an
+async backend with a synchronous `with` or `check()` raises `TypeError`. Likewise,
+`@idempotent` on an `async def` function awaits an `AsyncCacheStore` directly, such as
+`AsyncRedisStore(..., fail_open=False)` or `AsyncMemoryStore`; an `AsyncRedisStore` gets a
+matching `AsyncRedisLock` automatically. Cancellation cleanup waits for already-started
+client I/O to settle and releases an acquired token; clients therefore need finite I/O
+timeouts. By default a heartbeat renews the lease while the function runs. A lost lease
+raises `LeaseLost` on otherwise successful completion; an existing function exception or
+cancellation is preserved.
+
+<!-- skip -->
+```python
+import redis.asyncio
+from python_wrap.coordination import AsyncRedisLock, Lease
+
+client = redis.asyncio.Redis()
+
+async def nightly_report() -> None:
+    async with Lease("nightly-report", backend=AsyncRedisLock(client), ttl=30):
+        await build_report()
+```
+
+`AsyncRedisLock` uses the same script and keys as `RedisLock`, so sync and async
+processes contend for the same lease.
 
 ## Redis and SQL backends
 
@@ -110,6 +131,44 @@ write stalls beyond lease expiry, an old worker may publish a stale result. Clie
 timeouts should be shorter than the lease. A crash after the external effect but before
 the result is stored can replay that effect. Use an external transaction, fencing protocol,
 or downstream idempotency key when either gap matters.
+
+## Results in your own database
+
+`SqlResultStore(engine)` keeps idempotency results in a table of your application's
+own database, through a SQLAlchemy `Engine`. It works the same on PostgreSQL, SQL Server
+and SQLite. The table is never created for you: `SqlResultStore.ddl("postgresql")`
+(or `"mssql"` or `"sqlite"`) returns the CREATE TABLE and CREATE INDEX statements, and
+you run them in a migration. Call `store.purge_expired()` from a scheduled job to delete
+expired rows.
+
+When the function writes to the same database, pass `connection=` with a callable that
+returns the SQLAlchemy `Connection` in use. The key is then recorded in your transaction,
+so the key and the write commit or roll back together. A retry after a crash runs once.
+Only sync functions are supported.
+
+<!-- skip -->
+```python
+import sqlalchemy
+from python_wrap import SqlResultStore, idempotent
+
+engine = sqlalchemy.create_engine("postgresql+psycopg://app@db/orders")
+store = SqlResultStore(engine)
+
+def place_order(conn, order_id: str, sku: str) -> str:
+    @idempotent(key=f"order:{order_id}", store=store, connection=lambda: conn)
+    def write() -> str:
+        conn.execute(sqlalchemy.text("INSERT INTO orders (id, sku) VALUES (:i, :s)"), {"i": order_id, "s": sku})
+        return order_id
+    return write()
+
+with engine.begin() as conn:
+    place_order(conn, "o-17", "widget")
+```
+
+SQLite needs one extra setup step. Python's sqlite3 driver does not emit BEGIN, which
+breaks savepoints. Use SQLAlchemy's documented recipe: a `connect` event that sets
+`dbapi_connection.isolation_level = None`, and a `begin` event that runs
+`conn.exec_driver_sql("BEGIN")`.
 
 See [coordination API](../../api/coordination.md), [idempotency API](../../api/idempotency.md),
 and [fork behavior](../../project/migration-0.3.md#forked-workers).

@@ -2,16 +2,50 @@
 
 from __future__ import annotations
 
-import logging
+import hashlib
+import hmac
 import math
 import pickle
 import re
+import warnings
 from collections.abc import Callable, Hashable
 from typing import Any
 
-from python_wrap._runtime import digest
+from python_wrap._backend import BackendMonitor
+from python_wrap._runtime import stable_digest
 
-__all__ = ["RedisStore"]
+KEY_FORMAT = "k2:"  # key encoding version: entries written by 0.4.0b1 expire unread
+
+__all__ = ["RedisStore", "json_codec", "signed_pickle_codec"]
+
+
+class InvalidSignature(ValueError):
+    """A cache entry failed authentication."""
+
+
+def signed_pickle_codec(secret: bytes) -> tuple[Callable[[Any], bytes], Callable[[bytes], Any]]:
+    """Authenticate pickle bytes before loading them; keep the signing key private."""
+    if not isinstance(secret, bytes) or len(secret) < 16:
+        raise ValueError("secret must be at least 16 bytes")
+
+    def dumps(value: Any) -> bytes:
+        payload = pickle.dumps(value)
+        return hmac.digest(secret, payload, hashlib.sha256) + payload
+
+    def loads(data: bytes) -> Any:
+        signature, payload = data[:32], data[32:]
+        if not hmac.compare_digest(signature, hmac.digest(secret, payload, hashlib.sha256)):
+            raise InvalidSignature("cache entry signature is invalid")
+        return pickle.loads(payload)  # nosec B301 - payload authenticated by the HMAC above
+
+    return dumps, loads
+
+
+def json_codec() -> tuple[Callable[[Any], bytes], Callable[[bytes], Any]]:
+    """Return a JSON codec for cache entries with JSON-compatible values."""
+    import json
+
+    return lambda value: json.dumps(value, separators=(",", ":")).encode(), json.loads
 
 
 class RedisStore:
@@ -38,35 +72,61 @@ class RedisStore:
         client: Any,
         prefix: str,
         *,
-        dumps: Callable[[Any], bytes] = pickle.dumps,
-        loads: Callable[[bytes], Any] = pickle.loads,
+        dumps: Callable[[Any], bytes] | None = None,
+        loads: Callable[[bytes], Any] | None = None,
         key_format: Callable[[Hashable], str] | None = None,
         fail_open: bool = True,
+        retry_backend_after: float = 1.0,
+        version: int | None = None,
     ) -> None:
         if not prefix:
             raise ValueError("RedisStore needs a nonempty per-function prefix")
-        self.client, self.prefix = client, prefix
-        self.dumps, self.loads = dumps, loads
+        if version is not None and (
+            isinstance(version, bool) or not isinstance(version, int) or version < 1
+        ):
+            raise ValueError("version must be a positive integer")
+        if dumps is None and loads is None:
+            from python_wrap.config import get_config
+
+            codec = get_config().get("cache_codec")
+            if codec is None:
+                warnings.warn(
+                    "implicit pickle cache codec is deprecated; pass a codec",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+                codec = (pickle.dumps, pickle.loads)
+            dumps, loads = codec
+        self.client, self.prefix = client, prefix + (f"v{version}:" if version else "")
+        self.dumps, self.loads = dumps or pickle.dumps, loads or pickle.loads
         self.key_format, self.fail_open = key_format, fail_open
+        # fail_open=True is "allow" (a miss); False is "raise".
+        self._monitor = BackendMonitor(
+            "cache", prefix, "allow" if fail_open else "raise", retry_backend_after
+        )
 
     def _key(self, key: Hashable) -> str:
-        return self.prefix + (self.key_format(key) if self.key_format else digest(key))
+        if self.key_format:
+            return self.prefix + self.key_format(key)
+        return self.prefix + KEY_FORMAT + stable_digest(key)
 
     def _run(self, action: Callable[[], Any], default: Any = None) -> Any:
-        try:
-            return action()
-        except Exception:
-            if not self.fail_open:
-                raise
-            logging.getLogger("python_wrap").warning("RedisStore operation failed", exc_info=True)
-            return default
+        return self._monitor.call("cache", action, lambda: default)
 
     def get(self, key: Hashable, /) -> Any:
         """Return a decoded entry, or None on a miss."""
 
         def read() -> Any:
             value = self.client.get(self._key(key))
-            return None if value is None else self.loads(value)
+            if value is None:
+                return None
+            try:
+                return self.loads(value)
+            except InvalidSignature:
+                from python_wrap import _core
+
+                _core.emit("cache.rejected", self.prefix, reason="signature")
+                return None
 
         return self._run(read)
 

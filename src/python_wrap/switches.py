@@ -8,6 +8,7 @@ from collections.abc import Callable, Coroutine
 from typing import Any, Literal, TypeVar, cast, overload
 
 from python_wrap import _core
+from python_wrap._backend import BackendMonitor
 from python_wrap._runtime import seconds
 from python_wrap.caching import memoize
 from python_wrap.retry import _Decorator
@@ -44,16 +45,30 @@ class EnvSource:
 
 
 class RedisSource:
-    """Read a boolean flag from a supplied Redis client; backend errors propagate."""
+    """Read a boolean flag from a supplied Redis client.
+
+    ``on_backend_error="raise"`` (the default) propagates store errors; ``"local"`` and
+    ``"allow"`` answer ``default`` while the store is down.
+    """
 
     def __init__(
-        self, client: Any, prefix: str = "python-wrap:switch:", *, default: bool = True
+        self,
+        client: Any,
+        prefix: str = "python-wrap:switch:",
+        *,
+        default: bool = True,
+        on_backend_error: str | None = None,
+        retry_backend_after: float = 1.0,
     ) -> None:
         self.client, self.prefix, self.default = client, prefix, default
+        self._monitor = BackendMonitor("switch", prefix, on_backend_error, retry_backend_after)
 
     def __call__(self, name: str) -> bool:
-        value = self.client.get(self.prefix + name)
-        return self.default if value is None else _enabled(value)
+        def read() -> bool:
+            value = self.client.get(self.prefix + name)
+            return self.default if value is None else _enabled(value)
+
+        return self._monitor.call("get", read, lambda: self.default)
 
 
 @overload

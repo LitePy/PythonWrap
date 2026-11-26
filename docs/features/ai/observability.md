@@ -3,7 +3,8 @@
 Trace LLM and tool calls, keep secrets out of logs, and record an audit tape you can replay in tests. Nothing here imports a provider SDK; responses are read by duck typing.
 
 ```python
-from python_wrap import AuditTape, genai, replay, traced_llm, traced_tool
+from python_wrap import genai
+from python_wrap.genai import AuditTape, replay, traced_llm, traced_tool
 from python_wrap.events import listening
 
 tape = AuditTape()

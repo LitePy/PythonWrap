@@ -9,7 +9,9 @@ import contextvars
 import datetime
 import functools
 import inspect
+import random
 import threading
+import uuid
 import weakref
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Coroutine, Hashable
@@ -26,6 +28,7 @@ from typing import (
 )
 
 from python_wrap import _core, _fork
+from python_wrap._runtime import digest, stable_digest
 
 __all__ = [
     "CacheInfo",
@@ -33,9 +36,11 @@ __all__ = [
     "CachedProperty",
     "Memoized",
     "Once",
+    "ainvalidate_tags",
     "cache",
     "cached_property",
     "invalidate",
+    "invalidate_tags",
     "memoize",
     "once",
 ]
@@ -522,6 +527,63 @@ class _LocalStore:
         return (ttl_evicted << 32) | lru_evicted
 
 
+# -- cache tags: one version token per tag; entries record the tokens they were written under
+_TAG_PREFIX = "python-wrap:tag:"
+_local_tags: dict[str, str] = {}
+_MAX_LOCAL_TAGS = 10_000
+# Bumped when _local_tags is cleared, so every entry written before reads as stale
+# (never as fresh, which a plain eviction could cause).
+_tag_epoch = [0]
+_tag_clients: dict[int, Any] = {}  # sync Redis clients of tagged shared caches
+_async_tag_clients: dict[int, Any] = {}  # redis.asyncio clients (amemoize)
+
+
+def _decode(value: Any) -> str:
+    return value.decode() if isinstance(value, bytes) else str(value or "")
+
+
+def _tag_versions(names: list[str], client: Any) -> dict[str, str] | None:
+    """Current token per tag (from Redis when shared); None if the store cannot answer."""
+    if client is None:
+        return {n: f"{_tag_epoch[0]}:{_local_tags.get(n, '')}" for n in names}
+    try:
+        return {n: _decode(client.get(_TAG_PREFIX + digest(n))) for n in names}
+    except Exception:  # an unknown version must read as a miss, never as a hit
+        return None
+
+
+def _remember_local(name: str, token: str) -> None:
+    if len(_local_tags) >= _MAX_LOCAL_TAGS and name not in _local_tags:
+        _local_tags.clear()  # tag names may come from data: bound the memory
+        _tag_epoch[0] += 1
+    _local_tags[name] = token
+
+
+def invalidate_tags(*names: str, client: Any = None) -> None:
+    """Make every cached entry written with one of these tags miss on its next read.
+
+    Each tag gets a new version token: in this process, and in Redis through every
+    sync client used by a ``memoize(tags=..., store=RedisStore(...))`` here (and
+    ``client`` when given). One write per tag, no scan. Async clients: `ainvalidate_tags`.
+    """
+    for name in names:
+        token = uuid.uuid4().hex
+        _remember_local(name, token)
+        clients = {**_tag_clients, **({id(client): client} if client is not None else {})}
+        for target in clients.values():
+            target.set(_TAG_PREFIX + digest(name), token)
+
+
+async def ainvalidate_tags(*names: str, client: Any = None) -> None:
+    """`invalidate_tags` for ``redis.asyncio`` clients (amemoize with AsyncRedisStore)."""
+    for name in names:
+        token = uuid.uuid4().hex
+        _remember_local(name, token)
+        clients = {**_async_tag_clients, **({id(client): client} if client is not None else {})}
+        for target in clients.values():
+            await target.set(_TAG_PREFIX + digest(name), token)
+
+
 @overload
 def memoize(func: Callable[P, R], /) -> Memoized[P, R]: ...
 @overload
@@ -541,6 +603,11 @@ def memoize(
     singleflight: bool = False,
     copy_result: bool = False,
     logger: _core.LoggerLike = None,
+    lock: Any = None,
+    lock_ttl: float = 30,
+    lock_wait: float = 5,
+    tags: Callable[..., Any] | None = None,
+    ttl_jitter: float = 0.0,
 ) -> Callable[[Callable[P, R]], Memoized[P, R]]: ...
 def memoize(
     func: Callable[..., Any] | None = None,
@@ -558,6 +625,11 @@ def memoize(
     singleflight: bool = False,
     copy_result: bool = False,
     logger: _core.LoggerLike = None,
+    lock: Any = None,
+    lock_ttl: float = 30,
+    lock_wait: float = 5,
+    tags: Callable[..., Any] | None = None,
+    ttl_jitter: float = 0.0,
 ) -> Any:
     """Cache a function's results per argument values.
 
@@ -642,6 +714,17 @@ def memoize(
         copy_result: Deepcopy successful values on write and on delivery. False keeps
             the existing shared-reference behavior. Does not apply while caching is disabled.
         logger: Logger (or name) for failed background refreshes.
+        lock: A lease backend (`RedisLock`, `AsyncRedisLock`, ...) shared by every
+            process. On a miss one process holds a lease on the cache key and computes;
+            the others wait up to ``lock_wait`` seconds, read the store again, and
+            compute only if the entry is still absent. Stale refreshes take the same
+            lease without waiting, so one process refreshes. Needs ``store``.
+        lock_ttl: Seconds the stampede lease lives (renewed while computing).
+        lock_wait: Seconds a process waits for another's computation.
+        tags: ``tags(*args, **kwargs)`` returning tag names for the entry; see
+            `invalidate_tags`. Each tag costs one store read per hit.
+        ttl_jitter: Shorten each entry's ttl by a random share up to this (0 to 1), so
+            entries written together do not expire together.
 
     Returns:
         The wrapped function, or a decorator when called with options.
@@ -674,6 +757,14 @@ def memoize(
         from copy import deepcopy
 
         copier = deepcopy
+    if lock is not None and store is None:
+        raise ValueError("lock= coordinates processes through a shared store; pass store=")
+    if not 0 <= ttl_jitter < 1:
+        raise ValueError("ttl_jitter must be in [0, 1)")
+    lock_backend = lock  # the name `lock` is reused below for the cache's own mutex
+    tag_client = getattr(store, "client", None) if tags is not None else None
+    if tag_client is not None:
+        _tag_clients[id(tag_client)] = tag_client
     if maxsize is not None and maxsize < 1:
         raise ValueError("maxsize must be a positive integer or None")
     if store is not None:
@@ -806,13 +897,23 @@ def memoize(
                     continue
                 return [b for ref, b in slots if ref() is not None]
 
+        def outdated(entry: Any) -> bool:
+            """A tagged entry whose tags were invalidated after it was written."""
+            if len(entry) < 5 or not entry[4]:
+                return False
+            return bool(_tag_versions(list(entry[4]), tag_client) != entry[4])
+
+        def snapshot_tags(args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+            # Read before computing: an invalidation during the call leaves it stale.
+            return None if tags is None else _tag_versions(list(tags(*args, **kwargs)), tag_client)
+
         def fetch(b: Any, k: Hashable) -> Any:
             # Caller holds ``guard``.
             entry = b.get(k)
             if entry is None:
                 return None
             expires = entry[1]
-            if expires is not None and now() >= expires:
+            if (expires is not None and now() >= expires) or (tags is not None and outdated(entry)):
                 b.delete(k)
                 return _EXPIRED
             if lru:
@@ -825,13 +926,17 @@ def memoize(
         def report_expired() -> None:
             _core.emit("cache.evicted", name, reason="ttl")
 
-        def save(b: Any, k: Hashable, value: Any, g: int, is_exc: bool = False) -> Any:
+        def save(
+            b: Any, k: Hashable, value: Any, g: int, is_exc: bool = False, tv: Any = None
+        ) -> Any:
             if is_exc:
                 seconds = exc_ttl_s
             elif ttl_fn is not None:
                 seconds = ttl_fn(value)
             else:
                 seconds = ttl_s
+            if ttl_jitter and seconds:
+                seconds *= 1 - random.random() * ttl_jitter  # nosec B311 - not security
             snapshot = isolate(value) if copy_result and not is_exc else value
             if not is_exc and seconds is not None and seconds <= 0:
                 return snapshot  # not stored, but async waiters still need a private outcome
@@ -845,7 +950,9 @@ def memoize(
                 t = now()
                 fresh = None if seconds is None else t + seconds
                 expires = None if keep is None else t + keep
-                entry = (snapshot, expires, is_exc, fresh)
+                entry: tuple[Any, ...] = (snapshot, expires, is_exc, fresh)
+                if tags is not None:
+                    entry = (*entry, tv)
                 if builtin:
                     evicted = b.put(k, entry)
                 else:
@@ -856,6 +963,62 @@ def memoize(
                 for _ in range(evicted & 0xFFFFFFFF):
                     _core.emit("cache.evicted", name, reason="lru")
             return snapshot
+
+        def lease_for(k: Hashable, wait: bool) -> Any:
+            from python_wrap.coordination import Lease
+
+            return Lease(
+                f"memo:{digest(name)}:{stable_digest(k)}",
+                backend=lock_backend,
+                ttl=lock_ttl,
+                wait=wait,
+                timeout=lock_wait if wait else None,
+            )
+
+        def cached_outcome(b: Any, k: Hashable) -> tuple[bool, Any]:
+            with guard:
+                entry = fetch(b, k)
+            if not entry:
+                return False, None
+            if entry[2]:
+                raise entry[0]
+            return True, entry[0]
+
+        def once_across_processes(b: Any, k: Hashable, run: Callable[[], Any]) -> Any:
+            """Run ``run()`` (returns ``(snapshot, result)``) unless another process did."""
+            from python_wrap.coordination import AlreadyRunning
+
+            lease = lease_for(k, True)
+            try:
+                lease.__enter__()
+            except AlreadyRunning:
+                lease = None  # waited lock_wait: use its result if it landed, else compute
+            try:
+                found, value = cached_outcome(b, k)
+                return (value, value) if found else run()
+            finally:
+                if lease is not None:
+                    with contextlib.suppress(Exception):
+                        lease.__exit__(None, None, None)
+
+        async def aonce_across_processes(
+            b: Any, k: Hashable, run: Callable[[], Awaitable[Any]]
+        ) -> Any:
+            """Async `once_across_processes`; ``run()`` returns the saved result."""
+            from python_wrap.coordination import AlreadyRunning
+
+            lease = lease_for(k, True)
+            try:
+                await lease.__aenter__()
+            except AlreadyRunning:
+                lease = None
+            try:
+                found, value = cached_outcome(b, k)
+                return value if found else await run()
+            finally:
+                if lease is not None:
+                    with contextlib.suppress(Exception):
+                        await lease.__aexit__(None, None, None)
 
         def refresh_failed(exc: BaseException) -> None:
             _core.get_logger(logger).warning(
@@ -876,11 +1039,25 @@ def memoize(
                 g = gen
 
             def run() -> None:
+                from python_wrap.coordination import AlreadyRunning
+
+                lease = None
                 try:
-                    save(b, k, f(*args, **kwargs), g)
+                    if lock_backend is not None:
+                        lease = lease_for(k, False)
+                        try:
+                            lease.__enter__()
+                        except AlreadyRunning:
+                            lease = None
+                            return  # another process is refreshing this key
+                    tv = snapshot_tags(args, kwargs)
+                    save(b, k, f(*args, **kwargs), g, tv=tv)
                 except Exception as exc:
                     refresh_failed(exc)
                 finally:
+                    if lease is not None:
+                        with contextlib.suppress(Exception):
+                            lease.__exit__(None, None, None)
                     with lock:
                         refreshing.discard(rk)
 
@@ -912,14 +1089,31 @@ def memoize(
                 g = gen
                 shared_fut = loop_inflight[rk] = _shared_future()
 
+            async def refresh() -> Any:
+                tv = snapshot_tags(args, kwargs)
+                return save(b, k, await f(*args, **kwargs), g, tv=tv)
+
             async def run() -> Any:
+                from python_wrap.coordination import AlreadyRunning
+
                 try:
-                    result = await f(*args, **kwargs)
-                    result = save(b, k, result, g)
+                    if lock_backend is None:
+                        return await refresh()
+                    lease = lease_for(k, False)
+                    try:
+                        await lease.__aenter__()
+                    except AlreadyRunning:  # another process refreshes: keep the stale value
+                        with guard:
+                            entry = b.get(k)
+                        return None if entry is None else entry[0]
+                    try:
+                        return await refresh()
+                    finally:
+                        with contextlib.suppress(Exception):
+                            await lease.__aexit__(None, None, None)
                 except Exception as exc:
                     refresh_failed(exc)
                     raise
-                return result
 
             def done(_t: asyncio.Future[Any] | None) -> None:
                 with lock:
@@ -1019,7 +1213,9 @@ def memoize(
             if entry is None:
                 return None
             expires = entry[1]
-            if expires is not None and _core.monotonic() >= expires:
+            if (expires is not None and _core.monotonic() >= expires) or (
+                tags is not None and outdated(entry)
+            ):
                 del data[k]
                 return _EXPIRED
             if lru:
@@ -1033,13 +1229,19 @@ def memoize(
             # thread per key computes while the others wait for its outcome.
             nonlocal hits, misses
 
-            def compute() -> tuple[Any, Any]:
+            def run() -> tuple[Any, Any]:
+                tv = snapshot_tags(args, kwargs)
                 try:
                     result = f(*args, **kwargs)
                 except exc_types as exc:
-                    save(b, k, exc, g, True)
+                    save(b, k, exc, g, True, tv)
                     raise
-                return save(b, k, result, g), result
+                return save(b, k, result, g, tv=tv), result
+
+            def compute() -> tuple[Any, Any]:
+                if lock_backend is None:
+                    return run()
+                return once_across_processes(b, k, run)  # type: ignore[no-any-return]
 
             if not singleflight:
                 snapshot, result = compute()
@@ -1106,14 +1308,20 @@ def memoize(
                     shared = True
             if not shared:
 
-                async def run() -> Any:
+                async def compute() -> Any:
+                    tv = snapshot_tags(args, kwargs)
                     try:
                         result = await f(*args, **kwargs)
                     except exc_types as exc:
                         if not isinstance(exc, asyncio.CancelledError):
-                            save(b, k, exc, g, True)
+                            save(b, k, exc, g, True, tv)
                         raise
-                    return save(b, k, result, g)
+                    return save(b, k, result, g, tv=tv)
+
+                async def run() -> Any:
+                    if lock_backend is None:
+                        return await compute()
+                    return await aonce_across_processes(b, k, compute)
 
                 def done(_t: asyncio.Future[Any] | None) -> None:
                     with lock:

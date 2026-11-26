@@ -97,6 +97,18 @@ def test_jitter_added(fake_clock: FakeClock, monkeypatch: pytest.MonkeyPatch) ->
     assert seen == [(0, 0.5), (0, 0.5)]
 
 
+def test_jitter_modes_span_the_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    from python_wrap.retry import _compute_delay
+
+    bounds = []
+    monkeypatch.setattr(random, "uniform", lambda low, high: bounds.append((low, high)) or high)
+    assert _compute_delay(2, 1, 2, 30, "full") == 2
+    assert _compute_delay(2, 1, 2, 30, "equal") == 2
+    assert bounds == [(0, 2), (1, 2)]
+    with pytest.raises(ValueError, match="jitter"):
+        retry(jitter="unknown")
+
+
 def test_unlimited_attempts(fake_clock: FakeClock) -> None:
     f = Flaky(20)
     assert retry(f, max_attempts=None, delay=0)() == "ok"
@@ -825,9 +837,9 @@ def test_events_emitted(fake_clock: FakeClock) -> None:
     ]
     assert seen[0].fields["attempt"] == 1 and seen[0].fields["next_delay"] == 2
     assert isinstance(seen[0].fields["exception"], ValueError)
-    assert seen[1].fields == {"attempts": 2}
+    assert seen[1].fields == {"attempts": 2, "attempt_seconds": seen[1].fields["attempt_seconds"]}
     assert seen[3].fields["attempts"] == 2
-    assert seen[4].function == "block" and seen[4].fields == {"attempts": 1}
+    assert seen[4].function == "block" and seen[4].fields["attempts"] == 1
 
 
 # ======================================================= budgets, results, async hooks
@@ -1055,7 +1067,7 @@ def test_retry_if_result_sync(fake_clock: FakeClock, events: list[_core.Event]) 
         "retry.succeeded",
     ]
     assert events[0].fields["exception"] is None
-    assert events[2].fields == {"attempts": 3}
+    assert events[2].fields["attempts"] == 3 and events[2].fields["attempt_seconds"] >= 0
 
 
 def test_retry_if_result_exhausted_returns_last_value(
@@ -1078,7 +1090,7 @@ def test_retry_if_result_exhausted_returns_last_value(
     assert [s.result for s in seen] == ["busy-1", "busy-2"]
     assert "returned 'busy-1'" in caplog.text
     assert [e.name for e in events][-1] == "retry.gave_up"
-    assert events[-1].fields == {"attempts": 3, "exception": None}
+    assert events[-1].fields["attempts"] == 3 and events[-1].fields["exception"] is None
     stats = retry_stats(status)
     assert stats is not None
     assert (stats.calls, stats.attempts_total, stats.retries, stats.gave_up) == (1, 3, 2, 1)

@@ -13,9 +13,9 @@ from __future__ import annotations
 import json
 import time
 
-from python_wrap import fake_llm, retry
+from python_wrap import retry
 from python_wrap.chaos import chaos
-from python_wrap.llm_testing import OverloadedError, RateLimitError
+from python_wrap.llm_testing import OverloadedError, RateLimitError, fake_llm
 from python_wrap.testing import fake_clock
 
 llm = fake_llm(['{"city": "Oslo", "temp_c": 4}'], usage=(25, 9))

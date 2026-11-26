@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from python_wrap import AuditTape, Redactor
+from python_wrap.genai import AuditTape, Redactor
 
 
 def make_redactor() -> Redactor:

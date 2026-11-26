@@ -42,6 +42,11 @@ def explicit() -> None: ...   # 2 attempts: explicit wins
 reset_config()
 ```
 
+For settings that must change while the process runs, use a `PolicyRegistry` with `watch()`
+instead. `configure()` sets defaults read at decoration time; a watched policy changes behaviour
+on every replica without a restart, for example to lower a rate limit or stop retries for one
+dependency during an incident. See [named policies](resilience/named-policies.md).
+
 ## Keys
 
 | Key | Effect |
@@ -50,6 +55,9 @@ reset_config()
 | `retry` | Dict of defaults for `retry` and `retrying`: `max_attempts`, `delay`, `backoff`, `max_delay`, `jitter`, `max_time`, `log_level`, `budget` (one shared `RetryBudget`). |
 | `redact` | Replaces the built-in `DEFAULT_REDACT` list for `log_args` and `audit`. `None` restores it. |
 | `redact_extra` | Names **added** to the redaction list (the built-ins stay), for `log_args` and `audit`. |
+| `backend_errors` | Default `on_backend_error` for shared backends: `"raise"`, `"local"` or `"allow"`. |
+| `shared` | Redis client or `SharedBackends` used by presets and `PolicyRegistry` when a policy names no backend. |
+| `cache_codec` | `(dumps, loads)` pair, the default codec for sync and async Redis stores. |
 
 Each key you pass replaces that key as a whole (`retry={...}` replaces the previous retry defaults); keys you don't mention are untouched. Unknown keys raise `TypeError` with a hint:
 

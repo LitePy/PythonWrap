@@ -11,9 +11,10 @@ from gateway_app.app import build_gateway
 from gateway_app.gateway import Gateway, UnknownTenant
 from gateway_app.providers import Provider
 
-from python_wrap import AuditTape, BudgetExceeded, StreamTimeout
 from python_wrap.__main__ import main as python_wrap_cli
 from python_wrap.chaos import chaos
+from python_wrap.genai import AuditTape
+from python_wrap.llm import BudgetExceeded, StreamTimeout
 from python_wrap.llm_testing import FakeStream, fake_llm
 
 

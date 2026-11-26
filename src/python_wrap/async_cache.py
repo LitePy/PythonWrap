@@ -15,13 +15,14 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import contextlib
 import copy
+import datetime
 import functools
 import inspect
-import json
-import logging
 import math
 import pickle
+import random
 import re
 import threading
 from collections import OrderedDict
@@ -29,8 +30,21 @@ from collections.abc import Awaitable, Callable, Hashable
 from typing import Any, Protocol, TypeVar, runtime_checkable
 
 from python_wrap import _core, _fork
-from python_wrap._runtime import digest
-from python_wrap.caching import CacheInfo, _await_shared, _make_key_builder, _shared_future
+from python_wrap._backend import BackendMonitor
+from python_wrap._runtime import digest, stable_digest
+from python_wrap.caching import (
+    _TAG_PREFIX,
+    CacheInfo,
+    _async_tag_clients,
+    _await_shared,
+    _decode,
+    _exception_types,
+    _make_key_builder,
+    _shared_future,
+    _tag_versions,
+    _ttl_seconds,
+)
+from python_wrap.stores import KEY_FORMAT, InvalidSignature, json_codec
 
 __all__ = [
     "AsyncCacheStore",
@@ -145,31 +159,6 @@ class AsyncMemoryStore:
         return self.size()
 
 
-def json_codec() -> tuple[Callable[[Any], bytes], Callable[[bytes], Any]]:
-    """Return ``(dumps, loads)`` that store entries as JSON instead of pickle.
-
-    Use it with `AsyncRedisStore` when the Redis instance is not fully trusted, since
-    unpickling attacker-controlled bytes can execute code. Cached values must be
-    JSON-serialisable; tuples come back as lists.
-
-    Example:
-        ```python
-        from python_wrap.async_cache import json_codec
-
-        dumps, loads = json_codec()
-        assert loads(dumps([{"a": 1}, None])) == [{"a": 1}, None]
-        ```
-    """
-
-    def dumps(value: Any) -> bytes:
-        return json.dumps(value, separators=(",", ":")).encode("utf-8")
-
-    def loads(data: bytes) -> Any:
-        return json.loads(data)
-
-    return dumps, loads
-
-
 class AsyncRedisStore:
     """A namespaced `AsyncCacheStore` for ``redis.asyncio``-compatible clients.
 
@@ -199,37 +188,60 @@ class AsyncRedisStore:
         client: Any,
         prefix: str,
         *,
-        dumps: Callable[[Any], bytes] = pickle.dumps,
-        loads: Callable[[bytes], Any] = pickle.loads,
+        dumps: Callable[[Any], bytes] | None = None,
+        loads: Callable[[bytes], Any] | None = None,
         key_format: Callable[[Hashable], str] | None = None,
         fail_open: bool = True,
+        retry_backend_after: float = 1.0,
+        version: int | None = None,
     ) -> None:
         if not prefix:
             raise ValueError("AsyncRedisStore needs a nonempty per-function prefix")
-        self.client, self.prefix = client, prefix
-        self.dumps, self.loads = dumps, loads
+        if version is not None and (
+            isinstance(version, bool) or not isinstance(version, int) or version < 1
+        ):
+            raise ValueError("version must be a positive integer")
+        if dumps is None and loads is None:
+            from python_wrap.config import get_config
+
+            codec = get_config().get("cache_codec")
+            if codec is None:
+                import warnings
+
+                warnings.warn(
+                    "implicit pickle cache codec is deprecated; pass a codec",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+                codec = (pickle.dumps, pickle.loads)
+            dumps, loads = codec
+        self.client, self.prefix = client, prefix + (f"v{version}:" if version else "")
+        self.dumps, self.loads = dumps or pickle.dumps, loads or pickle.loads
         self.key_format, self.fail_open = key_format, fail_open
+        self._monitor = BackendMonitor(
+            "cache", prefix, "allow" if fail_open else "raise", retry_backend_after
+        )
 
     def _key(self, key: Hashable) -> str:
-        return self.prefix + (self.key_format(key) if self.key_format else digest(key))
+        if self.key_format:
+            return self.prefix + self.key_format(key)
+        return self.prefix + KEY_FORMAT + stable_digest(key)
 
     async def _run(self, action: Callable[[], Awaitable[Any]], default: Any = None) -> Any:
-        try:
-            return await action()
-        except Exception:
-            if not self.fail_open:
-                raise
-            logging.getLogger("python_wrap").warning(
-                "AsyncRedisStore operation failed", exc_info=True
-            )
-            return default
+        return await self._monitor.acall("cache", action, lambda: default)
 
     async def get(self, key: Hashable, /) -> Any | None:
         """Return a decoded entry, or None on a miss."""
 
         async def read() -> Any:
             value = await self.client.get(self._key(key))
-            return None if value is None else self.loads(value)
+            if value is None:
+                return None
+            try:
+                return self.loads(value)
+            except InvalidSignature:
+                _core.emit("cache.rejected", self.prefix, reason="signature")
+                return None
 
         return await self._run(read)
 
@@ -380,10 +392,16 @@ class ThreadedStore:
             return None
 
 
-def _split(entry: Any) -> tuple[Any, float | None] | None:
-    """Validate a stored entry (a JSON codec yields lists); None means unusable."""
+def _split(entry: Any) -> tuple[Any, float | None, bool, float | None] | None:
+    """Validate a stored entry (a JSON codec yields lists); None means unusable.
+
+    Entries are ``(value, expires)`` or, for stale-while-revalidate and cached
+    exceptions, ``(value, expires, is_exception, fresh_until)``.
+    """
     if isinstance(entry, (tuple, list)) and len(entry) == 2:
-        return entry[0], entry[1]
+        return entry[0], entry[1], False, entry[1]
+    if isinstance(entry, (tuple, list)) and len(entry) in (4, 5):
+        return entry[0], entry[1], bool(entry[2]), entry[3]
     return None
 
 
@@ -395,8 +413,24 @@ def amemoize(
     cache_none: bool = True,
     copy_result: bool = False,
     singleflight: bool = True,
+    stale_ttl: float | datetime.timedelta | None = None,
+    cache_exceptions: type[BaseException] | tuple[type[BaseException], ...] = (),
+    exception_ttl: float | datetime.timedelta | None = None,
+    logger: _core.LoggerLike = None,
+    lock: Any = None,
+    lock_ttl: float = 30,
+    lock_wait: float = 5,
+    tags: Callable[..., Any] | None = None,
+    ttl_jitter: float = 0.0,
 ) -> Callable[[F], F]:
     """Cache the results of an ``async def`` function in an `AsyncCacheStore`.
+
+    ``stale_ttl``, ``cache_exceptions`` and ``exception_ttl`` behave as in
+    `python_wrap.caching.memoize`: a stale entry is served at once while one background
+    task refreshes it (a failed refresh keeps the stale value, logs a warning and emits
+    ``cache.refresh_failed``), and a listed exception is stored and re-raised on hits.
+    Cached exceptions are never served stale; a shared store needs a codec that can
+    encode them.
 
     Concurrent misses for one key on one event loop share a single computation when
     ``singleflight`` is true. Exceptions are never cached and reach every waiter;
@@ -415,6 +449,20 @@ def amemoize(
         cache_none: Cache ``None`` results. If False, None is recomputed every time.
         copy_result: Deepcopy values on write and on delivery.
         singleflight: Share one in-flight computation between concurrent misses.
+        stale_ttl: Seconds after ``ttl`` during which the stale value is still served
+            while a background refresh runs. Requires ``ttl``.
+        cache_exceptions: Exception class (or tuple) cached and re-raised like results.
+            ``asyncio.CancelledError`` never is.
+        exception_ttl: Seconds a cached exception stays valid; defaults to ``ttl``.
+        logger: Logger (or name) for failed background refreshes.
+        lock: A lease backend shared by every process (prefer `AsyncRedisLock`): one
+            process computes a missing key, the others wait up to ``lock_wait`` and read
+            the store again. Stale refreshes take it without waiting. Needs ``store``.
+        lock_ttl: Seconds the stampede lease lives (renewed while computing).
+        lock_wait: Seconds a process waits for another's computation.
+        tags: ``tags(*args, **kwargs)`` returning tag names; see
+            `python_wrap.caching.invalidate_tags` and ``ainvalidate_tags``.
+        ttl_jitter: Shorten each ttl by a random share up to this (0 to 1).
 
     Raises:
         TypeError: If the decorated function is not ``async def``, or an option has the
@@ -456,6 +504,32 @@ def amemoize(
     ):
         if not isinstance(val, bool):
             raise TypeError(f"{opt} must be bool")
+    if stale_ttl is not None and ttl is None:
+        raise ValueError("stale_ttl requires ttl")
+    if lock is not None and store is None:
+        raise ValueError("lock= coordinates processes through a shared store; pass store=")
+    if not 0 <= ttl_jitter < 1:
+        raise ValueError("ttl_jitter must be in [0, 1)")
+    tag_client: Any = getattr(store, "client", None) if tags is not None else None
+    tag_async = tag_client is not None and _core.is_async(tag_client.get)
+    if tag_async:
+        _async_tag_clients[id(tag_client)] = tag_client
+    elif tag_client is not None:
+        from python_wrap.caching import _tag_clients
+
+        _tag_clients[id(tag_client)] = tag_client
+
+    async def versions(names: list[str]) -> dict[str, str] | None:
+        if not tag_async:
+            return _tag_versions(names, tag_client)
+        try:
+            return {n: _decode(await tag_client.get(_TAG_PREFIX + digest(n))) for n in names}
+        except Exception:  # unknown versions read as a miss
+            return None
+
+    stale_s = _ttl_seconds(stale_ttl)
+    exc_types = _exception_types(cache_exceptions)
+    exc_ttl = _ttl_seconds(exception_ttl) if exception_ttl is not None else ttl
 
     def decorate(func: F) -> F:
         if not inspect.iscoroutinefunction(func):
@@ -466,18 +540,21 @@ def amemoize(
         hits = misses = 0
         stats_lock = threading.Lock()
         inflight: dict[tuple[int, Hashable], asyncio.Future[Any]] = {}
+        background: set[asyncio.Future[Any]] = set()  # strong refs to refresh tasks
 
         def isolate(value: Any) -> Any:
             return copy.deepcopy(value) if copy_result else value
 
-        def lookup(raw: Any) -> tuple[bool, Any]:
+        def lookup(raw: Any) -> tuple[bool, Any, bool, bool]:
+            """``(found, value, is_exception, stale)`` for a raw store entry."""
             parts = _split(raw)
             if parts is None:
-                return False, None
-            value, deadline = parts
-            if deadline is not None and _core.wall_time() >= deadline:
-                return False, None
-            return True, value
+                return False, None, False, False
+            value, expires, is_exc, fresh = parts
+            now = _core.wall_time()
+            if expires is not None and now >= expires:
+                return False, None, False, False
+            return True, value, is_exc, fresh is not None and now >= fresh
 
         def count(hit: bool) -> None:
             nonlocal hits, misses
@@ -489,33 +566,86 @@ def amemoize(
             if _core.listeners:
                 _core.emit("cache.hit" if hit else "cache.miss", name)
 
-        async def compute(k: Hashable, args: Any, kwargs: Any) -> Any:
-            result = await func(*args, **kwargs)
+        async def save(k: Hashable, value: Any, is_exc: bool, tv: Any = None) -> None:
+            life = exc_ttl if is_exc else ttl
+            if ttl_jitter and life:
+                life *= 1 - random.random() * ttl_jitter  # nosec B311 - not security
+            keep = life if is_exc or life is None or stale_s is None else life + stale_s
+            now = _core.wall_time()
+            expires = None if keep is None else now + keep
+            fresh = None if life is None else now + life
+            plain = not is_exc and fresh == expires and tags is None  # old readers: 2-tuples
+            entry: tuple[Any, ...] = (value, expires) if plain else (value, expires, is_exc, fresh)
+            if tags is not None:
+                entry = (*entry, tv)
+            await backend.set(k, entry, keep)
+
+        async def run(k: Hashable, args: Any, kwargs: Any) -> Any:
+            tv = None if tags is None else await versions(list(tags(*args, **kwargs)))
+            try:
+                result = await func(*args, **kwargs)
+            except exc_types as exc:
+                if not isinstance(exc, asyncio.CancelledError):
+                    await save(k, exc, True, tv)
+                raise
             if result is not None or cache_none:
-                deadline = None if ttl is None else _core.wall_time() + ttl
-                await backend.set(k, (isolate(result), deadline), ttl)
+                await save(k, isolate(result), False, tv)
             return result
 
-        @functools.wraps(func)
-        async def wrapper(*args: Any, **kwargs: Any) -> Any:
-            if _core.overrides.disable_caching:
-                return await func(*args, **kwargs)
-            k = build_key(args, kwargs)
-            found, value = lookup(await backend.get(k))
-            if found:
-                count(True)
-                return isolate(value)
-            if not singleflight:
-                count(False)
-                return await compute(k, args, kwargs)
-            fkey = (id(asyncio.get_running_loop()), k)
-            shared = inflight.get(fkey)
-            if shared is not None:
-                count(True)
-                return isolate(await _await_shared(shared))
+        def lease_for(k: Hashable, wait: bool) -> Any:
+            from python_wrap.coordination import Lease
+
+            return Lease(
+                f"amemo:{digest(name)}:{stable_digest(k)}",
+                backend=lock,
+                ttl=lock_ttl,
+                wait=wait,
+                timeout=lock_wait if wait else None,
+            )
+
+        async def compute(k: Hashable, args: Any, kwargs: Any, refreshing: bool = False) -> Any:
+            """Compute and store, once across processes when ``lock`` is set."""
+            if lock is None:
+                return await run(k, args, kwargs)
+            from python_wrap.coordination import AlreadyRunning
+
+            lease = lease_for(k, not refreshing)
+            try:
+                await lease.__aenter__()
+            except AlreadyRunning:
+                lease = None
+            try:
+                if lease is None or not refreshing:
+                    found, value, is_exc, stale = await read(k)
+                    if found and (lease is None or not stale):
+                        if is_exc:
+                            raise value
+                        return value  # another process computed (or is refreshing) it
+                return await run(k, args, kwargs)
+            finally:
+                if lease is not None:
+                    with contextlib.suppress(Exception):
+                        await lease.__aexit__(None, None, None)
+
+        async def read(k: Hashable) -> tuple[bool, Any, bool, bool]:
+            raw = await backend.get(k)
+            found, value, is_exc, stale = lookup(raw)
+            if found and tags is not None:
+                recorded = raw[4] if isinstance(raw, (tuple, list)) and len(raw) == 5 else None
+                if recorded and await versions(list(recorded)) != recorded:
+                    return False, None, False, False
+            return found, value, is_exc, stale
+
+        def start(
+            fkey: tuple[int, Hashable],
+            k: Hashable,
+            args: Any,
+            kwargs: Any,
+            refreshing: bool = False,
+        ) -> Any:
+            """Run one computation for ``fkey`` and return the future its callers share."""
             shared = _shared_future()
             inflight[fkey] = shared
-            count(False)
 
             def finish(task: asyncio.Future[Any]) -> None:
                 if inflight.get(fkey) is shared:
@@ -531,12 +661,57 @@ def amemoize(
                     shared.set_result(task.result())
 
             try:
-                task = asyncio.ensure_future(compute(k, args, kwargs))
+                task = asyncio.ensure_future(compute(k, args, kwargs, refreshing))
             except BaseException:
                 inflight.pop(fkey, None)
                 raise
             task.add_done_callback(finish)
-            return isolate(await _await_shared(shared))
+            return shared
+
+        def refresh(k: Hashable, args: Any, kwargs: Any) -> None:
+            fkey = (id(asyncio.get_running_loop()), k)
+            if fkey in inflight:
+                return  # a refresh (or a miss) for this key is already running
+            shared = start(fkey, k, args, kwargs, refreshing=True)
+
+            def failed(fut: asyncio.Future[Any]) -> None:
+                if not fut.cancelled() and (exc := fut.exception()) is not None:
+                    _core.get_logger(logger).warning(
+                        "amemoize: background refresh of %s failed; keeping the stale value",
+                        name,
+                        exc_info=exc,
+                    )
+                    _core.emit("cache.refresh_failed", name, exception=exc)
+
+            shared.add_done_callback(failed)
+            background.add(shared)
+            shared.add_done_callback(background.discard)
+            if _core.listeners:
+                _core.emit("cache.stale", name)
+
+        @functools.wraps(func)
+        async def wrapper(*args: Any, **kwargs: Any) -> Any:
+            if _core.overrides.disable_caching:
+                return await func(*args, **kwargs)
+            k = build_key(args, kwargs)
+            found, value, is_exc, stale = await read(k)
+            if found:
+                count(True)
+                if stale and not is_exc:
+                    refresh(k, args, kwargs)
+                if is_exc:
+                    raise value
+                return isolate(value)
+            if not singleflight:
+                count(False)
+                return await compute(k, args, kwargs)
+            fkey = (id(asyncio.get_running_loop()), k)
+            shared = inflight.get(fkey)
+            if shared is not None:
+                count(True)
+                return isolate(await _await_shared(shared))
+            count(False)
+            return isolate(await _await_shared(start(fkey, k, args, kwargs)))
 
         async def cache_clear() -> None:
             """Remove every entry from the store and reset the statistics."""

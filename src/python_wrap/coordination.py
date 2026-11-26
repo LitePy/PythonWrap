@@ -18,6 +18,8 @@ from python_wrap._runtime import call_key, seconds
 
 __all__ = [
     "AlreadyRunning",
+    "AsyncRedisLock",
+    "AsyncRedisSemaphore",
     "Lease",
     "LeaseLost",
     "LocalLease",
@@ -136,6 +138,37 @@ class RedisLock:
 
 class RedisSemaphore(RedisLock):
     """The same atomic lease backend, with capacity supplied by Lease(limit=...)."""
+
+
+class AsyncRedisLock(RedisLock):
+    """`RedisLock` for ``redis.asyncio`` clients: every round trip is awaited, not threaded.
+
+    Same Lua script and keys as `RedisLock`, so sync and async processes contend for one
+    lease. Use it from ``async with Lease(...)``; a synchronous ``with`` raises TypeError.
+    """
+
+    async def _call(  # type: ignore[override]
+        self, op: str, key: str, token: str, ttl: float, limit: int = 1
+    ) -> bool:
+        _validate_request(key, token, ttl, limit)
+        return bool(
+            await self.client.eval(
+                _LEASE, 1, self.prefix + key, op, token, max(1, math.ceil(ttl * 1000)), limit
+            )
+        )
+
+    async def acquire(self, key: str, token: str, ttl: float, limit: int = 1) -> bool:  # type: ignore[override]
+        return await self._call("acquire", key, token, ttl, limit)
+
+    async def renew(self, key: str, token: str, ttl: float) -> bool:  # type: ignore[override]
+        return await self._call("renew", key, token, ttl)
+
+    async def release(self, key: str, token: str) -> bool:  # type: ignore[override]
+        return await self._call("release", key, token, 1)
+
+
+class AsyncRedisSemaphore(AsyncRedisLock):
+    """`AsyncRedisLock` with capacity supplied by Lease(limit=...)."""
 
 
 class _SQLLock:
@@ -292,6 +325,10 @@ class SqlAppLock(_SQLLock):
 _LOCAL = LocalLease()
 
 
+async def _inline(fn: Callable[..., Any], *args: Any) -> Any:
+    return fn(*args)
+
+
 async def _drain(task: asyncio.Task[Any]) -> tuple[Any, BaseException | None, bool]:
     """Settle cleanup even under repeated outside cancellation; remember cancellation."""
     cancelled = False
@@ -328,7 +365,8 @@ class Lease:
         timeout: float | None = None,
         renew: bool = True,
     ) -> None:
-        self.key, self.backend = key, backend if backend is not None else _LOCAL
+        self.key = key
+        self.backend: Any = backend if backend is not None else _LOCAL
         self.ttl = seconds(ttl)
         self.token = uuid.uuid4().hex
         _validate_request(key, self.token, self.ttl, limit)
@@ -336,6 +374,8 @@ class Lease:
             timeout = seconds(timeout, positive=False)
         self.limit, self.wait, self.timeout, self.auto_renew = limit, wait, timeout, renew
         self.lost = False
+        self._async = _core.is_async(self.backend.acquire)
+        self._inline = type(self.backend) is LocalLease  # built-in, in memory: nothing blocks
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._task: asyncio.Task[None] | None = None
@@ -370,8 +410,35 @@ class Lease:
         except Exception:
             self.lost = True
 
+    async def _try_async(self) -> bool:
+        try:
+            return bool(await self.backend.acquire(self.key, self.token, self.ttl, self.limit))
+        except BaseException:
+            try:
+                await self.backend.release(self.key, self.token)
+            except Exception:
+                logging.getLogger("python_wrap").exception("lease acquire cleanup failed")
+            raise
+
+    async def _renew_async(self) -> None:
+        try:
+            self.lost = self.lost or not await self.backend.renew(self.key, self.token, self.ttl)
+        except Exception:
+            self.lost = True
+
+    def _io(self, sync: Callable[..., Any], native: Callable[..., Any], *args: Any) -> Any:
+        """Awaitable backend step: native for async backends, inline for local, else threaded."""
+        if self._async:
+            return native(*args)
+        return _inline(sync, *args) if self._inline else asyncio.to_thread(sync, *args)
+
+    def _sync_only(self) -> None:
+        if self._async:
+            raise TypeError("this lease backend is async; use 'async with', not 'with'")
+
     def check(self) -> None:
         """Check and extend this active lease, raising LeaseLost if ownership is gone."""
+        self._sync_only()
         if os.getpid() != self._pid or not self._active:
             raise RuntimeError("lease is not active in this process")
         self._renew()
@@ -379,8 +446,15 @@ class Lease:
             raise LeaseLost(self.key)
 
     async def check_async(self) -> None:
-        """Async counterpart of check(), offloading synchronous backend I/O."""
-        task = asyncio.create_task(asyncio.to_thread(self.check))
+        """Async counterpart of check(); synchronous backend I/O runs in a thread."""
+        if self._async:
+            if os.getpid() != self._pid or not self._active:
+                raise RuntimeError("lease is not active in this process")
+            await self._renew_async()
+            if self.lost:
+                raise LeaseLost(self.key)
+            return
+        task = asyncio.ensure_future(self._io(self.check, self.check))
         _, error, cancelled = await _drain(task)
         if cancelled:
             raise asyncio.CancelledError
@@ -390,6 +464,7 @@ class Lease:
     def __enter__(self) -> Lease:
         import time
 
+        self._sync_only()
         self._prepare()
         try:
             start = time.monotonic()
@@ -444,15 +519,14 @@ class Lease:
             raise LeaseLost(self.key)
 
     async def _atry(self) -> bool:
-        task = asyncio.create_task(asyncio.to_thread(self._try))
+        task = asyncio.ensure_future(self._io(self._try, self._try_async))
         try:
             return await asyncio.shield(task)
         except asyncio.CancelledError:
             acquired, error, _ = await _drain(task)
             if error is None and acquired:
-                cleanup = asyncio.create_task(
-                    asyncio.to_thread(self.backend.release, self.key, self.token)
-                )
+                release = self.backend.release
+                cleanup = asyncio.ensure_future(self._io(release, release, self.key, self.token))
                 _, cleanup_error, _ = await _drain(cleanup)
                 if cleanup_error is not None:
                     logging.getLogger("python_wrap").warning("cancelled lease cleanup failed")
@@ -474,7 +548,7 @@ class Lease:
                 async def beat() -> None:
                     while True:
                         await asyncio.sleep(self.ttl / 3)
-                        renewal = asyncio.create_task(asyncio.to_thread(self._renew))
+                        renewal = asyncio.ensure_future(self._io(self._renew, self._renew_async))
                         try:
                             await asyncio.shield(renewal)
                         except asyncio.CancelledError:
@@ -501,7 +575,8 @@ class Lease:
                 self._task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await self._task
-            return bool(await asyncio.to_thread(self.backend.release, self.key, self.token))
+            release = self.backend.release
+            return bool(await self._io(release, release, self.key, self.token))
 
         cleanup = asyncio.create_task(finish())
         try:

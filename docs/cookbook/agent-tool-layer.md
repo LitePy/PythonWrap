@@ -9,19 +9,9 @@ An agent loop calls a model, the model asks for tools, tools change the world. T
 ```python
 import json
 
-from python_wrap import (
-    ApprovalDenied,
-    AuditTape,
-    RunBudgetExceeded,
-    RunGuard,
-    ToolPolicy,
-    ToolRegistry,
-    agent_run,
-    fake_llm,
-    record_step,
-    traced_llm,
-    traced_tool,
-)
+from python_wrap.agents import ApprovalDenied, RunBudgetExceeded, RunGuard, ToolPolicy, ToolRegistry, agent_run, record_step
+from python_wrap.genai import AuditTape, traced_llm, traced_tool
+from python_wrap.llm_testing import fake_llm
 from python_wrap.llm import Budget
 
 tape = AuditTape()

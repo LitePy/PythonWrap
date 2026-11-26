@@ -57,7 +57,9 @@ class HealthRegistry:
                 continue
             try:
                 state = getattr(obj, "state", None)
-                if state is not None:
+                if hasattr(obj, "degraded"):
+                    result[name] = {"healthy": True, "degraded": bool(obj.degraded)}
+                elif state is not None:
                     value = getattr(state, "value", state)
                     result[name] = {"healthy": value == "closed", "state": value}
                 elif hasattr(obj, "active") and hasattr(obj, "waiting"):
@@ -93,7 +95,8 @@ class HealthRegistry:
     def summary(self, *, critical: Iterable[str] | None = None) -> dict[str, Any]:
         """An overall status for load balancers and dashboards.
 
-        ``status`` is ``"ok"`` when every component is healthy, ``"down"`` when a
+        ``status`` is ``"ok"`` when every component is healthy (``"degraded"`` too while a shared
+        backend runs on its local fallback), ``"down"`` when a
         *critical* component is unhealthy, otherwise ``"degraded"``. With
         ``critical=None`` every component is critical. ``http_status`` is 200 for
         ``ok``/``degraded`` and 503 for ``down`` (so an optional dependency with an
@@ -116,7 +119,7 @@ class HealthRegistry:
         unhealthy = sorted(name for name, data in components.items() if not data["healthy"])
         required = set(components) if critical is None else set(critical)
         if not unhealthy:
-            status = "ok"
+            status = "degraded" if any(d.get("degraded") for d in components.values()) else "ok"
         elif required & set(unhealthy):
             status = "down"
         else:

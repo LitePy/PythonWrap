@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from python_wrap import AuditTape
+from python_wrap.genai import AuditTape
 
 from .gateway import Gateway
 from .providers import Provider

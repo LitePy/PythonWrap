@@ -14,9 +14,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from python_wrap import fake_llm
 from python_wrap.llm import Budget, BudgetExceeded, fallback_models, llm_cache
-from python_wrap.llm_testing import OverloadedError, RateLimitError
+from python_wrap.llm_testing import OverloadedError, RateLimitError, fake_llm
 from python_wrap.presets import llm_client
 from python_wrap.testing import fake_clock
 

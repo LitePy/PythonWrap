@@ -8,6 +8,14 @@ request or task, replace framework logging, or start periodic jobs at import.
 Attach `ContextFilter` to application log handlers if you want the bound fields on all
 records; see [production observability](../features/observability/production.md).
 
+To pass a request budget between services, enable `trust_deadline_header=True` on the
+web adapter and `HttpPolicy(propagate=True)` on the outbound HTTP client. The client
+sends the request id and remaining budget in milliseconds; the receiver uses the
+smaller of that value and its own `budget`. Trust the inbound deadline only when the
+caller is trusted. `set_headers(request_id=..., deadline=...)` in
+`python_wrap.propagation` changes the header names for both sides. Trace context is
+handled by OpenTelemetry instrumentation separately.
+
 ## Flask
 
 <!-- skip -->
@@ -77,6 +85,9 @@ With `use_soft_deadline=True`, the task's configured soft limit becomes a cooper
 budget for python-wrap retry/timeout code; Celery retains ownership of actual task time
 limits. Signal handlers are scoped to this app. Installation returns a disconnect handle
 and repeated installation reuses the active handle.
+Published tasks carry the current request id. Pass `inherit_deadline=True` to `install`
+when a task should stop within the caller's remaining budget; it is off by default
+because most queued tasks must continue after the request ends.
 
 ### Retrying tasks with Celery and python-wrap together
 
@@ -117,6 +128,35 @@ Prefork workers each hold their own in-process breaker state, so without a share
 backend every child probes a dead dependency separately. `shared_breaker` stores the
 state in Redis (or any state backend) under one stable name per dependency; see
 [multi-process breakers](../features/resilience/multi-process-breakers.md).
+
+### Late acknowledgement, redelivery and the visibility timeout
+
+With `acks_late=True` a task is delivered again after a worker dies, and a task that runs
+longer than a Redis/SQS broker's `visibility_timeout` is delivered again while it still runs.
+Three helpers cover the interactions:
+
+<!-- skip -->
+```python
+from python_wrap.celery import check_visibility, idempotent_task, install, resilient_task
+
+install(app)  # soft limit, else hard limit minus hard_margin=5 s, becomes the deadline
+
+
+@app.task(bind=True, acks_late=True, max_retries=8, time_limit=300)
+@idempotent_task(store=result_store)       # RedisStore(client, "tasks:", fail_open=False)
+@resilient_task(vendor_policy, delays=[30, 120, 600])
+def sync_orders(self, account_id: int) -> None: ...
+```
+
+- `resilient_task(policy)` runs the body through the policy and calls `retry_task` for
+  `CircuitOpenError`, `RateLimitExceeded` and `BulkheadFull`, using the error's `retry_after`
+  as the countdown. With `requeue_when_limited=True` (default) a blocking limiter raises
+  instead of sleeping, so the task waits in the queue and never holds a worker slot.
+- `idempotent_task(key=..., store=..., ttl=...)` keys on task name plus arguments: a second
+  delivery returns the stored result, and a delivery that finds the task running is re-queued
+  after `requeue_delay` seconds instead of run. Use a shared store for a fleet.
+- `check_visibility(policy, visibility_timeout)` reports PW023 for blocking limiters,
+  unbounded bulkhead queues and retry `max_time` that outlive the visibility timeout.
 
 ## Worker lifecycle
 

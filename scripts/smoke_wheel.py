@@ -73,7 +73,7 @@ CHECK = textwrap.dedent(
     from python_wrap import retry, timeout
     from python_wrap.llm import Budget
     from python_wrap.presets import llm_client
-    from python_wrap import fake_llm
+    from python_wrap.llm_testing import fake_llm
     from python_wrap.testing import fake_clock
     from python_wrap.llm_testing import RateLimitError
 

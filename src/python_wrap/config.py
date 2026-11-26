@@ -21,7 +21,7 @@ __all__ = ["configure", "configured", "get_config", "reset_config"]
 UNSET: Any = object()
 """Sentinel meaning "argument not passed"; resolved against the configured defaults."""
 
-_KEYS = ("logger", "retry", "redact", "redact_extra")
+_KEYS = ("logger", "retry", "redact", "redact_extra", "backend_errors", "shared", "cache_codec")
 _RETRY_KEYS = (
     "max_attempts",
     "delay",
@@ -77,6 +77,20 @@ def _validate(key: str, value: Any) -> Any:
             value.get("max_time"),
         )
         return dict(value)
+    if key == "shared":
+        return value
+    if key == "cache_codec":
+        if value is not None and (
+            not isinstance(value, tuple)
+            or len(value) != 2
+            or not all(callable(part) for part in value)
+        ):
+            raise TypeError("cache_codec must be a (dumps, loads) callable pair or None")
+        return value
+    if key == "backend_errors":
+        if value is not None and value not in ("raise", "local", "allow"):
+            raise ValueError("backend_errors must be 'raise', 'local', 'allow' or None")
+        return value
     if key == "redact":
         return None if value is None else _names(value, "redact")
     return _names(value, "redact_extra")
@@ -100,6 +114,11 @@ def configure(**defaults: Any) -> None:
               `budget` (a `RetryBudget` shared by every retry applied afterwards).
             - `redact`: default redaction fragments for `log_args` and `audit`
               (replaces `DEFAULT_REDACT`); `None` restores it.
+            - `backend_errors`: default `on_backend_error` for shared backends:
+              `"raise"`, `"local"` (in-process fallback) or `"allow"` (admit, no accounting).
+            - `shared`: a Redis client or `python_wrap.shared.SharedBackends` that the
+              presets and `PolicyRegistry` use for breakers, limiters, bulkheads and
+              retry budgets that do not name their own backend. `None` clears it.
             - `redact_extra`: fragments added to the redaction list (the built-ins
               stay), for `log_args` and `audit`.
 
@@ -147,6 +166,9 @@ def get_config() -> dict[str, Any]:
             "retry": dict(_state.get("retry", {})),
             "redact": _state.get("redact"),
             "redact_extra": _state.get("redact_extra", ()),
+            "backend_errors": _state.get("backend_errors"),
+            "shared": _state.get("shared"),
+            "cache_codec": _state.get("cache_codec"),
         }
 
 

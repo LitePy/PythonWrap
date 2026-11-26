@@ -62,3 +62,15 @@ def test_decorators_preserve_metadata_and_async_nature():
         assert inspect.iscoroutinefunction(wrapped), deco
         assert wrapped.__name__ == "coro"
         assert inspect.signature(wrapped) == inspect.signature(coro)
+
+
+def test_moved_llm_and_agent_names_still_work_with_a_deprecation_warning():
+    from python_wrap import llm
+
+    with pytest.warns(DeprecationWarning, match="python_wrap.llm"):
+        assert python_wrap.Budget is llm.Budget
+    assert "Budget" not in python_wrap.__all__
+    assert "Budget" in dir(python_wrap)
+    assert python_wrap.mcp_guard.__module__ == "python_wrap.mcp_guard"  # stays a function
+    with pytest.raises(AttributeError):
+        python_wrap.no_such_name  # noqa: B018

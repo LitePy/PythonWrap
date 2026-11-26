@@ -99,6 +99,49 @@ mount_retries(session, HttpRetryPolicy(max_attempts=4))
 session.get("https://api.example.com/items")
 ```
 
+## A whole policy: breaker, limiter, bulkhead, timeouts
+
+Retries alone keep calling a dead host. `HttpPolicy` adds the other layers at the one place
+that sees the method, host, status and headers:
+
+<!-- skip -->
+```python
+import httpx
+import requests
+from python_wrap import CircuitBreaker, RateLimiter
+from python_wrap.http import (
+    AsyncPolicyTransport, HttpPolicy, HttpRetryPolicy, PolicyTransport, mount_policy,
+)
+
+policy = HttpPolicy(
+    retry=HttpRetryPolicy(max_attempts=3),
+    breaker=lambda name: CircuitBreaker(failure_threshold=5, name=name),  # one per host
+    limiter=lambda name: RateLimiter(30, 60, name=name),
+    per_host=True,               # state is created per host and named "http:<host>"
+    connect_timeout=3, read_timeout=10,
+    propagate=True,              # send X-Request-ID and X-Request-Deadline
+)
+
+sync_client = httpx.Client(transport=PolicyTransport(httpx.HTTPTransport(), policy))
+async_client = httpx.AsyncClient(transport=AsyncPolicyTransport(httpx.AsyncHTTPTransport(), policy))
+session = requests.Session()
+mount_policy(session, policy)
+```
+
+- 5xx responses and transport errors count as breaker failures; 4xx never do. `breaker=True`
+  builds a default breaker (5 failures, 30 s) that uses `configure(shared=...)` when set, so
+  every worker shares it.
+- A `429` with `Retry-After` pauses later calls to that host (if a `limiter` is set) instead of
+  letting them fail; a wait longer than `max_retry_after` or the deadline raises
+  `RateLimitExceeded`.
+- `connect_timeout` / `read_timeout` apply only where the caller set none (`requests` has none
+  by default), and every attempt's timeouts are shortened to the remaining
+  [deadline](../resilience/timeout.md).
+- Without `per_host`, pass ready-made objects and every host shares them. With it, pass
+  factories `name -> object` (a ready-made object is rejected so state is never shared by
+  accident).
+- `RetryTransport`, `AsyncRetryTransport` and `mount_retries` stay as thin retry-only wrappers.
+
 ## aiohttp and hand-written clients
 
 `http_retry` decorates any function or coroutine that returns an object with `.status` or `.status_code` and `.headers`. Declare the method, since the function's arguments are opaque. A non-idempotent method gets no retries unless you assert `idempotent=True`.

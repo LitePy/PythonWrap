@@ -10,6 +10,162 @@ Breaking changes are listed under **Breaking changes**, each with its migration.
 
 ## [Unreleased]
 
+## [0.4.0b2] - 2026-11-26
+
+### Breaking changes
+
+- `observability.enable()` now adds python_wrap events as span events on the current
+  span instead of opening a zero-length `pw.<event>` span per event. Pass
+  `spans="notifications"` for the old behaviour. The breaker-state metric is now an
+  observable gauge read at collection time for every breaker in the process.
+- Re-registering a named policy no longer resets its breaker: an open in-process breaker
+  stays open across `register()`/`load_from_mapping()` (also with new thresholds), and an
+  unchanged mapping keeps its generation. Call the breaker's `reset()` to close it.
+- Retry events carry a new `attempt_seconds` field; listeners that compare the whole
+  `fields` dict must allow it.
+
+### Security
+
+Review of the 0.4.0b2 additions (threat model: request-derived input reaching new
+in-memory tables, SQL built from configuration, names resolved from configuration,
+shared stores written by other processes). Fixed:
+
+- `guard_openai(limiter_key=...)` kept one limiter per key without a bound, so keys taken
+  from request data could grow memory without limit. At most 256 keys get their own
+  window; later keys share the base limiter.
+- `invalidate_tags` kept a token for every tag name ever invalidated. The table is now
+  bounded; when it is cleared a global epoch makes every older entry read as stale, so a
+  cleared token can never revive a stale cache entry.
+- `SqlResultStore` only accepts a plain identifier as table name, binds every value,
+  hashes call keys, and stores JSON by default (no pickle).
+- Policy mappings never import a dotted path: exception, predicate and backend names
+  resolve only through explicit registries. Write access to a `RedisSource` key is
+  control over every replica's resilience settings; protect it like configuration.
+- The breaker script hash is marked `usedforsecurity=False` (it is Redis's script id).
+
+### Deprecated
+
+- LLM, agent and MCP names (`Budget`, `guard_openai`, `RunGuard`, `AuditTape`,
+  `fake_llm` and 86 more) leave the top-level `python_wrap` namespace: import them from
+  `python_wrap.llm`, `python_wrap.agents`, `python_wrap.genai`, `python_wrap.adapters...`.
+  The old names still work with a `DeprecationWarning` and go in 0.6.0. `mcp_guard`
+  stays, since it shares its name with its module. `import python_wrap` now loads 45
+  modules instead of 57.
+
+### Changed
+
+- `concurrency` is split into `timeouts`, `ratelimit`, `debounce` (throttle and
+  debounce) and `singleflight`; `python_wrap.concurrency` re-exports every name, so
+  imports keep working. Code that patched a module global (`concurrency._HAS_SETITIMER`)
+  must patch the new module.
+- `docs/project/stability.md` publishes graduation criteria and target releases for the
+  provisional modules and a support window; `tests/test_stability.py` pins the storage
+  formats of the shared backends. `benchmarks/run.py --redis-url` measures shared layers
+  on a real Redis, and `benchmarks/soak.py --processes N --redis-url` soaks several
+  processes sharing one breaker and limiter.
+
+### Fixed
+
+- Shared cache keys (`RedisStore`, `AsyncRedisStore`) and `idempotent`/`single_instance` call
+  keys no longer depend on the per-process hash seed or dict insertion order: dict and set
+  arguments are encoded canonically. Values with no stable form raise `TypeError` naming the
+  argument (pass `key=`). Redis cache keys gain a `k2:` marker, so existing entries expire
+  instead of being misread; idempotency records written by 0.4.0b1 for the same call are not
+  recognised once, during the upgrade. New doctor check PW022.
+
+### Added
+
+- Policies can change at runtime: `policies.watch(source, interval=30)` with
+  `EnvSource`, `FileSource` or `RedisSource` validates and applies changed mappings,
+  emits `config.changed` / `config.rejected`, and keeps an open breaker open across a
+  reload. Mappings refer to exceptions, predicates and backends by name
+  (`"builtins.ConnectionError"`, `"db_transient"`, `"@default"`) through explicit
+  `register_exception` / `register_predicate` / `register_backend` registries; nothing
+  is imported by dotted path. Health reports include policy generations.
+- `guard_openai` guards `embeddings.create` (charging input tokens) and takes
+  `limiter_key=` for one token window per deployment. Contract tests cover
+  `AzureOpenAI`/`AsyncAzureOpenAI`, including a content-filter 400 that is not retried.
+- LangChain adapter: `guard_chat_model()` rebuilds a chat model with `max_retries=0`
+  and runs `invoke`/`ainvoke` through the budget, retry loop, policy and token limiter;
+  `stream`/`astream` are resume-safe. `PythonWrapCallback` observes calls and emits
+  `genai.llm_call`. `read_usage` understands LangChain `usage_metadata`. New
+  `langchain` extra.
+- OpenTelemetry export reaches parity with the Prometheus exporter from one shared
+  table (`observability.COUNTERS`): gave-up, budget-exhausted, rate-limit rejected,
+  backend-error and store-error counters, plus a component health gauge. Opt-in
+  `attempt_spans=` (one span per retry attempt, with its real duration) and
+  `wait_spans=`; `naming="otel"` uses OpenTelemetry-style names with units. Retry events
+  carry `attempt_seconds`. Shared breakers report their state in every process.
+- `memoize` and `amemoize` gain `lock=` (with `lock_ttl`, `lock_wait`): on a miss one
+  process computes under a shared lease while the others wait and read the store again;
+  stale refreshes take the same lease. `tags=` with `invalidate_tags()` /
+  `ainvalidate_tags()` drops every entry written with a tag through one version write per
+  tag, with no scan. `ttl_jitter=` spreads expiry of entries written together.
+- `SqlResultStore(engine)` keeps idempotency results in the application's own database
+  (PostgreSQL, SQL Server, SQLite through SQLAlchemy), with `ddl()` for migrations and
+  `purge_expired()` for a scheduled sweep. `idempotent(..., connection=...)` writes the
+  key row on the caller's connection, so the key and the function's own writes commit
+  or roll back together. CI now also runs the SQL Server backends through pyodbc.
+- Circuit breakers can open on a rate: `failure_rate` with `minimum_calls` over `window`,
+  and `slow_call_duration` with `slow_call_rate` (a slow half-open trial re-opens).
+  A non-default `failure_threshold` with `failure_rate` raises `ValueError`. Calls are
+  counted in ten time slots per window, locally and in the Redis and SQLite backends.
+  `CircuitStats` and the `circuit.state_changed` event add `failure_rate` and `slow_rate`.
+- `RedisBreakerState` and `AsyncRedisBreakerState` cache a closed state for `state_ttl`
+  seconds (default 1.0): calls are admitted with no store round trip and successes are
+  sent in batches (`flush_interval`, `flush_every`); failures, trials and admin calls
+  still go to the store at once. A process may admit calls for up to `state_ttl` after
+  another process opened the breaker; `state_ttl=0` restores one round trip per call.
+  The script runs with `EVALSHA` and reloads on `NOSCRIPT`.
+- Async-native shared backends: `AsyncRedisBreakerState`, `AsyncRedisLock` and
+  `AsyncRedisSemaphore` reuse the sync Lua scripts and keys, so sync and async processes
+  share state, and are awaited on the event loop instead of a worker thread. Breakers,
+  leases and shared bulkheads detect an async backend and raise `TypeError` when used
+  from sync code; `CircuitBreaker.areset()` and `aforce_open()` cover the admin calls.
+  `SharedBackends` (and `shared=`) builds the async classes for a `redis.asyncio`
+  client. `idempotent(store=...)` accepts an `AsyncCacheStore` (an `AsyncRedisStore`
+  gets a matching `AsyncRedisLock`). `amemoize` gains `stale_ttl`, `cache_exceptions`,
+  `exception_ttl` and `logger`, matching `memoize`. The benchmark adds shared rows for
+  the sync, async-native and async-through-a-thread paths.
+- Shared Redis caches accept `signed_pickle_codec(secret)`, a project `cache_codec`
+  default and a `version=` namespace. Bad signatures produce `cache.rejected` misses;
+  implicit pickle now warns before a later default change to JSON.
+- Retry, HTTP retry and Celery countdowns accept `jitter="full"` or `"equal"`;
+  doctor PW024 flags retries without backoff or jitter across worker processes.
+- Web adapters can trust a remaining-deadline header with `trust_deadline_header=True`;
+  Celery publishes and restores request ids and optionally inherits the caller's
+  deadline with `install(inherit_deadline=True)`. Header names can be set through
+  `python_wrap.propagation.set_headers`.
+- Celery: `resilient_task` (re-queue on open breaker, used-up limit or full bulkhead, with the
+  error's `retry_after`; blocking limiters raise instead of sleeping), `idempotent_task` (one
+  run per task name and arguments across redeliveries, re-queue while running),
+  `check_visibility` (doctor code PW023) and `install(hard_margin=5.0)`: a task with only a
+  hard time limit now gets a cooperative deadline of hard limit minus the margin.
+
+- `HttpPolicy` with `PolicyTransport`, `AsyncPolicyTransport` and `mount_policy`: retries plus
+  a circuit breaker, rate limiter and bulkhead (optionally one set per host), default
+  connect/read timeouts shortened to the surrounding deadline, 429 `Retry-After` pauses and
+  `propagate=True` request-id / `X-Request-Deadline` headers. `RetryTransport`,
+  `AsyncRetryTransport` and `mount_retries` are now thin wrappers over them.
+- `python_wrap.propagation`: the header pair and helpers used to carry the request id and the
+  remaining deadline across processes.
+
+- `on_backend_error="raise" | "local" | "allow"` on shared breakers, windows, quotas,
+  bulkheads and `RedisSource`, plus `configure(backend_errors=...)`, `retry_backend_after`,
+  the events `backend.error` / `backend.recovered`, and a `degraded` health status while a
+  fallback is active. `RedisStore`/`AsyncRedisStore` report through the same events.
+- `shared=` on every preset (`http_client`, `db_call`, `third_party_api`, `llm_client`) and
+  `configure(shared=...)`, also read by `PolicyRegistry`: breaker state, rate window, bulkhead
+  lease and retry budget move to Redis, keyed by the preset name. `SharedBackends` overrides
+  one layer. `RetryBudget(backend=...)` and `RedisRetryBudget` cap retries across a fleet.
+
+### Added
+
+- `on_backend_error="raise" | "local" | "allow"` on shared breakers, windows, quotas,
+  bulkheads and `RedisSource`, plus `configure(backend_errors=...)`, `retry_backend_after`,
+  the events `backend.error` / `backend.recovered`, and a `degraded` health status while a
+  fallback is active. `RedisStore`/`AsyncRedisStore` report through the same events.
+
 ## [0.4.0b1] - 2026-11-11
 
 First beta. The public API is feature-complete for 0.4: the remaining work before the
@@ -755,7 +911,8 @@ Core:
 
 Initial release.
 
-[Unreleased]: https://github.com/LitePy/PythonWrap/compare/v0.4.0b1...HEAD
+[Unreleased]: https://github.com/LitePy/PythonWrap/compare/v0.4.0b2...HEAD
+[0.4.0b2]: https://github.com/LitePy/PythonWrap/compare/v0.4.0b1...v0.4.0b2
 [0.4.0b1]: https://github.com/LitePy/PythonWrap/compare/v0.3.0...v0.4.0b1
 [0.3.0]: https://github.com/LitePy/PythonWrap/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/LitePy/PythonWrap/compare/v0.1.0...v0.2.1

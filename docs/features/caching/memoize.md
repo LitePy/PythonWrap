@@ -101,6 +101,18 @@ already supply some isolation, but does not by itself isolate shared async waite
 For tenant data, also include the authenticated tenant and relevant configuration
 generation in the key. Copying does not provide authorization or tenant partitioning.
 
+### Keys in shared stores
+
+A shared store (`RedisStore`, `AsyncRedisStore`) and the `idempotent`/`single_instance`
+keys use a canonical encoding: dict items and set members are sorted, so the same
+arguments give the same key in every process whatever its `PYTHONHASHSEED` or insertion
+order. Plain data (None, bool, int, float, str, bytes, tuple, list, dict, set, frozenset),
+enums, dataclasses, `datetime` and `decimal` values, `UUID` and paths are supported. Any
+other object raises `TypeError` naming the argument; pass `key=` for it. Redis keys carry
+a `k2:` format marker, so entries written by 0.4.0b1 are never misread and simply expire
+(`clear()` still removes them). `doctor` reports PW022 for a cached function with a shared
+store and no `key=` whose parameters are dicts, sets or unannotated.
+
 ## Expiry and size
 
 ```python
@@ -339,8 +351,8 @@ def price(sku: str) -> float:
 
 Keys are hashed by default and `clear()` escapes the namespace before scanning it.
 `cache_info().currsize` is **None** for `RedisStore`: statistics do not scan Redis.
-External deadlines use the live Unix wall clock. The adapter defaults to pickle for
-values, so only decode data from a trusted store or provide a safe application serializer.
+External deadlines use the live Unix wall clock. Implicit pickle now warns; pass
+`signed_pickle_codec(secret)` or `json_codec()` from `python_wrap.stores` for shared stores.
 
 Store methods are synchronous and a network-backed store can block an async event loop.
 Configure finite client timeouts and use a local cache for latency-sensitive async code.

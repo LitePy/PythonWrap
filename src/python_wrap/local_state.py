@@ -46,6 +46,14 @@ _SCHEMA = (
         id TEXT NOT NULL
     )""",
     "CREATE INDEX IF NOT EXISTS breaker_failures_name_ts ON breaker_failures (name, ts)",
+    """CREATE TABLE IF NOT EXISTS breaker_slots (
+        name TEXT NOT NULL,
+        slot INTEGER NOT NULL,
+        calls INTEGER NOT NULL DEFAULT 0,
+        failures INTEGER NOT NULL DEFAULT 0,
+        slow INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (name, slot)
+    )""",
 )
 
 _COLUMNS = (
@@ -174,7 +182,12 @@ class SQLiteBreakerState:
 
     # -- the contract ------------------------------------------------------------------
     def operate(
-        self, breaker: Any, operation: str, generation: int = 0, trial: bool = False
+        self,
+        breaker: Any,
+        operation: str,
+        generation: int = 0,
+        trial: bool = False,
+        slow: bool = False,
     ) -> dict[str, Any]:
         """Apply one breaker operation atomically and return the resulting row.
 
@@ -185,6 +198,7 @@ class SQLiteBreakerState:
             generation: The generation the call was admitted under; outcomes from an
                 older generation are ignored.
             trial: Whether the call was a half-open trial.
+            slow: Whether the call took longer than the breaker's ``slow_call_duration``.
 
         Returns:
             A dict with the same keys as `RedisBreakerState.operate`.
@@ -192,17 +206,59 @@ class SQLiteBreakerState:
         conn = self._connection()
         conn.execute("BEGIN IMMEDIATE")
         try:
-            data = self._apply(conn, breaker, operation, generation, trial)
+            data = self._apply(conn, breaker, operation, generation, trial, slow)
         except BaseException:
             conn.execute("ROLLBACK")
             raise
         conn.execute("COMMIT")
         return data
 
+    @staticmethod
+    def _slots(
+        conn: sqlite3.Connection,
+        name: str,
+        now: int,
+        window: int,
+        calls: int,
+        failed: int,
+        slow: int,
+    ) -> tuple[int, int, int]:
+        """Record an outcome in its time slot (ten per window) and sum the live slots."""
+        slot = now // max(1, window // 10)
+        conn.execute("DELETE FROM breaker_slots WHERE name=? AND slot<=?", (name, slot - 10))
+        if calls:
+            conn.execute(
+                "INSERT INTO breaker_slots (name, slot, calls, failures, slow) VALUES (?,?,?,?,?)"
+                " ON CONFLICT (name, slot) DO UPDATE SET calls=calls+excluded.calls,"
+                " failures=failures+excluded.failures, slow=slow+excluded.slow",
+                (name, slot, calls, failed, slow),
+            )
+        row = conn.execute(
+            "SELECT COALESCE(SUM(calls),0), COALESCE(SUM(failures),0), COALESCE(SUM(slow),0)"
+            " FROM breaker_slots WHERE name=?",
+            (name,),
+        ).fetchone()
+        return int(row[0]), int(row[1]), int(row[2])
+
     def _apply(
-        self, conn: sqlite3.Connection, breaker: Any, op: str, generation: int, is_trial: bool
+        self,
+        conn: sqlite3.Connection,
+        breaker: Any,
+        op: str,
+        generation: int,
+        is_trial: bool,
+        is_slow: bool = False,
     ) -> dict[str, Any]:
         name: str = breaker.name
+        frate = getattr(breaker, "failure_rate", None) or 0
+        srate = getattr(breaker, "slow_call_rate", None) or 0
+        minc, rated, slow = getattr(breaker, "minimum_calls", 1), bool(frate or srate), int(is_slow)
+        wc = wf = ws = 0
+        trip = False
+
+        def trips() -> bool:
+            return wc >= minc and bool((frate and wf >= frate * wc) or (srate and ws >= srate * wc))
+
         now = int(_core.wall_time() * 1000)
         threshold = breaker.failure_threshold
         window = 0 if breaker.window is None else max(1, math.ceil(breaker.window * 1000))
@@ -233,6 +289,7 @@ class SQLiteBreakerState:
             gen += 1
             total_failures = total_successes = total_rejected = 0
             conn.execute("DELETE FROM breaker_failures WHERE name=?", (name,))
+            conn.execute("DELETE FROM breaker_slots WHERE name=?", (name,))
         elif op == "force_open":
             state, opened, trials = "open", now, 0
             gen += 1
@@ -258,17 +315,29 @@ class SQLiteBreakerState:
                     trials = max(0, trials - 1)
                 if op == "success":
                     total_successes += 1
-                    if state == "half_open":
+                    if state == "half_open" and slow and srate:
+                        trip = True
+                    elif state == "half_open":
                         successes += 1
                         if successes >= target:
                             state, failures = "closed", 0
                             gen += 1
                             conn.execute("DELETE FROM breaker_failures WHERE name=?", (name,))
-                    elif window == 0:
-                        failures = 0
+                            conn.execute("DELETE FROM breaker_slots WHERE name=?", (name,))
+                    else:
+                        if window == 0:
+                            failures = 0
+                        if rated and not is_trial:
+                            wc, wf, ws = self._slots(conn, name, now, window, 1, 0, slow)
+                            trip = trips()
                 elif op == "failure":
                     total_failures += 1
-                    if window > 0:
+                    if rated and not is_trial and state != "half_open":
+                        wc, wf, ws = self._slots(conn, name, now, window, 1, 1, slow)
+                        trip = trips()
+                    if frate:
+                        failures = wf
+                    elif window > 0:
                         conn.execute(
                             "DELETE FROM breaker_failures WHERE name=? AND ts<=?",
                             (name, now - window),
@@ -282,9 +351,13 @@ class SQLiteBreakerState:
                         ).fetchone()[0]
                     else:
                         failures += 1
-                    if state == "half_open" or failures >= threshold:
-                        state, opened, trials, successes = "open", now, 0, 0
-                        gen += 1
+                    if state == "half_open" or (not frate and failures >= threshold):
+                        trip = True
+                if trip:
+                    state, opened, trials, successes = "open", now, 0, 0
+                    gen += 1
+        if rated and wc == 0:
+            wc, wf, ws = self._slots(conn, name, now, window, 0, 0, 0)
 
         conn.execute(
             "UPDATE breakers SET state=?, gen=?, opened=?, failures=?, trials=?, successes=?,"
@@ -316,4 +389,7 @@ class SQLiteBreakerState:
             "total_rejected": total_rejected,
             "opened": opened,
             "old": old,
+            "window_calls": wc,
+            "window_failures": wf,
+            "window_slow": ws,
         }

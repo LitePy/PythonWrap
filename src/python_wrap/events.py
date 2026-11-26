@@ -27,9 +27,13 @@ EVENT_NAMES: Mapping[str, str] = MappingProxyType(
         "retry.attempt_failed": (
             "An attempt failed and another will follow. Fields: attempt (int, 1-based), "
             "exception (BaseException, or None for a value rejected by retry_if_result), "
-            "next_delay (float seconds before the next attempt)."
+            "next_delay (float seconds before the next attempt), attempt_seconds (float or None, "
+            "how long the attempt ran)."
         ),
-        "retry.succeeded": "The call finally succeeded. Fields: attempts (int, total made).",
+        "retry.succeeded": (
+            "The call finally succeeded. Fields: attempts (int, total made), "
+            "attempt_seconds (float or None, the last attempt's duration)."
+        ),
         "retry.budget_exhausted": (
             "A shared RetryBudget refused another retry; the call stops (retry.gave_up "
             "follows). Fields: attempts (int), exception (BaseException, or None when "
@@ -37,12 +41,14 @@ EVENT_NAMES: Mapping[str, str] = MappingProxyType(
         ),
         "retry.gave_up": (
             "Attempts were exhausted. Fields: attempts (int), exception (BaseException, or "
-            "None when the last attempt returned a value rejected by retry_if_result)."
+            "None when the last attempt returned a value rejected by retry_if_result), "
+            "attempt_seconds (float or None, the last attempt's duration)."
         ),
         "timeout.expired": "A call exceeded its time limit. Fields: seconds (float, the limit).",
         "circuit.state_changed": (
             "A circuit breaker moved between states. function is the breaker name. "
-            "Fields: old (str), new (str): 'closed', 'open' or 'half_open'."
+            "Fields: old (str), new (str): 'closed', 'open' or 'half_open'; a breaker "
+            "with failure_rate or slow_call_rate adds failure_rate and slow_rate (float)."
         ),
         "circuit.rejected": (
             "A call was refused because the circuit is open. Fields: retry_after (float seconds)."
@@ -56,6 +62,7 @@ EVENT_NAMES: Mapping[str, str] = MappingProxyType(
         "throttle.skipped": "A call was skipped by throttle. No fields.",
         "cache.hit": "A cached value was returned. No fields.",
         "cache.miss": "No cached value; the function ran. No fields.",
+        "cache.rejected": "A cache entry failed signature verification. Fields: reason (str).",
         "cache.evicted": "An entry left the cache. Fields: reason (str): 'lru' or 'ttl'.",
         "cache.stale": (
             "A stale value was served (stale-while-revalidate) and a background refresh "
@@ -126,6 +133,21 @@ EVENT_NAMES: Mapping[str, str] = MappingProxyType(
             "A shared token window could not reach its storage and fell back to a local "
             "bucket (or raised, with fail_open=False). function is the window name. "
             "Fields: error (str, the exception class), op (str)."
+        ),
+        "backend.error": (
+            "A shared backend (breaker state, window, quota, cache store, switch source) "
+            "raised. function is the backend name. Fields: backend (str kind), operation "
+            "(str), error (str, the exception class). The call then follows on_backend_error."
+        ),
+        "config.changed": (
+            "A named policy was (re)loaded. function is the policy name. Fields: generation (int)."
+        ),
+        "config.rejected": (
+            "A watched policy source could not be read or validated; the current policies "
+            "stay. function is 'policies'. Fields: error (str, the exception class)."
+        ),
+        "backend.recovered": (
+            "A shared backend answered again after backend.error. Fields: backend (str)."
         ),
         "llm.stream_resumed": (
             "A resume_safe stream failed before any output and is reopened. function is "

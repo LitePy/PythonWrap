@@ -25,8 +25,10 @@ from collections.abc import Iterator
 from types import SimpleNamespace
 from typing import Any
 
-from python_wrap import CacheGuard, StreamInterrupted, guard_anthropic, guard_openai
 from python_wrap.adapters import PromptCacheWarning
+from python_wrap.adapters._sdk import CacheGuard, StreamInterrupted
+from python_wrap.adapters.anthropic import guard_anthropic
+from python_wrap.adapters.openai import guard_openai
 from python_wrap.llm import Budget, token_rate_limit
 from python_wrap.testing import fake_clock
 

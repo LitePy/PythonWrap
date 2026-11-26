@@ -12,7 +12,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from python_wrap import ApprovalDenied, ToolNotAllowed, record_step
+from python_wrap.agents import ApprovalDenied, ToolNotAllowed, record_step
 
 Ask = Callable[[list[dict[str, Any]]], Any]
 Dispatch = Callable[[str, str], Any]

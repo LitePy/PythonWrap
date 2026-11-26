@@ -35,11 +35,34 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-Options: `ttl`, `key`, `store`, `cache_none`, `copy_result` and `singleflight`. The
-wrapper exposes `await cache_clear()`, `await cache_delete(*args, **kwargs)` and
+Options: `ttl`, `key`, `store`, `cache_none`, `copy_result`, `singleflight`, `stale_ttl`,
+`cache_exceptions`, `exception_ttl` and `logger`. The wrapper exposes `await cache_clear()`,
+`await cache_delete(*args, **kwargs)` and
 `cache_info()`. `amemoize` raises `TypeError` for non-async functions; use `memoize`
 there. It emits the same `cache.hit` and `cache.miss` events as `memoize`, and honours
 `python_wrap.testing.disable_caching()` and `fake_clock`.
+
+## Stale values and cached exceptions
+
+With `stale_ttl`, an entry older than `ttl` is still served for `stale_ttl` more seconds
+while one background task refreshes it. A failed refresh keeps the stale value, logs a
+WARNING and emits `cache.refresh_failed`; serving stale emits `cache.stale`. Exceptions
+listed in `cache_exceptions` are stored and re-raised on hits for `exception_ttl` seconds
+(default `ttl`). `asyncio.CancelledError` is never cached, and cached exceptions are never
+served stale. A shared store needs a codec that can encode the exception, which JSON
+cannot. `stale_ttl` without `ttl` raises `ValueError`.
+
+```python
+import asyncio
+from python_wrap.async_cache import amemoize
+
+@amemoize(ttl=30, stale_ttl=300)
+async def load_rate(currency: str) -> float:
+    await asyncio.sleep(0.01)
+    return 1.08
+
+assert asyncio.run(load_rate("EUR")) == 1.08
+```
 
 ## Redis with FastAPI
 
@@ -70,6 +93,12 @@ async def get_price(sku: str) -> dict:
 By default errors from Redis are logged and treated as misses (`fail_open=True`); pass
 `fail_open=False` to raise. `clear()` scans only this store's prefix and deletes in
 batches with `UNLINK`.
+
+With several processes sharing the store, add `lock=AsyncRedisLock(client)` so only one
+process computes a missing entry, and `ttl_jitter` so entries do not expire together. Use
+`tags=` with `await ainvalidate_tags(...)` to expire related entries. The options are
+`lock`, `lock_ttl`, `lock_wait`, `tags` and `ttl_jitter`. See
+[shared caches](stores-and-credentials.md#many-processes-stampedes-tags-and-jitter).
 
 ## A synchronous store from async code
 

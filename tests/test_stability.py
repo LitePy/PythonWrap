@@ -96,3 +96,36 @@ def test_retry_parameters_stay_keyword_only():
     assert params["func"].kind is inspect.Parameter.POSITIONAL_ONLY
     keyword_only = {p for p, v in params.items() if v.kind is inspect.Parameter.KEYWORD_ONLY}
     assert {"max_attempts", "delay", "backoff", "max_delay", "jitter", "max_time"} <= keyword_only
+
+
+# Storage formats of the shared backends (docs/project/stability.md#storage-formats):
+# keys written by one release must be read by the next during a rolling deploy.
+VENDOR_DIGEST = "98242f0de98f3332ccf563035651e25696c901eec30632b7f3b471248c62de47"
+
+
+def test_shared_backend_key_formats_are_frozen():
+    from types import SimpleNamespace
+
+    from python_wrap._runtime import digest
+    from python_wrap.caching import _TAG_PREFIX
+    from python_wrap.coordination import RedisLock
+    from python_wrap.idempotency import SqlResultStore
+    from python_wrap.shared import RedisBreakerState, RedisRetryBudget
+    from python_wrap.stores import KEY_FORMAT
+
+    assert digest("vendor") == VENDOR_DIGEST
+    breaker = SimpleNamespace(
+        name="vendor", failure_threshold=5, window=None, recovery_timeout=30,
+        half_open_max_calls=1, success_threshold=1,
+    )  # fmt: skip
+    head = f"python-wrap:breaker:{{{VENDOR_DIGEST}}}"
+    assert RedisBreakerState(None)._args(breaker, "admit", 0, False)[:4] == (
+        3, head, head + ":failures", head + ":slots",
+    )  # fmt: skip
+    assert RedisRetryBudget(None, "vendor").key == f"python-wrap:budget:{{{VENDOR_DIGEST}}}"
+    assert RedisLock(None).prefix == "python-wrap:lease:"
+    assert _TAG_PREFIX == "python-wrap:tag:"
+    assert KEY_FORMAT == "k2:"
+    table = SqlResultStore.ddl("postgresql")[0]
+    for column in ("idem_key", "status", "owner", "result", "expires_at"):
+        assert column in table

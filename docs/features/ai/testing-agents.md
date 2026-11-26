@@ -10,7 +10,7 @@ Combined with `fake_clock`, an agent test that "waits" minutes for backoff finis
 ## A scripted provider
 
 ```python
-from python_wrap import fake_llm
+from python_wrap.llm_testing import fake_llm
 
 llm = fake_llm(["first", "second"], usage=(10, 4))
 
@@ -58,7 +58,7 @@ A string reply is streamed word by word (`chunk_size=` words per chunk). Chunks 
 Delays are `delay=` (per non-streaming call), `first_token_delay=` and `chunk_delay=`. They wait through the package sleep, so under `fake_clock` they advance the fake clock instead of sleeping:
 
 ```python
-from python_wrap import fake_llm
+from python_wrap.llm_testing import fake_llm
 from python_wrap.testing import fake_clock
 
 llm = fake_llm(["one two three"], first_token_delay=2.0, chunk_delay=0.5)
@@ -73,7 +73,7 @@ assert clock.total_slept == 3.5   # 2.0 first token + 3 x 0.5
 For uneven gaps build a `FakeStream` yourself and use it as a reply. `chunk_delay` can be a list with one entry per chunk, and `error=` / `error_after=` raise partway through:
 
 ```python
-from python_wrap import FakeStream, fake_llm
+from python_wrap.llm_testing import FakeStream, fake_llm
 from python_wrap.llm_testing import APITimeoutError
 from python_wrap.testing import fake_clock
 
@@ -115,7 +115,7 @@ The errors are look-alikes for the usual SDK errors. They carry `status_code`, `
 ```python
 import pytest
 
-from python_wrap import fake_llm
+from python_wrap.llm_testing import fake_llm
 from python_wrap.chaos import FaultInjector
 from python_wrap.llm_testing import OverloadedError
 
@@ -137,7 +137,7 @@ Rules can come from the environment for a game day. Name the fault in `llm` and 
 ```python
 import json
 
-from python_wrap import fake_llm
+from python_wrap.llm_testing import fake_llm
 from python_wrap.chaos import FaultInjector
 from python_wrap.llm_testing import RateLimitError
 
@@ -167,7 +167,8 @@ Put the three together: the provider answers, chaos breaks it on a schedule, and
 import json
 import time
 
-from python_wrap import fake_llm, retry
+from python_wrap import retry
+from python_wrap.llm_testing import fake_llm
 from python_wrap.chaos import chaos
 from python_wrap.llm_testing import OverloadedError, RateLimitError
 from python_wrap.testing import fake_clock

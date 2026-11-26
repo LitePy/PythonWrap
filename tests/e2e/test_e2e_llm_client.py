@@ -6,10 +6,9 @@ from typing import Any
 
 import pytest
 
-from python_wrap import fake_llm
 from python_wrap.chaos import chaos
 from python_wrap.llm import Budget, BudgetExceeded, fallback_models, llm_cache
-from python_wrap.llm_testing import OverloadedError, RateLimitError
+from python_wrap.llm_testing import OverloadedError, RateLimitError, fake_llm
 from python_wrap.presets import llm_client
 from python_wrap.testing import FakeClock
 

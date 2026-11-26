@@ -91,6 +91,14 @@ reservations have bounded lifetimes so a crashed probing worker cannot hold a sl
 forever. Late results from an older breaker generation are ignored. `.force_open()`
 and `.reset()` support maintenance and tests. See [circuit breaker](../resilience/circuit-breaker.md).
 
+A closed state read from Redis is trusted for `state_ttl` seconds (default 1.0). Calls
+are then admitted without a round trip, and successes are counted locally and sent in
+one batch every `flush_interval` seconds or `flush_every` calls. Failures, half-open
+trials, `reset()` and `force_open()` always go to Redis; a failure first sends the
+batched successes, so consecutive-failure counting stays exact. The trade: after one
+process opens the breaker, another may admit calls for up to `state_ttl`. Use
+`RedisBreakerState(client, state_ttl=0)` for one round trip per call.
+
 ## Shared bulkheads
 
 <!-- skip -->
@@ -110,6 +118,60 @@ The lease-backed capacity is shared; `max_waiting` bounds the queue in **each pr
 managers work too. For shared async use `async with capacity` so release can await
 backend I/O. Lease expiry has the same [limits](leases-and-idempotency.md#redis-and-sql-backends)
 as a distributed lock; long external work must tolerate a lost lease.
+
+## Async services
+
+`AsyncRedisBreakerState` and `AsyncRedisSemaphore` are the `redis.asyncio` counterparts of
+`RedisBreakerState` and `RedisSemaphore`. They use the same script and keys, so sync and
+async processes share one breaker or capacity pool. A breaker with an async backend
+protects `async def` functions only; calling a sync function through it raises `TypeError`.
+Its `.state` and `.stats` report the last state the store returned in this process. Use
+`await breaker.areset()` and `await breaker.aforce_open()`, because `reset()` and
+`force_open()` raise `TypeError`. `AsyncRedisSemaphore` works with `SharedBulkhead` and
+`Bulkhead(..., backend=...)`; sync `acquire()` raises `TypeError`. Passing an async client
+to `SharedBackends(client=...)`, or `shared=` on a preset or policy, selects these async
+backends. Retry budgets stay per process in that case; pass
+`budget=RedisRetryBudget(sync_client, name)` to share them.
+
+<!-- skip -->
+```python
+import redis.asyncio as aioredis
+
+from python_wrap import CircuitBreaker
+from python_wrap.shared import AsyncRedisBreakerState
+
+breaker = CircuitBreaker(name="vendor", backend=AsyncRedisBreakerState(aioredis.Redis()))
+
+@breaker
+async def fetch_quote(sku: str) -> dict:
+    return await request_quote(sku)
+```
+
+## When the shared store is down
+
+Every shared backend takes the same option, `on_backend_error`:
+
+| Value | Effect |
+|---|---|
+| `"raise"` (default) | The store error propagates. |
+| `"local"` | Use this process's own breaker, window, quota or bulkhead cap until the store answers. |
+| `"allow"` | Admit the call and skip accounting. |
+
+<!-- skip -->
+```python
+from python_wrap import CircuitBreaker, configure
+from python_wrap.shared import RedisBreakerState
+
+configure(backend_errors="local")  # project default for every shared backend
+breaker = CircuitBreaker(name="vendor", backend=RedisBreakerState(client),
+                         retry_backend_after=1.0)  # skip a dead store for 1 s
+```
+
+The first error logs a WARNING and emits `backend.error` (fields `backend`, `operation`, `error`); the next
+success emits `backend.recovered`. While a fallback is active `health.summary()` reports
+`degraded`. Idempotency result stores always raise. `RedisStore` keeps `fail_open`
+(`True` is `"allow"`, `False` is `"raise"`); `RedisSource` takes `on_backend_error` and
+answers its `default`.
 
 See [quotas API](../../api/quotas.md), [shared backends API](../../api/shared.md),
 and [bulkhead API](../../api/bulkhead.md).

@@ -10,7 +10,7 @@ When a model drives a tool-calling loop, four things go wrong in practice:
 `python_wrap.agents` handles all four without an agent framework or a provider SDK. It works with sync and `async def` code.
 
 ```python
-from python_wrap import ToolPolicy, agent_run, tool
+from python_wrap.agents import ToolPolicy, agent_run, tool
 
 sent = []
 
@@ -47,7 +47,7 @@ assert run.steps == 3
 Because the derived key includes the run id, resuming a run with the same `run_id=` replays the calls it already made:
 
 ```python
-from python_wrap import agent_run, tool
+from python_wrap.agents import agent_run, tool
 
 charged = []
 
@@ -69,7 +69,8 @@ The default store is an in-process `MemoryResultStore`. Pass `store=RedisStore(c
 `retry=` and `timeout=` are applied **inside** the deduplication, so a replay never re-runs them:
 
 ```python
-from python_wrap import retry, tool
+from python_wrap import retry
+from python_wrap.agents import tool
 
 attempts = []
 
@@ -103,7 +104,7 @@ assert len(attempts) == 2
 Pass a real `python_wrap.llm.Budget` and entering the run opens that budget's run scope (`budget.run()`), closed on exit. Every LLM call decorated with it inside the run draws on one fresh counter (`per="run"` or `"chain"`; a `per="total"` budget is checked as it stands). Once the counter is used up, the next step raises `RunBudgetExceeded`; a decorated call made directly still raises `llm.BudgetExceeded`.
 
 ```python
-from python_wrap import RunBudgetExceeded, agent_run, record_step
+from python_wrap.agents import RunBudgetExceeded, agent_run, record_step
 from python_wrap.llm import Budget
 
 spend = Budget(tokens=100, per="run")
@@ -121,7 +122,7 @@ with agent_run(budget=spend):
 ```
 
 ```python
-from python_wrap import LoopDetected, agent_run, record_step, tool
+from python_wrap.agents import LoopDetected, agent_run, record_step, tool
 
 @tool(read_only=True)
 def get_weather(city: str) -> str:
@@ -151,7 +152,8 @@ Each run installs a `CancelToken` as the current token. When `max_seconds` pass 
 
 ```python
 import time
-from python_wrap import TimeoutExpired, agent_run, checkpoint, tool
+from python_wrap import TimeoutExpired, checkpoint
+from python_wrap.agents import agent_run, tool
 
 @tool(read_only=True)
 def crawl(pages: int) -> int:
@@ -185,7 +187,7 @@ A token also reports cancelled when an enclosing `timeout` fires.
 | `dry_run=True` | Write tools return their `dry_result=` (a value, or a callable given the tool's arguments) or a falsy `DryRun(tool, arguments)` marker instead of running. Read-only tools still run. |
 
 ```python
-from python_wrap import DryRun, ToolNotAllowed, ToolPolicy, agent_run, tool
+from python_wrap.agents import DryRun, ToolNotAllowed, ToolPolicy, agent_run, tool
 
 @tool(dry_result="would refund")
 def refund(order_id: str) -> str:
@@ -208,7 +210,7 @@ with agent_run(policy=ToolPolicy(dry_run=True, deny=["delete_*"])):
 `requires_approval=True` asks the approver of the policy in effect before every call. The approver is any sync or `async` callable that receives a `ToolCall` (`tool`, `arguments`, `run_id`, `read_only`, `description`) and must return exactly `True`. Everything else denies: `False`, a truthy non-`True` value, an exception (`ApprovalDenied`, with the error as `__cause__`), no answer within `approval_timeout` seconds (`ApprovalTimeout`), or no approver at all. There is no UI dependency: wire the approver to a chat message, a ticket or a CLI prompt.
 
 ```python
-from python_wrap import ApprovalDenied, ToolCall, ToolPolicy, agent_run, tool
+from python_wrap.agents import ApprovalDenied, ToolCall, ToolPolicy, agent_run, tool
 
 def approver(call: ToolCall) -> bool:
     return call.arguments["cents"] < 10_000      # auto-approve small refunds only
@@ -232,7 +234,7 @@ A sync approver runs in a helper thread (so the timeout holds even if it blocks)
 `ToolRegistry` keeps tools by name and dispatches calls the way a model emits them: a name and a JSON object (or a mapping). `call` on an `async def` tool returns a coroutine. Unknown names raise `ToolNotAllowed` (reason `"unknown"`). The registry's `policy` applies to every `call`, and `registry.run()` starts a run of its `guard` with that policy in effect.
 
 ```python
-from python_wrap import RunGuard, ToolPolicy, ToolRegistry
+from python_wrap.agents import RunGuard, ToolPolicy, ToolRegistry
 
 tools = ToolRegistry(policy=ToolPolicy(allow_write=False), guard=RunGuard(max_steps=10))
 
@@ -267,7 +269,8 @@ assert [spec.name for spec in tools.specs()] == ["stock"]
 - **PW017** (warning): a `RunGuard`, an `@agent_run` loop, or a `ToolRegistry` without a guard sets none of `max_steps`, `max_seconds`, `max_repeats`.
 
 ```python
-from python_wrap import RunGuard, ToolRegistry, retry, tool
+from python_wrap import retry
+from python_wrap.agents import RunGuard, ToolRegistry, tool
 from python_wrap.doctor import doctor, explain
 
 @tool(idempotent_key=False, retry=retry(max_attempts=3, on=ConnectionError))

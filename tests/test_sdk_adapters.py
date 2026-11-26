@@ -9,7 +9,7 @@ from types import ModuleType
 
 import pytest
 
-from python_wrap import StepLimitExceeded
+from python_wrap.agents import StepLimitExceeded
 from python_wrap.testing import FakeClock
 
 DIR = Path(__file__).resolve().parent.parent / "examples" / "sdk_adapters"

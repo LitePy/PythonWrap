@@ -12,24 +12,29 @@ retryable status nor on a transport error, because the server may already have a
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import logging
-import random
+import threading
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
 from python_wrap import _core
 from python_wrap.deadline import remaining as _deadline_remaining
-from python_wrap.retry import RetryBudget, http_status, retry, retry_after_header
+from python_wrap.retry import RetryBudget, _compute_delay, http_status, retry, retry_after_header
 
 __all__ = [
     "IDEMPOTENT_METHODS",
     "RETRYABLE_STATUSES",
+    "AsyncPolicyTransport",
     "AsyncRetryTransport",
+    "HttpPolicy",
     "HttpRetryPolicy",
+    "PolicyTransport",
     "RetryTransport",
     "http_retry",
+    "mount_policy",
     "mount_retries",
     "retry_delay",
     "should_retry",
@@ -97,7 +102,7 @@ class HttpRetryPolicy:
     delay: float = 0.5
     backoff: float = 2.0
     max_delay: float = 30.0
-    jitter: float = 0.0
+    jitter: float | str = 0.0
     statuses: frozenset[int] = RETRYABLE_STATUSES
     methods: frozenset[str] = IDEMPOTENT_METHODS
     retry_on: tuple[type[BaseException], ...] = (ConnectionError, TimeoutError, OSError)
@@ -116,8 +121,12 @@ class HttpRetryPolicy:
             raise ValueError(f"backoff must be >= 1, got {self.backoff!r}")
         if not self.max_delay >= 0:
             raise ValueError(f"max_delay must be >= 0, got {self.max_delay!r}")
-        if not self.jitter >= 0:
-            raise ValueError(f"jitter must be >= 0, got {self.jitter!r}")
+        if self.jitter not in ("full", "equal") and (
+            isinstance(self.jitter, str)
+            or not isinstance(self.jitter, (int, float))
+            or self.jitter < 0
+        ):
+            raise ValueError(f"jitter must be >= 0, 'full' or 'equal', got {self.jitter!r}")
         if not self.max_retry_after >= 0:
             raise ValueError(f"max_retry_after must be >= 0, got {self.max_retry_after!r}")
         if self.budget is not None and not isinstance(self.budget, RetryBudget):
@@ -233,14 +242,9 @@ def retry_delay(
         hinted = retry_after_header(response_or_exc)
         if hinted is not None:
             return None if hinted > policy.max_retry_after else hinted
-    try:
-        wait = policy.delay * policy.backoff ** max(attempt - 1, 0)
-    except OverflowError:
-        wait = policy.max_delay
-    wait = min(wait, policy.max_delay)
-    if policy.jitter:
-        wait += random.uniform(0, policy.jitter)
-    return float(wait)
+    return _compute_delay(
+        max(attempt, 1), policy.delay, policy.backoff, policy.max_delay, policy.jitter
+    )
 
 
 class _Run:
@@ -294,6 +298,236 @@ class _Run:
             _core.emit("retry.succeeded", self.name, attempts=attempt)
 
 
+class _ServerError(Exception):
+    """Carries a 5xx response through a circuit breaker so it counts as a failure."""
+
+    def __init__(self, response: Any) -> None:
+        super().__init__(_status_of(response))
+        self.response = response
+
+
+@dataclass(frozen=True)
+class HttpPolicy:
+    """Retries plus a circuit breaker, rate limiter, bulkhead and timeouts for HTTP calls.
+
+    Attributes:
+        retry: The `HttpRetryPolicy` (method safety, backoff, ``Retry-After``).
+        breaker: ``True`` (5 failures, 30 s), a `CircuitBreaker`, or with ``per_host`` a
+            factory ``name -> CircuitBreaker``. 5xx responses and transport errors count
+            as failures; 4xx responses never do.
+        limiter: A `RateLimiter`, or with ``per_host`` a factory ``name -> RateLimiter``.
+            A 429 ``Retry-After`` pauses later calls to that host instead of failing them.
+        bulkhead: A `Bulkhead`, or with ``per_host`` a factory ``name -> Bulkhead``.
+        connect_timeout: Used when the caller set no connect timeout.
+        read_timeout: Used when the caller set no read timeout.
+        per_host: Give every host its own breaker, limiter and bulkhead, named
+            ``http:<host>``, built from the factories.
+        shared: A Redis client or `python_wrap.shared.SharedBackends` for the breakers
+            this policy builds with ``breaker=True`` (default: ``configure(shared=...)``).
+        propagate: Send ``X-Request-ID`` and the remaining ``X-Request-Deadline`` (in
+            milliseconds) on every attempt, so the receiving service sees both.
+
+    Every attempt's timeouts are also shortened to the surrounding `deadline`.
+
+    Example:
+        >>> policy = HttpPolicy(breaker=True, per_host=True)
+        >>> policy.guards("a.example")[0] is policy.guards("a.example")[0]
+        True
+        >>> policy.guards("a.example")[0] is policy.guards("b.example")[0]
+        False
+    """
+
+    retry: HttpRetryPolicy = field(default_factory=HttpRetryPolicy)
+    breaker: Any = None
+    limiter: Any = None
+    bulkhead: Any = None
+    connect_timeout: float | None = None
+    read_timeout: float | None = None
+    per_host: bool = False
+    shared: Any = None
+    propagate: bool = False
+    _hosts: dict[str, tuple[Any, Any, Any]] = field(
+        default_factory=dict, init=False, repr=False, compare=False
+    )
+    _blocked: dict[str, float] = field(default_factory=dict, init=False, repr=False, compare=False)
+    _lock: Any = field(default_factory=threading.Lock, init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        for name in ("connect_timeout", "read_timeout"):
+            value = getattr(self, name)
+            if value is not None and not value > 0:
+                raise ValueError(f"{name} must be > 0, got {value!r}")
+        for name in ("limiter", "bulkhead"):
+            if getattr(self, name) is True:
+                raise ValueError(f"{name}=True is not allowed: pass the object or a factory")
+        if self.per_host:
+            from python_wrap.bulkhead import Bulkhead
+            from python_wrap.circuit import CircuitBreaker
+            from python_wrap.concurrency import RateLimiter
+
+            for name in ("breaker", "limiter", "bulkhead"):
+                value = getattr(self, name)
+                if isinstance(value, (CircuitBreaker, RateLimiter, Bulkhead)):
+                    raise ValueError(
+                        f"per_host=True needs a factory for {name}= (name -> object), "
+                        "not one shared instance"
+                    )
+
+    # -- per-host state ----------------------------------------------------------------
+    def _build(self, kind: str, value: Any, name: str) -> Any:
+        if value is None or (not callable(value) and value is not True):
+            return value
+        if value is True:  # only the breaker has a default
+            from python_wrap.circuit import CircuitBreaker
+            from python_wrap.shared import resolve_shared
+
+            sb = resolve_shared(self.shared)
+            return CircuitBreaker(
+                failure_threshold=5,
+                recovery_timeout=30.0,
+                name=name,
+                backend=None if sb is None else sb.breaker(),
+            )
+        from python_wrap.bulkhead import Bulkhead
+        from python_wrap.circuit import CircuitBreaker
+        from python_wrap.concurrency import RateLimiter
+
+        if isinstance(value, (CircuitBreaker, RateLimiter, Bulkhead)):
+            return value
+        return value(name)
+
+    def guards(self, host: str) -> tuple[Any, Any, Any]:
+        """The ``(breaker, limiter, bulkhead)`` for ``host`` (one set unless ``per_host``)."""
+        key = host if self.per_host else ""
+        with self._lock:
+            found = self._hosts.get(key)
+            if found is None:
+                name = f"http:{host}" if self.per_host else "http"
+                found = tuple(
+                    self._build(kind, getattr(self, kind), name)
+                    for kind in ("breaker", "limiter", "bulkhead")
+                )
+                self._hosts[key] = found
+            return found
+
+    # -- helpers shared by the sync and async paths ------------------------------------
+    def _blocked_wait(self, host: str) -> float:
+        with self._lock:
+            until = self._blocked.get(host, 0.0)
+        wait = until - _core.monotonic()
+        if wait <= 0:
+            return 0.0
+        left = _deadline_remaining()
+        if wait > self.retry.max_retry_after or (left is not None and wait >= left):
+            from python_wrap.errors import RateLimitExceeded
+
+            raise RateLimitExceeded(f"{host} asked clients to wait {wait:.1f}s", retry_after=wait)
+        return wait
+
+    def _note(self, host: str, response: Any) -> None:
+        if self.limiter is None or _status_of(response) != 429:
+            return
+        hinted = retry_after_header(response)
+        if hinted:
+            with self._lock:
+                self._blocked[host] = _core.monotonic() + hinted
+
+    def _request_headers(self, headers: Any) -> None:
+        """Add the request id and the remaining deadline to an outgoing header mapping."""
+        from python_wrap.propagation import outgoing_headers
+
+        for name, value in outgoing_headers().items():
+            headers[name] = value
+
+    def _prepare_httpx(self, request: Any) -> None:
+        extensions = getattr(request, "extensions", None)
+        if isinstance(extensions, dict):
+            current = dict(extensions.get("timeout") or {})
+            for key, default in (("connect", self.connect_timeout), ("read", self.read_timeout)):
+                if current.get(key) is None and default is not None:
+                    current[key] = default
+            left = _deadline_remaining()
+            if left is not None:
+                for key in ("connect", "read", "write", "pool"):
+                    value = current.get(key)
+                    current[key] = (
+                        max(left, 0.001) if value is None else min(value, max(left, 0.001))
+                    )
+            if current:
+                extensions["timeout"] = current
+        if self.propagate:
+            self._request_headers(request.headers)
+
+    def requests_timeout(self, timeout: Any) -> Any:
+        """The ``timeout=`` for a ``requests`` call: defaults filled in, capped by the deadline."""
+        if isinstance(timeout, tuple):
+            connect, read = timeout
+        else:
+            connect = read = timeout
+        connect = self.connect_timeout if connect is None else connect
+        read = self.read_timeout if read is None else read
+        left = _deadline_remaining()
+        if left is not None:
+            left = max(left, 0.001)
+            connect = left if connect is None else min(connect, left)
+            read = left if read is None else min(read, left)
+        return None if connect is None and read is None else (connect, read)
+
+    def call(self, host: str, send: Callable[[], Any]) -> Any:
+        """One attempt through the guards: limiter, bulkhead, breaker, then ``send()``."""
+        breaker, limiter, bulkhead = self.guards(host)
+        if limiter is not None:
+            wait = self._blocked_wait(host)
+            if wait:
+                _core.sleep(wait)
+
+        def counted() -> Any:
+            response = send()
+            status = _status_of(response)
+            if breaker is not None and status is not None and status >= 500:
+                raise _ServerError(response)
+            return response
+
+        try:
+            with contextlib.ExitStack() as stack:
+                if limiter is not None:
+                    stack.enter_context(limiter)
+                if bulkhead is not None:
+                    stack.enter_context(bulkhead)
+                response = breaker.call(counted) if breaker is not None else counted()
+        except _ServerError as exc:
+            response = exc.response
+        self._note(host, response)
+        return response
+
+    async def acall(self, host: str, send: Callable[[], Awaitable[Any]]) -> Any:
+        """`call` for coroutines."""
+        breaker, limiter, bulkhead = self.guards(host)
+        if limiter is not None:
+            wait = self._blocked_wait(host)
+            if wait:
+                await _core.async_sleep(wait)
+
+        async def counted() -> Any:
+            response = await send()
+            status = _status_of(response)
+            if breaker is not None and status is not None and status >= 500:
+                raise _ServerError(response)
+            return response
+
+        try:
+            async with contextlib.AsyncExitStack() as stack:
+                if limiter is not None:
+                    await stack.enter_async_context(limiter)
+                if bulkhead is not None:
+                    await stack.enter_async_context(bulkhead)
+                response = await breaker.call(counted) if breaker is not None else await counted()
+        except _ServerError as exc:
+            response = exc.response
+        self._note(host, response)
+        return response
+
+
 def _close(response: Any) -> None:
     closer = getattr(response, "close", None)
     if callable(closer):
@@ -327,7 +561,75 @@ def _host(url: Any) -> str:
     return ""
 
 
-class RetryTransport:
+class PolicyTransport:
+    """A synchronous httpx transport that applies a whole `HttpPolicy`.
+
+    Retries (method-safe), a circuit breaker, rate limiter and bulkhead (optionally per
+    host), default timeouts shortened to the surrounding deadline, and optional
+    request-id / deadline headers. Wrap any object with httpx's transport interface.
+
+    Args:
+        inner: The transport to wrap, e.g. ``httpx.HTTPTransport()``.
+        policy: The `HttpPolicy`; retries only with its defaults when omitted.
+
+    Example:
+        ```python
+        import httpx
+        from python_wrap.http import HttpPolicy, PolicyTransport
+
+        policy = HttpPolicy(breaker=True, per_host=True, read_timeout=10)
+        client = httpx.Client(transport=PolicyTransport(httpx.HTTPTransport(), policy))
+        ```
+    """
+
+    def __init__(self, inner: Any, policy: HttpPolicy | None = None) -> None:
+        self.inner = inner
+        self.policy: Any = policy or HttpPolicy()
+
+    @property
+    def _full(self) -> HttpPolicy:
+        return self.policy  # type: ignore[no-any-return]
+
+    def _send(self, request: Any) -> Any:
+        self._full._prepare_httpx(request)
+        return self.inner.handle_request(request)
+
+    def handle_request(self, request: Any) -> Any:
+        """Send `request`, applying the policy."""
+        full = self._full
+        host = _host(request.url)
+        run = _Run(full.retry, request.method, request.headers, host)
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                response = full.call(host, lambda: self._send(request))
+            except Exception as exc:
+                wait = run.next_delay(attempt, exc=exc)
+                if wait is None:
+                    raise
+            else:
+                wait = run.next_delay(attempt, response=response)
+                if wait is None:
+                    run.succeeded(attempt)
+                    return response
+                _close(response)
+            _core.sleep(wait)
+
+    def close(self) -> None:
+        """Close the wrapped transport."""
+        closer = getattr(self.inner, "close", None)
+        if callable(closer):
+            closer()
+
+    def __enter__(self) -> PolicyTransport:
+        return self
+
+    def __exit__(self, *exc_info: Any) -> None:
+        self.close()
+
+
+class RetryTransport(PolicyTransport):
     """A synchronous httpx transport wrapper that retries per an `HttpRetryPolicy`.
 
     Wrap any object with httpx's transport interface (``handle_request`` and
@@ -350,70 +652,49 @@ class RetryTransport:
     """
 
     def __init__(self, inner: Any, policy: HttpRetryPolicy | None = None) -> None:
-        self.inner = inner
-        self.policy = policy or HttpRetryPolicy()
+        retry_policy = policy or HttpRetryPolicy()
+        super().__init__(inner, HttpPolicy(retry=retry_policy))
+        self._full_policy = self.policy
+        self.policy = retry_policy
 
-    def handle_request(self, request: Any) -> Any:
-        """Send `request`, retrying as the policy allows."""
-        run = _Run(self.policy, request.method, request.headers, _host(request.url))
-        attempt = 0
-        while True:
-            attempt += 1
-            try:
-                response = self.inner.handle_request(request)
-            except Exception as exc:
-                wait = run.next_delay(attempt, exc=exc)
-                if wait is None:
-                    raise
-            else:
-                wait = run.next_delay(attempt, response=response)
-                if wait is None:
-                    run.succeeded(attempt)
-                    return response
-                _close(response)
-            _core.sleep(wait)
-
-    def close(self) -> None:
-        """Close the wrapped transport."""
-        closer = getattr(self.inner, "close", None)
-        if callable(closer):
-            closer()
+    @property
+    def _full(self) -> HttpPolicy:
+        return self._full_policy  # type: ignore[no-any-return]
 
     def __enter__(self) -> RetryTransport:
         return self
 
-    def __exit__(self, *exc_info: Any) -> None:
-        self.close()
 
-
-class AsyncRetryTransport:
-    """The asyncio counterpart of `RetryTransport` for ``httpx.AsyncClient``.
+class AsyncPolicyTransport:
+    """The asyncio counterpart of `PolicyTransport` for ``httpx.AsyncClient``.
 
     Args:
         inner: The async transport to wrap, e.g. ``httpx.AsyncHTTPTransport()``.
-        policy: The retry policy; defaults apply when omitted.
-
-    Example:
-        ```python
-        import httpx
-        from python_wrap.http import AsyncRetryTransport
-
-        client = httpx.AsyncClient(transport=AsyncRetryTransport(httpx.AsyncHTTPTransport()))
-        ```
+        policy: The `HttpPolicy`; retries only with its defaults when omitted.
     """
 
-    def __init__(self, inner: Any, policy: HttpRetryPolicy | None = None) -> None:
+    def __init__(self, inner: Any, policy: HttpPolicy | None = None) -> None:
         self.inner = inner
-        self.policy = policy or HttpRetryPolicy()
+        self.policy: Any = policy or HttpPolicy()
+
+    @property
+    def _full(self) -> HttpPolicy:
+        return self.policy  # type: ignore[no-any-return]
+
+    async def _send(self, request: Any) -> Any:
+        self._full._prepare_httpx(request)
+        return await self.inner.handle_async_request(request)
 
     async def handle_async_request(self, request: Any) -> Any:
-        """Send `request`, retrying as the policy allows."""
-        run = _Run(self.policy, request.method, request.headers, _host(request.url))
+        """Send `request`, applying the policy."""
+        full = self._full
+        host = _host(request.url)
+        run = _Run(full.retry, request.method, request.headers, host)
         attempt = 0
         while True:
             attempt += 1
             try:
-                response = await self.inner.handle_async_request(request)
+                response = await full.acall(host, lambda: self._send(request))
             except Exception as exc:
                 wait = run.next_delay(attempt, exc=exc)
                 if wait is None:
@@ -434,11 +715,119 @@ class AsyncRetryTransport:
             if isinstance(result, Awaitable):
                 await result
 
-    async def __aenter__(self) -> AsyncRetryTransport:
+    async def __aenter__(self) -> AsyncPolicyTransport:
         return self
 
     async def __aexit__(self, *exc_info: Any) -> None:
         await self.aclose()
+
+
+class AsyncRetryTransport(AsyncPolicyTransport):
+    """The asyncio counterpart of `RetryTransport` for ``httpx.AsyncClient``.
+
+    Args:
+        inner: The async transport to wrap, e.g. ``httpx.AsyncHTTPTransport()``.
+        policy: The retry policy; defaults apply when omitted.
+
+    Example:
+        ```python
+        import httpx
+        from python_wrap.http import AsyncRetryTransport
+
+        client = httpx.AsyncClient(transport=AsyncRetryTransport(httpx.AsyncHTTPTransport()))
+        ```
+    """
+
+    def __init__(self, inner: Any, policy: HttpRetryPolicy | None = None) -> None:
+        retry_policy = policy or HttpRetryPolicy()
+        super().__init__(inner, HttpPolicy(retry=retry_policy))
+        self._full_policy = self.policy
+        self.policy = retry_policy
+
+    @property
+    def _full(self) -> HttpPolicy:
+        return self._full_policy  # type: ignore[no-any-return]
+
+    async def __aenter__(self) -> AsyncRetryTransport:
+        return self
+
+
+def mount_policy(
+    session: Any,
+    policy: HttpPolicy | None = None,
+    prefixes: Iterable[str] = ("http://", "https://"),
+) -> Any:
+    """Mount an adapter that applies a whole `HttpPolicy` on a ``requests.Session``.
+
+    ``requests`` is imported lazily. The adapter subclasses
+    ``requests.adapters.HTTPAdapter`` and wraps its ``send`` with the policy, so it
+    replaces any adapter already mounted on those prefixes. Default timeouts apply when
+    the call passed none (``requests`` has none by default) and are shortened to the
+    surrounding deadline.
+
+    Args:
+        session: A ``requests.Session`` (anything with ``mount``).
+        policy: The `HttpPolicy`; retries only with its defaults when omitted.
+        prefixes: URL prefixes to mount on.
+
+    Returns:
+        The mounted adapter (its ``http_policy`` attribute holds the policy).
+
+    Raises:
+        ImportError: If ``requests`` is not installed.
+
+    Example:
+        ```python
+        import requests
+        from python_wrap.http import HttpPolicy, mount_policy
+
+        session = requests.Session()
+        mount_policy(session, HttpPolicy(breaker=True, per_host=True, read_timeout=10))
+        ```
+    """
+    adapters = importlib.import_module("requests.adapters")
+    base: Any = adapters.HTTPAdapter
+    resolved = policy or HttpPolicy()
+
+    class PolicyAdapter(base):  # type: ignore[misc]
+        http_policy = resolved
+        retry_policy = resolved.retry
+
+        def send(self, request: Any, **kwargs: Any) -> Any:
+            full = self.http_policy
+            host = _host(request.url)
+            run = _Run(full.retry, request.method, request.headers, host)
+
+            def once() -> Any:
+                full_timeout = full.requests_timeout(kwargs.get("timeout"))
+                options = dict(kwargs)
+                if full_timeout is not None:
+                    options["timeout"] = full_timeout
+                if full.propagate:
+                    full._request_headers(request.headers)
+                return super(PolicyAdapter, self).send(request, **options)
+
+            attempt = 0
+            while True:
+                attempt += 1
+                try:
+                    response = full.call(host, once)
+                except Exception as exc:
+                    wait = run.next_delay(attempt, exc=exc)
+                    if wait is None:
+                        raise
+                else:
+                    wait = run.next_delay(attempt, response=response)
+                    if wait is None:
+                        run.succeeded(attempt)
+                        return response
+                    _close(response)
+                _core.sleep(wait)
+
+    adapter = PolicyAdapter()
+    for prefix in prefixes:
+        session.mount(prefix, adapter)
+    return adapter
 
 
 def mount_retries(
@@ -446,19 +835,15 @@ def mount_retries(
     policy: HttpRetryPolicy | None = None,
     prefixes: Iterable[str] = ("http://", "https://"),
 ) -> Any:
-    """Mount a retrying adapter on a ``requests.Session``.
+    """Mount a retrying adapter on a ``requests.Session`` (retries only).
 
-    ``requests`` is imported lazily here. The adapter subclasses
-    ``requests.adapters.HTTPAdapter`` and wraps its ``send`` with the retry loop, so it
-    replaces any adapter already mounted on those prefixes.
+    A thin wrapper over `mount_policy` with ``HttpPolicy(retry=policy)``; the returned
+    adapter's ``retry_policy`` attribute holds the retry policy.
 
     Args:
         session: A ``requests.Session`` (anything with ``mount``).
         policy: The retry policy; defaults apply when omitted.
         prefixes: URL prefixes to mount on.
-
-    Returns:
-        The mounted adapter (its ``retry_policy`` attribute holds the policy).
 
     Raises:
         ImportError: If ``requests`` is not installed.
@@ -472,36 +857,7 @@ def mount_retries(
         mount_retries(session, HttpRetryPolicy(max_attempts=4))
         ```
     """
-    adapters = importlib.import_module("requests.adapters")
-    base: Any = adapters.HTTPAdapter
-    resolved = policy or HttpRetryPolicy()
-
-    class RetryAdapter(base):  # type: ignore[misc]
-        retry_policy = resolved
-
-        def send(self, request: Any, **kwargs: Any) -> Any:
-            run = _Run(self.retry_policy, request.method, request.headers, _host(request.url))
-            attempt = 0
-            while True:
-                attempt += 1
-                try:
-                    response = super().send(request, **kwargs)
-                except Exception as exc:
-                    wait = run.next_delay(attempt, exc=exc)
-                    if wait is None:
-                        raise
-                else:
-                    wait = run.next_delay(attempt, response=response)
-                    if wait is None:
-                        run.succeeded(attempt)
-                        return response
-                    _close(response)
-                _core.sleep(wait)
-
-    adapter = RetryAdapter()
-    for prefix in prefixes:
-        session.mount(prefix, adapter)
-    return adapter
+    return mount_policy(session, HttpPolicy(retry=policy or HttpRetryPolicy()), prefixes)
 
 
 def http_retry(

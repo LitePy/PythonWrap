@@ -8,7 +8,8 @@ import time
 
 import pytest
 
-from python_wrap import (
+from python_wrap import TimeoutExpired, checkpoint, retry
+from python_wrap.agents import (
     AgentRun,
     ApprovalDenied,
     ApprovalTimeout,
@@ -19,20 +20,18 @@ from python_wrap import (
     RunGuard,
     RunTimeout,
     StepLimitExceeded,
-    TimeoutExpired,
     ToolCall,
     ToolNotAllowed,
     ToolPolicy,
     ToolRegistry,
     agent_run,
-    checkpoint,
+    canonical,
     current_run,
     record_step,
-    retry,
+    run_id_var,
     tool,
     tool_spec,
 )
-from python_wrap.agents import canonical, run_id_var
 from python_wrap.doctor import doctor, explain
 from python_wrap.events import listening
 

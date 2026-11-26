@@ -11,6 +11,11 @@ retries per call, latency percentiles, peak memory and thread count. Use it to
 
     python benchmarks/soak.py                       # 20 s, 16 threads
     python benchmarks/soak.py --duration 600 --threads 64 --json > soak.json
+    python benchmarks/soak.py --processes 4 --redis-url redis://localhost:6379/0
+
+With ``--processes N --redis-url URL`` every process shares one Redis circuit breaker and
+one Redis rate limiter (``--limit`` calls per second across all processes) and the report
+adds up the processes. That mode needs the ``redis`` package.
 
 Standard library only. Real time is used (not ``fake_clock``): this is a soak, not a test.
 """
@@ -33,6 +38,7 @@ except ImportError:  # running from a checkout without installing
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from python_wrap import CircuitBreaker, CircuitOpenError, RetryBudget, policy, retry, timeout
+from python_wrap.errors import RateLimitExceeded
 from python_wrap.retry import attempt_history
 
 
@@ -71,18 +77,42 @@ def percentile(values: list[float], q: float) -> float:
     return ordered[min(len(ordered) - 1, int(q / 100 * len(ordered)))]
 
 
-def run(duration: float, threads: int, period: float, seed: int) -> dict[str, Any]:
+def run(
+    duration: float,
+    threads: int,
+    period: float,
+    seed: int,
+    redis_url: str | None = None,
+    limit: int = 1000,
+    run_id: str = "local",
+) -> dict[str, Any]:
     dependency = FlakyDependency(period, seed)
     budget = RetryBudget(ratio=0.2, min_per_second=5)
-    breaker = CircuitBreaker(failure_threshold=10, recovery_timeout=1.0, name="soak")
+    layers: dict[str, Any] = {}
+    backend = None
+    if redis_url is not None:
+        import redis
+
+        from python_wrap.concurrency import RateLimiter
+        from python_wrap.quotas import RedisWindow
+        from python_wrap.shared import RedisBreakerState
+
+        client = redis.Redis.from_url(redis_url)
+        backend = RedisBreakerState(client, prefix=f"python-wrap:soak:{run_id}:")
+        window = RedisWindow(client, f"python-wrap:soak:{run_id}:limit", calls=limit, period=1)
+        layers["limiter"] = RateLimiter(calls=limit, period=1, backend=window)
+    breaker = CircuitBreaker(
+        failure_threshold=10, recovery_timeout=1.0, name="soak", backend=backend
+    )
     protected = policy(
         name="soak",
         breaker=breaker,
         retry=retry(max_attempts=3, delay=0.01, max_delay=0.05, on=ConnectionError, budget=budget),
         timeout=timeout(0.5, use_signals=False),
+        **layers,
     )(dependency)
 
-    stats = {"calls": 0, "ok": 0, "gave_up": 0, "rejected": 0, "attempts": 0}
+    stats = {"calls": 0, "ok": 0, "gave_up": 0, "rejected": 0, "limited": 0, "attempts": 0}
     latencies: list[float] = []
     lock = threading.Lock()
     stop = time.monotonic() + duration
@@ -95,6 +125,8 @@ def run(duration: float, threads: int, period: float, seed: int) -> dict[str, An
                 protected()
             except CircuitOpenError:
                 outcome, attempts = "rejected", 0
+            except RateLimitExceeded:
+                outcome, attempts = "limited", 0
             except ConnectionError as exc:
                 outcome, attempts = "gave_up", len(attempt_history(exc)) or 1
             elapsed = time.perf_counter() - began
@@ -104,7 +136,7 @@ def run(duration: float, threads: int, period: float, seed: int) -> dict[str, An
                 stats["attempts"] += attempts
                 if len(latencies) < 200_000:
                     latencies.append(elapsed)
-            if outcome == "rejected":
+            if outcome in ("rejected", "limited"):
                 time.sleep(0.005)
 
     tracemalloc.start()
@@ -141,6 +173,40 @@ def _breaker_stats(breaker: CircuitBreaker) -> dict[str, Any]:
     return {"failures": stats.failures, "successes": stats.successes, "rejected": stats.rejected}
 
 
+def _run_one(options: dict[str, Any]) -> dict[str, Any]:
+    return run(**options)
+
+
+def run_processes(processes: int, redis_url: str, limit: int, **options: Any) -> dict[str, Any]:
+    """Run the soak in ``processes`` processes sharing one Redis breaker and limiter."""
+    import multiprocessing
+    import uuid
+
+    run_id = uuid.uuid4().hex[:8]
+    jobs = [
+        {**options, "seed": options["seed"] + i, "redis_url": redis_url, "limit": limit,
+         "run_id": run_id}
+        for i in range(processes)
+    ]  # fmt: skip
+    with multiprocessing.get_context("spawn").Pool(processes) as pool:
+        reports = pool.map(_run_one, jobs)
+    total = {
+        key: sum(r[key] for r in reports)
+        for key in ("calls", "ok", "gave_up", "rejected", "limited", "attempts", "dependency_calls")
+    }
+    calls = max(total["calls"], 1)
+    return {
+        "processes": processes,
+        **total,
+        "amplification": round(total["dependency_calls"] / calls, 3),
+        "admitted_per_second": round((calls - total["limited"]) / options["duration"], 1),
+        "limit_per_second": limit,
+        "breaker_states": [r["breaker"]["state"] for r in reports],
+        "traced_memory_growth_kb": [r["traced_memory_growth_kb"] for r in reports],
+        "latency_p99_ms": max(r["latency_ms"]["p99"] for r in reports),
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else None)
     parser.add_argument("--duration", type=float, default=20.0, help="seconds to run")
@@ -148,8 +214,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--period", type=float, default=2.0, help="seconds per phase")
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--json", action="store_true", help="print only the JSON report")
+    parser.add_argument("--processes", type=int, default=1, help="processes (needs --redis-url)")
+    parser.add_argument("--redis-url", default=None, help="share breaker and limiter in Redis")
+    parser.add_argument("--limit", type=int, default=1000, help="shared calls per second")
     args = parser.parse_args(argv)
-    report = run(args.duration, args.threads, args.period, args.seed)
+    if args.processes > 1:
+        if not args.redis_url:
+            parser.error("--processes needs --redis-url")
+        report = run_processes(
+            args.processes, args.redis_url, args.limit,
+            duration=args.duration, threads=args.threads, period=args.period, seed=args.seed,
+        )  # fmt: skip
+        print(json.dumps(report, indent=2, default=str))
+        return 0 if report["amplification"] <= 2.0 else 1
+    report = run(args.duration, args.threads, args.period, args.seed, args.redis_url, args.limit)
     if not args.json:
         print(f"soak: {args.duration:g}s, {args.threads} threads, phase {args.period:g}s")
     print(json.dumps(report, indent=2, default=str))

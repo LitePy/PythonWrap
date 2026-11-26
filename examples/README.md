@@ -10,6 +10,7 @@ $ python examples/resilient_http.py
 | Script | Shows | Recipe |
 | --- | --- | --- |
 | [`resilient_http.py`](resilient_http.py) | Retry with backoff and jitter, circuit breaker per host, rate limit, overall timeout, against a fake transport | [Resilient HTTP client](../docs/cookbook/resilient-http-client.md) |
+| [`request_propagation.py`](request_propagation.py) | Pass a trusted request id and remaining deadline to a downstream HTTP call, offline | [Framework integrations](../docs/cookbook/framework-integrations.md) |
 | [`async_crawler.py`](async_crawler.py) | `map_async`, a `Bulkhead` per host, `race` over mirrors, `run_sync` | [Async crawler](../docs/cookbook/async-crawler.md) |
 | [`web_caching.py`](web_caching.py) | `memoize(ttl=)`, `singleflight` against thundering herds, per-user `rate_limit` (framework-free) | [FastAPI](../docs/cookbook/fastapi.md) |
 | [`service_layer.py`](service_layer.py) | Cached service functions, `transactional` commit/rollback hooks, `deprecate` | [Django](../docs/cookbook/django.md) |

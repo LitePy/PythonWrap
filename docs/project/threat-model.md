@@ -24,9 +24,10 @@ round-trip. Unpickling attacker-controlled bytes executes code, so:
 
 - Anyone able to write keys under the store's prefix can execute code in every process
   that reads the cache. Treat write access to that Redis as equivalent to code execution.
-- For shared or less-trusted Redis instances pass a non-executing codec:
-  `dumps, loads = python_wrap.async_cache.json_codec()` (JSON-shaped results only), or your
-  own signed/encrypted codec (for example HMAC-verify before `loads`).
+- For shared or less-trusted Redis instances pass `json_codec()` from `python_wrap.stores`
+  (JSON-shaped results only), or `signed_pickle_codec(secret)` if Python objects must
+  round-trip. A bad signature is a cache miss and emits `cache.rejected` before unpickling.
+  `configure(cache_codec=...)` sets the project default; `version=` isolates deployments.
 - Keys are hashed (`sha256` of a pickle of the arguments, **dump only**), so a cache key
   never reveals arguments and never loads data.
 
@@ -154,8 +155,9 @@ Regression tests: `tests/test_genai.py`, `tests/test_redaction.py`.
 
 ## Accepted risks
 
-- `RedisStore`/`AsyncRedisStore` default to pickle for backward compatibility. Only use them
-  with a Redis instance you fully trust, or pass `json_codec()`.
+- `RedisStore`/`AsyncRedisStore` still default to pickle for compatibility, with a
+  `DeprecationWarning` when the default is implicit. Use signed pickle or JSON for
+  a shared Redis namespace.
 - `PW_CHAOS` and policy files may name an exception as `module:Class`; resolving it imports
   that module. These are deployment configuration, never request input, and anything that
   is not an exception class is rejected.

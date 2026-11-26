@@ -10,6 +10,7 @@ from collections.abc import Callable
 from typing import Any, TypeVar, cast
 
 from python_wrap import _core, _fork
+from python_wrap._backend import BackendMonitor
 from python_wrap._runtime import digest, seconds
 from python_wrap.errors import RateLimitExceeded
 
@@ -36,6 +37,8 @@ class Quota:
         client: Any = None,
         key: str | None = None,
         ttl: float | str | None = None,
+        on_backend_error: str | None = None,
+        retry_backend_after: float = 1.0,
     ) -> None:
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
             raise ValueError("limit must be nonnegative")
@@ -48,6 +51,18 @@ class Quota:
         self.ttl = None if ttl is None else seconds(ttl)
         self._used = 0
         self._lock = _fork.ForkSafeLock()
+        self._monitor = (
+            None
+            if client is None
+            else BackendMonitor("quota", name, on_backend_error, retry_backend_after)
+        )
+
+    def _take_local(self, amount: int) -> int:
+        with self._lock:
+            if self._used + amount > self.limit:
+                raise QuotaExhausted(self.name)
+            self._used += amount
+            return self.limit - self._used
 
     def take(self, amount: int = 1) -> int:
         """Consume an amount atomically and return remaining allowance."""
@@ -56,11 +71,7 @@ class Quota:
         if self.client is not None and amount > 2**53 - 1:
             raise ValueError("Redis quota amount exceeds exact Lua integer range")
         if self.client is None:
-            with self._lock:
-                if self._used + amount > self.limit:
-                    raise QuotaExhausted(self.name)
-                self._used += amount
-                return self.limit - self._used
+            return self._take_local(amount)
         script = """
 local used=tonumber(redis.call('GET',KEYS[1]) or '0')
 if used+tonumber(ARGV[1])>tonumber(ARGV[2]) then return -1 end
@@ -69,15 +80,21 @@ if tonumber(ARGV[3])>0 and redis.call('PTTL',KEYS[1])<0 then
  redis.call('PEXPIRE',KEYS[1],ARGV[3]) end
 return tonumber(ARGV[2])-used
 """
-        result = int(
-            self.client.eval(
-                script,
-                1,
-                self.key,
-                amount,
-                self.limit,
-                0 if self.ttl is None else math.ceil(self.ttl * 1000),
-            )
+        assert self._monitor is not None
+        monitor = self._monitor
+        result = monitor.call(
+            "take",
+            lambda: int(
+                self.client.eval(
+                    script,
+                    1,
+                    self.key,
+                    amount,
+                    self.limit,
+                    0 if self.ttl is None else math.ceil(self.ttl * 1000),
+                )
+            ),
+            lambda: self._take_local(amount) if monitor.mode == "local" else self.limit,
         )
         if result < 0:
             raise QuotaExhausted(self.name)
@@ -112,13 +129,34 @@ redis.call('ZADD',KEYS[1],now,ARGV[3]); redis.call('PEXPIRE',KEYS[1],ARGV[2]); r
 
 
 class _WindowConfig:
-    def __init__(self, client: Any, key: str, *, calls: int, period: float | str) -> None:
+    def __init__(
+        self,
+        client: Any,
+        key: str,
+        *,
+        calls: int,
+        period: float | str,
+        on_backend_error: str | None = None,
+        retry_backend_after: float = 1.0,
+    ) -> None:
         if isinstance(calls, bool) or not isinstance(calls, int) or calls < 1 or not key:
             raise ValueError("calls must be positive and key nonempty")
         if calls > 2**53 - 1:
             raise ValueError("Redis window capacity exceeds exact Lua integer range")
         self.client, self.key, self.calls = client, key, calls
         self.period = seconds(period)
+        self._monitor = BackendMonitor("window", key, on_backend_error, retry_backend_after)
+        self._local: Any = None
+
+    def _fallback(self, key: Any) -> float:
+        """Serve a call while the store is down: this process's own window, or admit."""
+        if self._monitor.mode != "local":
+            return 0.0
+        if self._local is None:
+            from python_wrap.ratelimit import _SlidingWindow
+
+            self._local = _SlidingWindow(((self.calls, self.period),))
+        return float(self._local.acquire(key))
 
     def _eval_args(self, key: Any) -> tuple[Any, ...]:
         return (
@@ -150,7 +188,11 @@ class RedisWindow(_WindowConfig):
 
     def acquire(self, key: Any = None) -> float:
         """Return zero when admitted, otherwise seconds until the oldest slot expires."""
-        return float(self.client.eval(*self._eval_args(key))) / 1000
+        return self._monitor.call(
+            "acquire",
+            lambda: float(self.client.eval(*self._eval_args(key))) / 1000,
+            lambda: self._fallback(key),
+        )
 
     def clear(self) -> None:
         """Delete every key of this window (all limiter keys)."""
@@ -206,7 +248,11 @@ class AsyncRedisWindow(_WindowConfig):
 
     async def acquire(self, key: Any = None) -> float:
         """Return zero when admitted, otherwise seconds until the oldest slot expires."""
-        return float(await self.client.eval(*self._eval_args(key))) / 1000
+
+        async def run() -> float:
+            return float(await self.client.eval(*self._eval_args(key))) / 1000
+
+        return await self._monitor.acall("acquire", run, lambda: self._fallback(key))
 
     async def clear(self) -> None:
         """Delete every key of this window (all limiter keys)."""
@@ -241,7 +287,7 @@ def shared_rate_limit(
                     wait = await acquire()
                     if wait <= 0:
                         break
-                    if not block:
+                    if not block or _core.no_block.get():
                         raise RateLimitExceeded("shared rate limit exceeded", retry_after=wait)
                     await asyncio.sleep(wait)
                 return await func(*args, **kw)
@@ -263,7 +309,7 @@ def shared_rate_limit(
                 wait = sync_backend.acquire()
                 if wait <= 0:
                     break
-                if not block:
+                if not block or _core.no_block.get():
                     raise RateLimitExceeded("shared rate limit exceeded", retry_after=wait)
                 time.sleep(wait)
             return func(*args, **kw)

@@ -11,6 +11,7 @@ imports the SDK, so ``python-wrap`` keeps zero runtime dependencies and importin
 - `resume_safe`, `ResumableStream`, `StreamInterrupted`, `StreamedToolCall`: reopen
   a stream only while no output has been handed out.
 - `CacheGuard`, `CacheStats`, `PromptCacheWarning`: watch prompt-cache hit rates.
+- `guard_chat_model`, `PythonWrapCallback`: the same rules for LangChain chat models.
 """
 
 from __future__ import annotations
@@ -34,6 +35,11 @@ if TYPE_CHECKING:
         stream_transient,
     )
     from python_wrap.adapters.anthropic import GuardedAnthropic, guard_anthropic
+    from python_wrap.adapters.langchain import (
+        GuardedChatModel,
+        PythonWrapCallback,
+        guard_chat_model,
+    )
     from python_wrap.adapters.openai import GuardedOpenAI, guard_openai
 
 #: Public name -> submodule that defines it (imported on first access).
@@ -54,19 +60,25 @@ _EXPORTS: dict[str, str] = {
     "guard_openai": "openai",
     "GuardedAnthropic": "anthropic",
     "guard_anthropic": "anthropic",
+    "GuardedChatModel": "langchain",
+    "PythonWrapCallback": "langchain",
+    "guard_chat_model": "langchain",
 }
 
 __all__ = [
     "CacheGuard",
     "CacheStats",
     "GuardedAnthropic",
+    "GuardedChatModel",
     "GuardedClient",
     "GuardedOpenAI",
     "PromptCacheWarning",
+    "PythonWrapCallback",
     "ResumableStream",
     "StreamInterrupted",
     "StreamedToolCall",
     "guard_anthropic",
+    "guard_chat_model",
     "guard_openai",
     "no_sdk_retries",
     "resume_safe",

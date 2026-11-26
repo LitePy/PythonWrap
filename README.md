@@ -56,7 +56,7 @@ Unreleased on `main`; see the [CHANGELOG](https://github.com/LitePy/PythonWrap/b
 | --- | --- |
 | Sensible numbers without guessing | `presets.http_client()`, `presets.db_call()`, `presets.third_party_api()` |
 | Catch unsafe stacks before production | `Policy.explain()`, `python -m python_wrap doctor` (unbounded or non-idempotent retries, missing timeouts/budgets, misordering) |
-| HTTP clients | `python_wrap.http`: method-safe retrying transports for httpx, a `requests` adapter, `http_retry` for aiohttp |
+| HTTP clients | `python_wrap.http`: method-safe retrying transports for httpx, a `requests` adapter, `http_retry` for aiohttp; `HttpPolicy(propagate=True)` carries request ids and deadlines |
 | Database errors worth retrying | `db_transient`, `postgres_transient`, `mysql_transient`, `sqlserver_transient` |
 | Async caches that never block the loop | `amemoize` with `AsyncRedisStore` (`redis.asyncio`) |
 | Metrics and dashboards | `PrometheusExporter`, `StatsDExporter`, live `Dashboard`, Grafana sample, `health.summary()` endpoints |
@@ -234,7 +234,7 @@ Everything below is importable from `python_wrap` unless a module is shown. [Cho
 | **Validation** | `enforce_types`, `validate_args`, `check_type` | Check from annotations, with predicates, or with explicit types |
 | **State** | `transactional`, `Transaction`, `current_transaction` | Commit and rollback callbacks, usable as a (async) context manager |
 | | `revert_on_failure` | Restore an object's attributes if the call raises |
-| **Configuration** | `configure`, `configured`, `get_config`, `reset_config` | Project-wide defaults for logger, retry options and redaction |
+| **Configuration** | `configure`, `configured`, `get_config`, `reset_config` | Project-wide defaults for logger, retry options, cache codec and redaction |
 | | `policy`, `Policy` | Named, immutable decorator bundles applied in the recommended order |
 | **Testing** (`python_wrap.testing`) | `fast_mode`, `disable_retries`, `disable_rate_limits`, `disable_caching`, `overrides` | Skip waits, cap retries, switch limiters and caches off |
 | | `FakeClock`, `fake_clock`, `spy`, `spy_on`, `eventually` | Control time, record calls, wait for background work; pytest fixtures `pw_fake_clock`, `pw_fast_mode` |
@@ -262,7 +262,7 @@ calls = 0
     delay=0.01,       # wait before the 2nd attempt
     backoff=2.0,      # then 2x longer each time
     max_delay=0.1,    # but never more than this
-    jitter=0.01,      # plus up to this many random seconds
+    jitter="full",    # spread workers across the entire backoff interval
     max_time=5,       # and never spend longer than this in total
     on=(ConnectionError, TimeoutError),
     retry_if=lambda exc: "temporary" in str(exc),

@@ -145,10 +145,18 @@ def _layer(obj: Any, role: str | None = None) -> Layer:
     if isinstance(obj, Bulkhead):
         return Layer(
             role or "bulkhead",
-            {"max_concurrent": obj.max_concurrent, "shared": obj._shared is not None},
+            {
+                "max_concurrent": obj.max_concurrent,
+                "shared": obj._shared is not None,
+                "timeout": obj.timeout,
+                "max_waiting": obj.max_waiting,
+            },
         )
     if isinstance(obj, RateLimiter):
-        return Layer(role or "limiter", {"name": obj.name, "shared": obj._backend is not None})
+        return Layer(
+            role or "limiter",
+            {"name": obj.name, "shared": obj._backend is not None, "block": obj.block},
+        )
     if isinstance(obj, AdaptiveLimiter):
         return Layer(role or "adaptive", {"name": obj.name, "shared": False})
     if callable(getattr(obj, "cache_info", None)):
@@ -158,9 +166,29 @@ def _layer(obj: Any, role: str | None = None) -> Layer:
 
 def _preemptive(use_signals: Any) -> bool:
     """True if a sync timeout with this ``use_signals`` setting can stop work here."""
-    from python_wrap.concurrency import _signals_usable
+    from python_wrap.timeouts import _signals_usable
 
     return use_signals is not False and _signals_usable()
+
+
+def _loose_parameters(func: Any) -> list[str]:
+    """Parameters whose values may be dicts or sets, or that have no annotation."""
+    import typing
+
+    try:
+        hints = typing.get_type_hints(func)
+        params = inspect.signature(func).parameters
+    except (NameError, TypeError, ValueError):
+        return []
+    loose = []
+    for name, param in params.items():
+        if name in {"self", "cls"} or param.kind in (param.VAR_POSITIONAL, param.VAR_KEYWORD):
+            continue
+        hint = hints.get(name)
+        text = "" if hint is None else repr(hint)
+        if hint is None or any(t in text for t in ("dict", "Dict", "set", "Set", "Mapping")):
+            loose.append(name)
+    return loose
 
 
 def _cache_settings(obj: Any) -> dict[str, Any]:
@@ -179,7 +207,13 @@ def _cache_settings(obj: Any) -> dict[str, Any]:
         or params.get("store") is not None
     )
     self_in_key = bool(names) and names[0] == "self" and not params.get("per_instance")
-    return {"self_in_key": self_in_key and params.get("key") is None, "bounded": bounded}
+    return {
+        "self_in_key": self_in_key and params.get("key") is None,
+        "bounded": bounded,
+        "unstable_key": params.get("store") is not None
+        and params.get("key") is None
+        and _loose_parameters(getattr(obj, "__wrapped__", obj)),
+    }
 
 
 # Layers whose limit is state: without a shared backend each process keeps its own.
@@ -225,6 +259,15 @@ def _check(
     for layer in retries:
         settings = layer.settings
         attempts, max_time = settings.get("max_attempts"), settings.get("max_time")
+        if multiprocess and (settings.get("backoff") == 1 or not settings.get("jitter")):
+            found.append(
+                Finding(
+                    "PW024",
+                    "warning",
+                    "retry across workers has no backoff or jitter: synchronized retries can "
+                    "overload a recovering dependency. Use backoff=2, jitter='full'.",
+                )
+            )
         if attempts is None and max_time is None:
             found.append(
                 Finding(
@@ -285,7 +328,7 @@ def _check(
         layer.settings.get("sync") and _preemptive(layer.settings.get("use_signals"))
         for layer in timeouts
     ):
-        from python_wrap.concurrency import foreign_alarm_state
+        from python_wrap.timeouts import foreign_alarm_state
 
         conflict = foreign_alarm_state()
         if conflict is not None:
@@ -354,6 +397,19 @@ def _check(
                     "every instance it has seen stays alive and its entries are never "
                     "dropped. Use per_instance=True (weak references), set maxsize= or "
                     "ttl=, or pass key= without `self`.",
+                )
+            )
+    for layer in layers:
+        loose = layer.settings.get("unstable_key")
+        if layer.role == "cache" and loose:
+            found.append(
+                Finding(
+                    "PW022",
+                    "warning",
+                    f"memoize with a shared store builds its key from {', '.join(loose)}, "
+                    "which are unannotated or may be dicts or sets. Equal values are keyed "
+                    "the same in every process, but an object without a stable form raises "
+                    "TypeError at call time: pass key= if an argument is not plain data.",
                 )
             )
     found += _check_agents(layers, retries)

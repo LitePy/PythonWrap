@@ -132,7 +132,7 @@ class AgentsGuard:
 
     Example:
         ```python
-        from python_wrap import EffectLedger
+        from python_wrap.agents import EffectLedger
         from python_wrap.adapters.openai_agents import AgentsGuard
 
         guard = AgentsGuard(timeout=10, ledger=EffectLedger(), max_tool_calls=20)

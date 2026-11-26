@@ -28,7 +28,8 @@ from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
 
-from python_wrap import QuotaExhausted, RunGuard, ToolRegistry, retry
+from python_wrap import QuotaExhausted, retry
+from python_wrap.agents import RunGuard, ToolRegistry
 from python_wrap.quotas import Quota
 
 NOTES: dict[str, str] = {}

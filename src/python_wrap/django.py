@@ -8,6 +8,7 @@ from typing import Any
 from python_wrap import _core
 from python_wrap._integration import request_id, scope
 from python_wrap._runtime import seconds
+from python_wrap.propagation import deadline_budget, header_names
 
 __all__ = ["ContextMiddleware"]
 
@@ -29,9 +30,11 @@ class ContextMiddleware:
         *,
         budget: float | None = None,
         user: Callable[[Any], Any] | None = None,
+        trust_deadline_header: bool = False,
     ) -> None:
         budget = None if budget is None else seconds(budget, positive=False)
         self.get_response, self.budget, self.user = get_response, budget, user
+        self.trust_deadline = trust_deadline_header
         import importlib
 
         try:
@@ -47,14 +50,21 @@ class ContextMiddleware:
             async_helpers.markcoroutinefunction(self)
 
     def _scope(self, request: Any) -> Any:
-        fields: dict[str, Any] = {"request_id": request_id(request.META.get("HTTP_X_REQUEST_ID"))}
+        fields: dict[str, Any] = {"request_id": request_id(request.META.get(self._id_meta_key()))}
         if self.user:
             fields["user"] = self.user(request)
         else:
             user = getattr(request, "user", None)
             if user is not None and getattr(user, "is_authenticated", False):
                 fields["user"] = str(user.pk)
-        return scope(fields, self.budget)
+        return scope(fields, self._budget(request))
+
+    def _budget(self, request: Any) -> float | None:
+        meta_key = "HTTP_" + header_names()[1].upper().replace("-", "_")
+        return deadline_budget(request.META.get(meta_key), self.budget, trust=self.trust_deadline)
+
+    def _id_meta_key(self) -> str:
+        return "HTTP_" + header_names()[0].upper().replace("-", "_")
 
     def __call__(self, request: Any) -> Any:
         if self.is_async:
@@ -67,7 +77,7 @@ class ContextMiddleware:
 
         async_helpers = importlib.import_module("asgiref.sync")
         sync_to_async = async_helpers.sync_to_async
-        fields: dict[str, Any] = {"request_id": request_id(request.META.get("HTTP_X_REQUEST_ID"))}
+        fields: dict[str, Any] = {"request_id": request_id(request.META.get(self._id_meta_key()))}
         if self.user:
             if _core.is_async(self.user) or async_helpers.iscoroutinefunction(self.user):
                 fields["user"] = await self.user(request)
@@ -86,5 +96,5 @@ class ContextMiddleware:
             value = await sync_to_async(user_value, thread_sensitive=True)()
             if value is not None:
                 fields["user"] = value
-        with scope(fields, self.budget):
+        with scope(fields, self._budget(request)):
             return await self.get_response(request)

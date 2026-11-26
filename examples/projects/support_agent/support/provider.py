@@ -13,8 +13,14 @@ import re
 from collections.abc import Callable
 from typing import Any
 
-from python_wrap import FakeResponse, fake_llm
-from python_wrap.llm_testing import FakeCall, FakeProvider, ToolCall, make_usage
+from python_wrap.llm_testing import (
+    FakeCall,
+    FakeProvider,
+    FakeResponse,
+    ToolCall,
+    fake_llm,
+    make_usage,
+)
 
 TOKENS_PER_CALL = (120, 30)  # input, output
 

@@ -95,8 +95,11 @@ Default state remains local to each worker. Redis backends are explicit and all 
 must use matching names, prefixes and configuration. Backend connection timeouts remain
 the application's responsibility. A lost/expired lease cannot cancel an external write,
 and idempotency result storage cannot close the crash gap between an external effect
-and recording its result. Use downstream fencing, database uniqueness or transactions
-when that gap matters. [Coordination details](../features/concurrency/leases-and-idempotency.md).
+and recording its result. For external effects such as HTTP calls or emails, use downstream
+fencing, database uniqueness or transactions when that gap matters. For work whose effect
+is a write to the application's own database, `idempotent(store=SqlResultStore(engine), connection=...)`
+records the key in the same transaction, which closes that gap.
+[Coordination details](../features/concurrency/leases-and-idempotency.md).
 
 `max_waiting` on a shared bulkhead is per process; the backend enforces global active
 capacity. Shared bulkhead `active`/`waiting` statistics are local. External cache counts

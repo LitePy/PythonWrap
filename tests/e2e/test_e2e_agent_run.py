@@ -7,9 +7,8 @@ from typing import Any
 
 import pytest
 
-from python_wrap import (
+from python_wrap.agents import (
     ApprovalDenied,
-    AuditTape,
     DryRun,
     RunBudgetExceeded,
     RunGuard,
@@ -17,13 +16,11 @@ from python_wrap import (
     ToolPolicy,
     ToolRegistry,
     agent_run,
-    fake_llm,
     record_step,
-    replay,
-    traced_llm,
-    traced_tool,
 )
+from python_wrap.genai import AuditTape, replay, traced_llm, traced_tool
 from python_wrap.llm import Budget
+from python_wrap.llm_testing import fake_llm
 
 pytestmark = pytest.mark.e2e
 

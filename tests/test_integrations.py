@@ -13,6 +13,45 @@ from python_wrap.logs import current_log_context
 
 
 @pytest.mark.asyncio
+async def test_trusted_deadline_and_request_id_reach_outbound_call():
+    from python_wrap.http import HttpPolicy, PolicyTransport
+    from python_wrap.propagation import set_headers
+
+    class Transport:
+        def handle_request(self, request):
+            return dict(request.headers)
+
+    class Request:
+        def __init__(self):
+            self.method = "GET"
+            self.headers = {}
+            self.extensions = {}
+            self.url = SimpleNamespace(host="downstream")
+
+    async def app(scope, receive, send):
+        transport = PolicyTransport(Transport(), HttpPolicy(propagate=True))
+        send.append(transport.handle_request(Request()))
+
+    set_headers(request_id="X-Trace-Request", deadline="X-Trace-Deadline")
+    try:
+        sent = []
+        middleware = ContextMiddleware(app, budget=30, trust_deadline_header=True)
+        await middleware(
+            {
+                "type": "http",
+                "headers": [(b"x-trace-request", b"r13"), (b"x-trace-deadline", b"1500")],
+            },
+            None,
+            sent,
+        )
+        assert sent[0]["X-Trace-Request"] == "r13"
+        assert 0 < int(sent[0]["X-Trace-Deadline"]) <= 1500
+        assert remaining() is None and current_log_context() == {}
+    finally:
+        set_headers(request_id="X-Request-ID", deadline="X-Request-Deadline")
+
+
+@pytest.mark.asyncio
 async def test_asgi_context_lifetime_deadline_streaming_and_error():
     seen = []
 

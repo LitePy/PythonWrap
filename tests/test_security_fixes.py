@@ -216,3 +216,49 @@ def test_slack_alerts_cannot_mention_channels_or_inject_links():
     text = json.loads(sent[0])["text"]
     assert "<!channel>" not in text and "<!here>" not in text and "<https" not in text
     assert "&lt;!channel&gt;" in text
+
+
+def test_limiter_key_values_from_requests_cannot_grow_memory_without_bound():
+    from types import SimpleNamespace
+
+    from python_wrap.adapters import _sdk, guard_openai
+    from python_wrap.llm import TokenRateLimiter
+
+    class Completions:
+        def create(self, **kwargs):
+            return SimpleNamespace(model="m", usage=None, choices=[])
+
+    class Client:
+        max_retries = 0
+
+        def __init__(self):
+            self.chat = SimpleNamespace(completions=Completions())
+
+        def with_options(self, *, max_retries):
+            return self
+
+    limiter = TokenRateLimiter(tokens_per_minute=10**9)
+    guarded = guard_openai(Client(), limiter=limiter, limiter_key=lambda kw: kw["model"])
+    for i in range(_sdk._MAX_LIMITER_KEYS + 50):
+        guarded.chat.completions.create(model=f"attacker-{i}", messages=[])
+    assert len(guarded._limiters) == _sdk._MAX_LIMITER_KEYS
+
+
+def test_local_tag_tokens_are_bounded_and_never_revive_stale_entries(monkeypatch):
+    from python_wrap import caching
+    from python_wrap.caching import invalidate_tags, memoize
+
+    monkeypatch.setattr(caching, "_MAX_LOCAL_TAGS", 5)
+    calls = []
+
+    @memoize(ttl=60, tags=lambda n: [f"t:{n}"])
+    def value(n):
+        calls.append(n)
+        return len(calls)
+
+    assert value(1) == value(1) == 1
+    invalidate_tags("t:1")
+    for i in range(20):  # floods the local token table past its bound
+        invalidate_tags(f"other:{i}")
+    assert len(caching._local_tags) <= 5
+    assert value(1) == 2  # recomputed: a cleared table must read as stale, not fresh

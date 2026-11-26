@@ -12,9 +12,9 @@ from support.agent import run_agent
 from support.app import build_app
 from support.config import Settings
 
-from python_wrap import replay
 from python_wrap.chaos import chaos
 from python_wrap.doctor import explain
+from python_wrap.genai import replay
 from python_wrap.testing import fake_clock
 
 TICKET = "My order A-1001 arrived broken, I am pat@example.com"

@@ -71,7 +71,7 @@ class ResilientClient:
             return self._breakers[host]
 
     @timeout(30)  # overall deadline, retries included
-    @retry(max_attempts=4, delay=0.2, backoff=2, max_delay=5, jitter=0.1, on=TRANSIENT)
+    @retry(max_attempts=4, delay=0.2, backoff=2, max_delay=5, jitter="full", on=TRANSIENT)
     @rate_limit(5, 1.0, block=True, key=lambda self, url: host_of(url))
     def get(self, url: str) -> Response:
         # CircuitOpenError is not in TRANSIENT, so an open circuit is not retried.

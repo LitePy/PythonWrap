@@ -25,8 +25,14 @@ assert registry.describe("catalog")["catalog"]["generation"] == 2
 
 A decorated function resolves the current configuration at call time. Its compiled stack
 is reused until the registry generation changes. Functions using the same name share
-breaker, limiter and bulkhead state within that generation. A replacement starts a new generation. An already running call keeps
-its old stack. Register settings before the first call, or an unknown name raises KeyError.
+breaker, limiter and bulkhead state within that generation. A changed policy gets a new
+generation. An already running call keeps its old stack. Register settings before the
+first call, or an unknown name raises KeyError.
+
+When a reload keeps the policy name, an open in-process breaker stays open and uses the
+new thresholds. Limiters and bulkheads start fresh in the new generation. Shared breakers
+keep their state in the backend anyway. An unchanged policy keeps its generation and its
+live objects.
 
 `policies.register(...)` and the top-level `@resilient("name")` use the shared registry.
 Supported configuration roles are `fallback`, `cache`, `limiter`, `bulkhead`, `breaker`,
@@ -45,6 +51,56 @@ from python_wrap import policies
 
 # For example: PW_POLICY_CATALOG='{"retry":{"max_attempts":3,"delay":0.5}}'
 policies.load_from_env()
+```
+
+## Live changes from a source
+
+A source is any object with `read()` that returns a mapping. `EnvSource(prefix="PW_POLICY_")`,
+`FileSource(path)` (a JSON file shaped `{"name": {settings}}`) and
+`RedisSource(client, key="python-wrap:policies")` (one JSON string key shared by every
+replica) are built in. `policies.watch(source, interval=30)` reads the source now and then
+every `interval` seconds in a daemon thread. It returns a `Watch` with `poll()` (read once,
+returns True if a change was applied) and `stop()`.
+
+The whole mapping is validated before it is applied. A bad mapping (unreadable, invalid JSON,
+unknown role or name) keeps the current policies and emits `config.rejected` with an `error`
+field. Each applied policy emits `config.changed` with a `generation` field.
+
+Mappings refer to objects by name, never by import path. Exception names go in `"on"` and
+`"exclude"` (`"builtins.ConnectionError"`). Predicate names go in `"retry_if"` and
+`"retry_if_result"` (`"db_transient"`). A string starting with `@` names a backend
+(`"backend": "@default"`). Register your own names on the registry before the watch
+applies them:
+
+<!-- skip -->
+```python
+policies.register_exception("vendor.Timeout", VendorTimeout)
+policies.register_predicate("vendor_transient", fn)
+policies.register_backend("default", RedisWindow(...))
+```
+
+Every builtin exception and the `*_transient` predicates from `python_wrap.predicates` are
+registered already. An unknown name raises ValueError that names the `register_*` call to use.
+
+A watch does not survive a fork. Start it in each worker after the fork.
+
+`python_wrap.health.health.report()` includes a `policies` entry with each policy's
+generation once the global `policies` registry has loaded one.
+
+<!-- skip -->
+```python
+from redis import Redis
+from python_wrap.policies import RedisSource, policies, resilient
+
+policies.register_predicate("vendor_transient", lambda exc: getattr(exc, "status", 0) >= 500)
+watch = policies.watch(RedisSource(Redis()), interval=30)
+# Redis key "python-wrap:policies":
+# {"vendor": {"limiter": {"calls": 50, "period": 1},
+#             "retry": {"max_attempts": 3, "retry_if": "vendor_transient"},
+#             "breaker": {"failure_threshold": 5, "on": ["builtins.ConnectionError"]}}}
+
+@resilient("vendor")
+def fetch_quote(sku: str) -> dict: ...
 ```
 
 ## Composable exception predicates

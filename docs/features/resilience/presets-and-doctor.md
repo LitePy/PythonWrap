@@ -55,6 +55,32 @@ charge_policy = third_party_api("payments", idempotent=False)
 assert "retry" not in [layer.role for layer in charge_policy.explain().layers]
 ```
 
+### Sharing state across worker processes
+
+Without `shared=`, every preset keeps its breaker, limiter, bulkhead and retry budget in
+the current process, so N workers allow N times a rate limit and each one discovers an
+outage alone (`doctor --multiprocess` reports PW012). Pass a Redis client, or set it once
+for the project:
+
+<!-- skip -->
+```python
+from python_wrap import configure
+from python_wrap.presets import third_party_api
+from python_wrap.shared import SharedBackends
+
+payments = third_party_api("payments", calls=30, period=60, max_concurrent=8, shared=client)
+
+configure(shared=client)                      # every preset and PolicyRegistry role
+configure(shared=SharedBackends(client=client, semaphore=my_lease_backend))  # override a layer
+```
+
+Keys derive from the preset name, so two services that use the same name share state on
+purpose. A bare client wraps `RedisBreakerState`, `RedisWindow`, `RedisSemaphore` and the new
+`RedisRetryBudget` (two counters per time slot in one hash, one Lua script). The same
+`RedisRetryBudget` works on its own: `RetryBudget(ratio=0.2, backend=RedisRetryBudget(client, "vendor"))`.
+Layers built this way report `shared=True`, so PW012 stays quiet. Store failures follow
+[`on_backend_error`](../concurrency/shared-limits.md#when-the-shared-store-is-down).
+
 ## Explaining a policy
 
 `Policy.explain()` (or `python_wrap.doctor.explain`) lists the layers outermost first with
@@ -117,6 +143,9 @@ The doctor reports codes PW001 to PW019 (the table lists them by group, not stri
 | PW015 | warning | A generic `retry` without `retry_if=` wraps an LLM call: refusals and bad requests are retried. |
 | PW020 | warning | An `mcp_guard` (or a pydantic-ai / OpenAI Agents SDK tool wrapped by the python-wrap adapters) has no timeout: a hung server or tool holds the agent turn forever. See [Agent frameworks and MCP](../ai/agent-frameworks.md#doctor-checks). |
 | PW021 | warning | An `mcp_guard` retries every tool (`retry=` without `retry_tools=`): a retried MCP write may run twice. |
+| PW022 | warning | `memoize` with a shared store and no `key=` on a function with dict, set or unannotated parameters: equal arguments are keyed alike in every process, but an unsupported object raises `TypeError`. |
+| PW023 | warning | `python_wrap.celery.check_visibility`: a blocking limiter, unbounded bulkhead queue or retry `max_time` can outlive the broker's visibility timeout, so the broker delivers the task again while it still runs. |
+| PW024 | warning | With `--multiprocess`, a retry layer has no backoff or jitter; workers may retry together. Use `backoff=2, jitter="full"`. |
 | PW018 | warning | A python-wrap LLM retry wraps an SDK client (`llm_retry(client=...)`) whose own retries are still on: attempts multiply (4 x 3 = 12). See [OpenAI and Anthropic SDK clients](../ai/openai-anthropic.md#doctor-checks). |
 | PW019 | warning | A retry wraps a streamed LLM call (`stream_timeout`) without `resume_safe`: a replay after output started repeats text and half-done tool calls. |
 

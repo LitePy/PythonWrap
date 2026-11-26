@@ -12,17 +12,9 @@ from typing import Any
 
 import pytest
 
-from python_wrap import (
-    AuditTape,
-    Redactor,
-    ReplayMismatch,
-    _core,
-    genai,
-    retry,
-    traced_llm,
-    traced_tool,
-)
+from python_wrap import _core, genai, retry
 from python_wrap.events import Event, listening
+from python_wrap.genai import AuditTape, Redactor, ReplayMismatch, traced_llm, traced_tool
 from python_wrap.observability import genai_span_attributes
 from python_wrap.testing import fake_clock
 
