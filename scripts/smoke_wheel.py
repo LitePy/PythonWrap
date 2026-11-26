@@ -5,7 +5,7 @@ Usage: python scripts/smoke_wheel.py [--python PYTHON]
 Steps: build one wheel from the checkout (``uv build`` if available, else ``python -m build``),
 create an empty virtual environment, install only that wheel, then run a short script with
 ``python -I`` from a scratch directory so the source tree cannot stand in for anything the
-wheel left out. The script checks the version is a PEP 440 beta, that there are no runtime
+wheel left out. The script checks the version is a PEP 440 release (final or beta), that there are no runtime
 dependencies, that ``py.typed`` and the packaged data files ship, that the command line tools
 work and that a retry, timeout and LLM happy path runs. Standard library only.
 """
@@ -34,7 +34,7 @@ CHECK = textwrap.dedent(
     import python_wrap
 
     version = python_wrap.__version__
-    assert re.fullmatch(r"\\d+\\.\\d+\\.\\d+b\\d+", version), f"not a PEP 440 beta: {version}"
+    assert re.fullmatch(r"\\d+\\.\\d+\\.\\d+(b\\d+)?", version), f"not a PEP 440 release: {version}"
     meta = md.metadata("python-wrap")
     assert meta["Version"] == version
     requires = [r for r in (md.requires("python-wrap") or []) if "extra ==" not in r]
