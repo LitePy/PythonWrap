@@ -248,6 +248,7 @@ class AsyncRedisWindow(_WindowConfig):
 
     async def acquire(self, key: Any = None) -> float:
         """Return zero when admitted, otherwise seconds until the oldest slot expires."""
+
         async def run() -> float:
             return float(await self.client.eval(*self._eval_args(key))) / 1000
 

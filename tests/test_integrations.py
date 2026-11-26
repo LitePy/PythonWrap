@@ -37,9 +37,10 @@ async def test_trusted_deadline_and_request_id_reach_outbound_call():
         sent = []
         middleware = ContextMiddleware(app, budget=30, trust_deadline_header=True)
         await middleware(
-            {"type": "http", "headers": [
-                (b"x-trace-request", b"r13"), (b"x-trace-deadline", b"1500")
-            ]},
+            {
+                "type": "http",
+                "headers": [(b"x-trace-request", b"r13"), (b"x-trace-deadline", b"1500")],
+            },
             None,
             sent,
         )

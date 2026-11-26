@@ -476,9 +476,9 @@ def idempotent_task(
         return f"celery:{task.name}:{stable_digest((args, sorted(kwargs.items())))}"
 
     def decorate(func: Any) -> Any:
-        once = idempotent(
-            key=derive, ttl=ttl, store=store, backend=backend, lease_ttl=lease_ttl
-        )(func)
+        once = idempotent(key=derive, ttl=ttl, store=store, backend=backend, lease_ttl=lease_ttl)(
+            func
+        )
 
         @functools.wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> Any:

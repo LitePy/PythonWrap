@@ -61,9 +61,7 @@ class ContextMiddleware:
 
     def _budget(self, request: Any) -> float | None:
         meta_key = "HTTP_" + header_names()[1].upper().replace("-", "_")
-        return deadline_budget(
-            request.META.get(meta_key), self.budget, trust=self.trust_deadline
-        )
+        return deadline_budget(request.META.get(meta_key), self.budget, trust=self.trust_deadline)
 
     def _id_meta_key(self) -> str:
         return "HTTP_" + header_names()[0].upper().replace("-", "_")

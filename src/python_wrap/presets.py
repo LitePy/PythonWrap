@@ -269,9 +269,7 @@ def third_party_api(
             else RateLimiter(calls, period, name=name)
         ),
         bulkhead=(
-            None
-            if max_concurrent is None
-            else Bulkhead(max_concurrent, name=name, backend=lease)
+            None if max_concurrent is None else Bulkhead(max_concurrent, name=name, backend=lease)
         ),
         breaker=_breaker(sb, failure_threshold=5, recovery_timeout=60.0, on=on, name=name),
         retry=_retry(
@@ -353,12 +351,14 @@ def llm_client(
         name=name,
         limiter=limiters or None,
         breaker=(
-            _BreakerLayer(_llm_breaker(
+            _BreakerLayer(
+                _llm_breaker(
                     failure_threshold=5,
                     recovery_timeout=60.0,
                     name=name,
                     backend=None if sb is None else sb.breaker(),
-                ))
+                )
+            )
             if breaker
             else None
         ),
