@@ -4420,7 +4420,7 @@ Every public name: `python_wrap.__all__` first, then names public only in a subm
 - `python_wrap.WebhookAlerter`: `WebhookAlerter(url: str, *, format: str = 'json', on: Iterable[str | CircuitState] = ('open',), cooldown: float = 300.0, timeout: float = 5.0, sender: Sender | None = None, include_recovery: bool = True, context: Mapping[str, Any] | None = None)`
   Post a chat message when a circuit breaker reaches a chosen state.
 - `python_wrap.__version__`
-  Constant: '0.4.0b2'
+  Constant: '0.4.0'
 - `python_wrap.ainvalidate_tags`: `ainvalidate_tags(*names: str, client: Any = None) -> None`
   `invalidate_tags` for ``redis.asyncio`` clients (amemoize with AsyncRedisStore).
 - `python_wrap.amap_iter`: `amap_iter(fn: Callable[[T], Awaitable[R]], items: Iterable[T] | AsyncIterable[T], *, limit: int, ordered: bool = True, return_exceptions: bool = False) -> AsyncGenerator[Any, None]`
@@ -4820,7 +4820,7 @@ Every public name: `python_wrap.__all__` first, then names public only in a subm
 - `python_wrap.decorators`
   Compatibility module: v0.1 imported everything from ``python_wrap.decorators``.
 - `python_wrap.decorators.__version__`
-  Constant: '0.4.0b2'
+  Constant: '0.4.0'
 - `python_wrap.devtools`
   Developer tools: deprecation warnings, mock data and decorator composition.
 - `python_wrap.django`
